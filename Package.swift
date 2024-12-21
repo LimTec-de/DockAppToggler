@@ -17,6 +17,9 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "DockAppToggler",
+            resources: [
+                .copy("Resources/icon.png")
+            ],
             swiftSettings: [
                 .unsafeFlags(["-enable-bare-slash-regex"])
             ]

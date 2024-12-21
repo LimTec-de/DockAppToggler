@@ -121,6 +121,36 @@ class DockWatcher {
     }
 }
 
+@MainActor
+class StatusBarController {
+    private var statusBar: NSStatusBar
+    private var statusItem: NSStatusItem
+    private var menu: NSMenu
+    
+    init() {
+        statusBar = NSStatusBar.system
+        statusItem = statusBar.statusItem(withLength: NSStatusItem.squareLength)
+        menu = NSMenu()
+        
+        if let button = statusItem.button {
+            if let iconPath = Bundle.module.path(forResource: "icon", ofType: "png"),
+               let image = NSImage(contentsOfFile: iconPath) {
+                image.size = NSSize(width: 18, height: 18)
+                button.image = image
+            }
+        }
+        
+        setupMenu()
+    }
+    
+    private func setupMenu() {
+        menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        statusItem.menu = menu
+    }
+}
+
 print("Starting Dock Watcher...")
+let app = NSApplication.shared
 let watcher = DockWatcher()
-RunLoop.current.run()
+let statusBar = StatusBarController()
+app.run()
