@@ -91,6 +91,6 @@ jobs:
         files: |
           build/DockAppToggler.zip
         draft: true
-        prerelease: true
+        prerelease: false
         tag_name: v${{ env.VERSION }}
         name: Release v${{ env.VERSION }}
