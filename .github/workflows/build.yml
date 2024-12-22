@@ -44,6 +44,8 @@ jobs:
       env:
         TEAM_ID: ${{ secrets.TEAM_ID }}
       run: |
+        security find-identity -v -p codesigning
+        echo "Developer ID Application: $TEAM_ID"
         codesign --force --options runtime --sign "Developer ID Application: $TEAM_ID" build/DockAppToggler.app
 
     - name: Create ZIP Archive
