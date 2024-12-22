@@ -31,7 +31,6 @@ A macOS utility that enhances Dock functionality by allowing you to toggle app v
    ```
 
 3. Edit `fastlane/.env` and update these variables:
-   - `BUNDLE_ID`: Your app's bundle identifier
    - `TEAM_ID`: Your Apple Developer Team ID
 
 4. Build the app:

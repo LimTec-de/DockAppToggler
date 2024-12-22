@@ -45,7 +45,6 @@ jobs:
     
     - name: Build and notarize
       env:
-        BUNDLE_ID: ${{ secrets.BUNDLE_ID }}
         TEAM_ID: ${{ secrets.TEAM_ID }}
         ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
         ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}

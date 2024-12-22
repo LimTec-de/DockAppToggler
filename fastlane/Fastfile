@@ -26,7 +26,7 @@ platform :mac do
     # Notarize the app
     notarize(
       package: "build/DockAppToggler.zip",
-      bundle_id: ENV["BUNDLE_ID"],
+      bundle_id: "com.dockapptoggler.app",
       asc_provider: ENV["TEAM_ID"],
       print_log: true
     )
