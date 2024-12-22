@@ -1,0 +1,50 @@
+default_platform(:mac)
+
+platform :mac do
+  desc "Build, sign and notarize"
+  lane :release do
+    # Build the app
+    build_mac_app(
+      scheme: "DockAppToggler",
+      export_method: "developer-id",
+      build_path: "build",
+      output_directory: "build",
+      clean: true,
+      export_options: {
+        method: "developer-id",
+        compileBitcode: false,
+        uploadBitcode: false
+      }
+    )
+
+    # Zip the app for notarization
+    zip(
+      path: "build/DockAppToggler.app",
+      output_path: "build/DockAppToggler.zip"
+    )
+
+    # Notarize the app
+    notarize(
+      package: "build/DockAppToggler.zip",
+      bundle_id: "com.dockapptoggler.app",
+      asc_provider: ENV["TEAM_ID"],
+      print_log: true
+    )
+
+    # Staple the notarization ticket
+    sh("xcrun stapler staple build/DockAppToggler.app")
+  end
+
+  desc "Just build the app without signing or notarizing"
+  lane :build do
+    build_mac_app(
+      scheme: "DockAppToggler",
+      export_method: "developer-id",
+      build_path: "build",
+      output_directory: "build",
+      clean: true,
+      skip_package_pkg: true,
+      skip_package_dependencies_resolution: false
+    )
+  end
+end 
