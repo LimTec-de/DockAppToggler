@@ -32,6 +32,7 @@ jobs:
         # Import certificate
         echo $BUILD_CERTIFICATE_BASE64 | base64 --decode > certificate.p12
         security import certificate.p12 -k build.keychain -P "$P12_PASSWORD" -T /usr/bin/codesign
+        security find-identity -v
         security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
 
     - name: Build Swift package
@@ -44,7 +45,8 @@ jobs:
       env:
         TEAM_ID: ${{ secrets.TEAM_ID }}
       run: |
-        codesign --force --options runtime --sign "Developer ID Application: $TEAM_ID" build/DockAppToggler.app
+        /usr/bin/codesign --force -s "Developer ID Application: LimTec GmbH ($TEAM_ID)" build/DockAppToggler.app -v
+        #codesign --force --options runtime --sign "Developer ID Application: $TEAM_ID" build/DockAppToggler.app
 
     - name: Create ZIP Archive
       run: |
