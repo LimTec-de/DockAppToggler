@@ -38,15 +38,17 @@ jobs:
     - name: Build Swift package
       run: |
         swift build -c release
-        mkdir -p build/DockAppToggler.app/Contents/MacOS
+        
+        # Create app bundle structure
+        mkdir -p build/DockAppToggler.app/Contents/{MacOS,Resources}
         cp -r .build/release/DockAppToggler build/DockAppToggler.app/Contents/MacOS/
+        cp Info.plist build/DockAppToggler.app/Contents/
         
     - name: Code Sign App
       env:
         TEAM_ID: ${{ secrets.TEAM_ID }}
       run: |
-        /usr/bin/codesign --force -s "Developer ID Application: LimTec GmbH ($TEAM_ID)" build/DockAppToggler.app -v
-        #codesign --force --options runtime --sign "Developer ID Application: $TEAM_ID" build/DockAppToggler.app
+        /usr/bin/codesign --force --options runtime --sign "Developer ID Application: LimTec GmbH ($TEAM_ID)" build/DockAppToggler.app -v --timestamp --deep
 
     - name: Create ZIP Archive
       run: |
