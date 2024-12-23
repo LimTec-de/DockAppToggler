@@ -10,6 +10,7 @@
 @preconcurrency import Foundation
 import AppKit
 import Carbon
+import Sparkle
 
 // MARK: - Type Aliases and Constants
 
@@ -713,11 +714,13 @@ class StatusBarController {
     private var statusBar: NSStatusBar
     private var statusItem: NSStatusItem
     private var menu: NSMenu
+    private let updateController: UpdateController
     
     init() {
         statusBar = NSStatusBar.system
         statusItem = statusBar.statusItem(withLength: NSStatusItem.squareLength)
         menu = NSMenu()
+        updateController = UpdateController()
         
         if let button = statusItem.button {
             if let iconPath = Bundle.module.path(forResource: "icon", ofType: "png"),
@@ -731,8 +734,14 @@ class StatusBarController {
     }
     
     private func setupMenu() {
+        menu.addItem(NSMenuItem(title: "Check for Updates...", action: #selector(checkForUpdates), keyEquivalent: ""))
+        menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         statusItem.menu = menu
+    }
+    
+    @objc private func checkForUpdates() {
+        updateController.checkForUpdates()
     }
 }
 
@@ -746,3 +755,25 @@ let appController = (
     statusBar: StatusBarController()
 )
 app.run()
+
+// Add this new class for handling updates
+@MainActor
+class UpdateController {
+    private let updater: SPUUpdater
+    private let driver: SPUStandardUserDriver
+    
+    init() {
+        driver = SPUStandardUserDriver(hostBundle: Bundle.main, delegate: nil)
+        do {
+            updater = try SPUUpdater(hostBundle: Bundle.main, applicationBundle: Bundle.main, userDriver: driver, delegate: nil)
+            try updater.start()
+            Logger.info("Sparkle updater initialized successfully")
+        } catch {
+            Logger.error("Failed to initialize Sparkle: \(error)")
+        }
+    }
+    
+    func checkForUpdates() {
+        updater.checkForUpdates()
+    }
+}

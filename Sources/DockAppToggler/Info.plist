@@ -15,6 +15,12 @@
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>LSUIElement</key>
+    <!-- Sparkle specific keys -->
+    <key>SUFeedURL</key>
+    <string>https://github.com/LimTec-de/DockAppToggler/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>IAdDZbbjN2C8vfN0U+YM0RQ8G6EC7Ah7ndlfmTWIKjg=</string>
+    <key>SUEnableAutomaticChecks</key>
     <true/>
 </dict>
 </plist> 

@@ -14,14 +14,23 @@ let package = Package(
             targets: ["DockAppToggler"]
         )
     ],
+    dependencies: [
+        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.5.1")
+    ],
     targets: [
         .executableTarget(
             name: "DockAppToggler",
+            dependencies: [
+                .product(name: "Sparkle", package: "Sparkle")
+            ],
             resources: [
-                .copy("Resources/icon.png")
+                .process("Resources")
             ],
             swiftSettings: [
                 .unsafeFlags(["-enable-bare-slash-regex"])
+            ],
+            linkerSettings: [
+                .linkedFramework("Sparkle")
             ]
         )
     ]

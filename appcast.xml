@@ -1,0 +1,20 @@
+<?xml version="1.0" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>DockAppToggler Updates</title>
+        <item>
+            <title>Version 1.0</title>
+            <pubDate>Wed, 09 Jan 2024 12:00:00 +0000</pubDate>
+            <sparkle:version>1.0</sparkle:version>
+            <sparkle:shortVersionString>1.0</sparkle:shortVersionString>
+            <description>Initial release</description>
+            <link>https://github.com/LimTec-de/DockAppToggler/releases/YourApp-1.0.zip</link>
+            <enclosure url="https://github.com/LimTec-de/DockAppToggler/releases/YourApp-1.0.zip"
+                      sparkle:version="1.0"
+                      sparkle:shortVersionString="1.0"
+                      length="1234567"
+                      type="application/octet-stream"
+                      sparkle:edSignature="your_signature_here"/>
+        </item>
+    </channel>
+</rss> 
