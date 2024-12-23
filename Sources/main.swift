@@ -174,6 +174,8 @@ class WindowChooserController: NSWindowController {
     private let windowCallback: (CGWindowID) -> Void
     private var chooserView: WindowChooserView?
     private let targetApp: NSRunningApplication
+    private var trackingArea: NSTrackingArea?
+    private let dismissalMargin: CGFloat = 20.0  // Pixels of margin around the window
     
     init(at point: CGPoint, windows: [WindowInfo], app: NSRunningApplication, callback: @escaping (CGWindowID) -> Void) {
         self.windowCallback = callback
@@ -209,6 +211,7 @@ class WindowChooserController: NSWindowController {
         configureWindow()
         setupVisualEffect(width: width, height: height)
         setupChooserView(windows: windows)
+        setupTrackingArea()
         animateAppearance()
     }
     
@@ -256,6 +259,19 @@ class WindowChooserController: NSWindowController {
         self.chooserView = chooserView
     }
     
+    private func setupTrackingArea() {
+        guard let window = window, let contentView = window.contentView else { return }
+        
+        trackingArea = NSTrackingArea(
+            rect: contentView.bounds,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        
+        contentView.addTrackingArea(trackingArea!)
+    }
+    
     private func animateAppearance() {
         guard let window = window else { return }
         window.alphaValue = 0
@@ -263,6 +279,37 @@ class WindowChooserController: NSWindowController {
             context.duration = Constants.UI.animationDuration
             window.animator().alphaValue = 1
         }
+    }
+    
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        
+        // Add a small delay before closing to prevent accidental dismissals
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            guard let self = self,
+                  let window = self.window,
+                  let mouseLocation = NSEvent.mouseLocation.cgPoint else { return }
+            
+            // Create an expanded frame with margin
+            let expandedFrame = NSRect(
+                x: window.frame.minX - self.dismissalMargin,
+                y: window.frame.minY - self.dismissalMargin,
+                width: window.frame.width + (self.dismissalMargin * 2),
+                height: window.frame.height + (self.dismissalMargin * 2)
+            )
+            
+            // Check if mouse is outside the expanded frame
+            if !expandedFrame.contains(mouseLocation) {
+                self.close()
+            }
+        }
+    }
+}
+
+// Helper extension to convert NSPoint to CGPoint
+extension NSPoint {
+    var cgPoint: CGPoint? {
+        return CGPoint(x: x, y: y)
     }
 }
 
@@ -646,9 +693,12 @@ class DockWatcher {
         // Get window information for inactive apps
         let windows = AccessibilityService.shared.getWindowInfo(for: app)
         
-        // If the app has multiple windows and is not active, show window chooser
-        if windows.count > 1 {
-            Logger.info("Showing window chooser for multiple windows")
+        // Show window chooser if:
+        // - there are multiple windows OR
+        // - there is at least one minimized window (indicated by "(minimized)" in the name)
+        let hasMinimizedWindow = windows.contains { $0.name.contains("(minimized)") }
+        if windows.count > 1 || hasMinimizedWindow {
+            Logger.info("Showing window chooser for \(windows.count) windows (minimized windows present: \(hasMinimizedWindow))")
             showWindowChooser(for: app, at: point, windows: windows)
             return true
         }
