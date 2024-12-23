@@ -233,7 +233,7 @@ class WindowChooserController: NSWindowController {
     private func setupVisualEffect(width: CGFloat, height: CGFloat) {
         guard let window = window else { return }
         let visualEffect = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: width, height: height))
-        visualEffect.material = .dark
+        visualEffect.material = .hudWindow
         visualEffect.state = .active
         visualEffect.wantsLayer = true
         visualEffect.layer?.cornerRadius = Constants.UI.cornerRadius
@@ -286,25 +286,64 @@ class AccessibilityService {
     }
     
     func getWindowInfo(for app: NSRunningApplication) -> [WindowInfo] {
-        let element = AXUIElementCreateApplication(app.processIdentifier)
-        var windowsRef: CFTypeRef?
-        var appWindowsInfo: [WindowInfo] = []
+        // First activate the app to ensure windows are accessible
+        app.activate(options: [.activateIgnoringOtherApps])
         
-        guard AXUIElementCopyAttributeValue(element, Constants.Accessibility.windowsKey, &windowsRef) == .success,
-              let windowList = windowsRef as? [AXUIElement] else {
-            return []
-        }
-        
-        Logger.info("🔍 Found \(windowList.count) windows for \(app.localizedName ?? "Unknown")")
-        
-        for (index, window) in windowList.enumerated() {
-            if let windowInfo = getWindowID(for: window, app: app, index: index) {
-                appWindowsInfo.append(windowInfo)
+        // Try up to 3 times with a small delay
+        for attempt in 1...3 {
+            var appWindowsInfo: [WindowInfo] = []
+            
+            // Use CGWindow API with options to include minimized windows
+            let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements, .optionAll]
+            guard let cgWindows = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[CFString: Any]] else {
+                continue
             }
+            
+            // Sort windows by layer and position to maintain consistent order
+            let sortedWindows = cgWindows.filter { window -> Bool in
+                guard let pid = window[kCGWindowOwnerPID] as? pid_t,
+                      pid == app.processIdentifier,
+                      let layer = window[kCGWindowLayer] as? Int32,
+                      layer == 0 else { // Only normal windows
+                    return false
+                }
+                return true
+            }.sorted { first, second -> Bool in
+                // Sort by window order (lower numbers are more frontmost)
+                let order1 = first[kCGWindowNumber] as? CGWindowID ?? 0
+                let order2 = second[kCGWindowNumber] as? CGWindowID ?? 0
+                return order1 < order2
+            }
+            
+            for window in sortedWindows {
+                if let windowID = window[kCGWindowNumber] as? CGWindowID,
+                   let title = window[kCGWindowName as CFString] as? String,
+                   !title.isEmpty {
+                    // Check if window is minimized
+                    let isMinimized = window[kCGWindowIsOnscreen as CFString] as? Bool == false
+                    let displayTitle = isMinimized ? "\(title) (minimized)" : title
+                    Logger.success("Found window: '\(displayTitle)' with ID: \(windowID)")
+                    appWindowsInfo.append((windowID: windowID, name: displayTitle))
+                }
+            }
+            
+            if !appWindowsInfo.isEmpty {
+                Logger.info("📊 Found \(appWindowsInfo.count) valid windows")
+                
+                // Log the final window list for verification
+                for (index, window) in appWindowsInfo.enumerated() {
+                    Logger.info("Window \(index + 1): '\(window.name)' (ID: \(window.windowID))")
+                }
+                
+                return appWindowsInfo
+            }
+            
+            Logger.warning("Attempt \(attempt): No windows found, retrying...")
+            Thread.sleep(forTimeInterval: 0.1) // Small delay before retry
         }
         
-        Logger.info("📊 Found \(appWindowsInfo.count) windows")
-        return appWindowsInfo
+        Logger.error("Failed to find any windows after 3 attempts")
+        return []
     }
     
     private func getWindowID(for window: AXUIElement, app: NSRunningApplication, index: Int) -> WindowInfo? {
@@ -316,18 +355,18 @@ class AccessibilityService {
         AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleRef)
         let windowTitle = (titleRef as? String) ?? ""
         
-        if result == .success,
-           let numRef = windowIDRef,
-           let number = numRef as? NSNumber {
-            let windowID = number.uint32Value
-            // Use the actual window title, fallback to app name if title is empty
-            let windowName = windowTitle.isEmpty ? "\(app.localizedName ?? "Window") \(index + 1)" : windowTitle
-            Logger.success("Adding window: '\(windowName)' ID: \(windowID)")
-            return (windowID: windowID, name: windowName)
-        } else {
-            Logger.error("Failed to get window ID")
-            return getFallbackWindowID(for: app, index: index)
+        // Skip windows with no ID or empty titles
+        guard result == .success,
+              let numRef = windowIDRef,
+              let number = numRef as? NSNumber,
+              !windowTitle.isEmpty else {
+            return nil
         }
+        
+        let windowID = number.uint32Value
+        let windowName = windowTitle
+        Logger.success("Adding window: '\(windowName)' ID: \(windowID)")
+        return (windowID: windowID, name: windowName)
     }
     
     private func getFallbackWindowID(for app: NSRunningApplication, index: Int) -> WindowInfo? {
@@ -356,42 +395,48 @@ class AccessibilityService {
     }
     
     func raiseWindow(windowID: CGWindowID, for app: NSRunningApplication) {
-        let element = AXUIElementCreateApplication(app.processIdentifier)
-        var windowsRef: CFTypeRef?
+        // First activate the app
+        app.activate(options: [.activateIgnoringOtherApps])
         
-        guard AXUIElementCopyAttributeValue(element, Constants.Accessibility.windowsKey, &windowsRef) == .success,
-              let windowList = windowsRef as? [AXUIElement] else {
+        // Get the window list to find the title for our windowID
+        let options = CGWindowListOption(arrayLiteral: .optionOnScreenOnly)
+        guard let windowList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[CFString: Any]] else {
             return
         }
         
-        // First, hide all windows
+        // Find our window's title
+        var targetTitle: String?
         for window in windowList {
-            AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanTrue)
+            guard let pid = window[kCGWindowOwnerPID] as? pid_t,
+                  pid == app.processIdentifier,
+                  let wid = window[kCGWindowNumber] as? CGWindowID,
+                  wid == windowID,
+                  let title = window[kCGWindowName as CFString] as? String else {
+                continue
+            }
+            targetTitle = title
+            break
         }
         
-        // Then find and show only the selected window
-        for window in windowList {
-            var windowIDRef: CFTypeRef?
-            if AXUIElementCopyAttributeValue(window, Constants.Accessibility.windowIDKey, &windowIDRef) == .success,
-               let windowNumber = (windowIDRef as? NSNumber)?.uint32Value,
-               windowNumber == windowID {
-                Logger.info("Found matching window \(windowID), raising it")
-                
-                // Unminimize the window
-                AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
-                
-                // Activate the app
-                app.activate(options: [.activateIgnoringOtherApps])
-                
-                // Make it the main window
-                AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
-                
-                // Raise it
-                AXUIElementPerformAction(window, Constants.Accessibility.raiseKey)
-                
-                // Focus it
-                AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
-                break
+        guard let windowTitle = targetTitle else { return }
+        Logger.info("Raising window with title: '\(windowTitle)'")
+        
+        // Use AppleScript to raise the specific window by title
+        let script = """
+        tell application "System Events"
+            tell process "\(app.localizedName ?? "")"
+                set frontmost to true
+                delay 0.1
+                perform action "AXRaise" of window "\(windowTitle)"
+            end tell
+        end tell
+        """
+        
+        var error: NSDictionary?
+        if let scriptObject = NSAppleScript(source: script) {
+            scriptObject.executeAndReturnError(&error)
+            if let error = error {
+                Logger.error("Failed to execute AppleScript: \(error)")
             }
         }
     }
