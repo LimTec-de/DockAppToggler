@@ -20,19 +20,19 @@ typealias WindowInfo = (windowID: CGWindowID, name: String)
 enum Constants {
     /// UI-related constants
     enum UI {
-        static let windowWidth: CGFloat = 300
+        static let windowWidth: CGFloat = 200
         static let buttonHeight: CGFloat = 30
-        static let buttonSpacing: CGFloat = 40
-        static let cornerRadius: CGFloat = 6
-        static let windowPadding: CGFloat = 10
+        static let buttonSpacing: CGFloat = 32
+        static let cornerRadius: CGFloat = 10
+        static let windowPadding: CGFloat = 8
         static let animationDuration: TimeInterval = 0.2
         
         // Additional constants for window sizing
-        static let verticalPadding: CGFloat = 10  // Padding at top and bottom of window
+        static let verticalPadding: CGFloat = 4
         
         // Calculate total height needed for a given number of buttons
         static func windowHeight(for buttonCount: Int) -> CGFloat {
-            return CGFloat(buttonCount) * buttonSpacing + verticalPadding * 2
+            return CGFloat(buttonCount) * (buttonHeight + 2) + verticalPadding * 2
         }
     }
     
@@ -123,9 +123,12 @@ class WindowChooserView: NSView {
         button.target = self
         button.action = #selector(buttonClicked(_:))
         button.wantsLayer = true
-        button.layer?.cornerRadius = Constants.UI.cornerRadius
+        button.layer?.cornerRadius = 6
         button.isBordered = false
         button.contentTintColor = .white
+        
+        // Set background color to dark gray
+        button.layer?.backgroundColor = NSColor(calibratedWhite: 0.2, alpha: 0.6).cgColor
     }
     
     private func addHoverEffect(to button: NSButton) {
@@ -153,7 +156,7 @@ class WindowChooserView: NSView {
     private func animateButtonBackground(_ button: NSButton, to color: CGColor?) {
         NSAnimationContext.runAnimationGroup { context in
             context.duration = Constants.UI.animationDuration
-            button.layer?.backgroundColor = color
+            button.layer?.backgroundColor = color ?? NSColor(calibratedWhite: 0.2, alpha: 0.6).cgColor
         }
     }
     
@@ -230,11 +233,17 @@ class WindowChooserController: NSWindowController {
     private func setupVisualEffect(width: CGFloat, height: CGFloat) {
         guard let window = window else { return }
         let visualEffect = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: width, height: height))
-        visualEffect.material = .hudWindow
+        visualEffect.material = .dark
         visualEffect.state = .active
         visualEffect.wantsLayer = true
         visualEffect.layer?.cornerRadius = Constants.UI.cornerRadius
         window.contentView = visualEffect
+        
+        // Add a dark overlay to make it more opaque
+        let overlay = NSView(frame: visualEffect.bounds)
+        overlay.wantsLayer = true
+        overlay.layer?.backgroundColor = NSColor(calibratedWhite: 0, alpha: 0.5).cgColor
+        visualEffect.addSubview(overlay)
     }
     
     private func setupChooserView(windows: [WindowInfo]) {
@@ -346,13 +355,33 @@ class AccessibilityService {
             return
         }
         
+        // First, hide all windows
+        for window in windowList {
+            AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanTrue)
+        }
+        
+        // Then find and show only the selected window
         for window in windowList {
             var windowIDRef: CFTypeRef?
             if AXUIElementCopyAttributeValue(window, Constants.Accessibility.windowIDKey, &windowIDRef) == .success,
                let windowNumber = (windowIDRef as? NSNumber)?.uint32Value,
                windowNumber == windowID {
-                Logger.info("Found matching window, raising it")
+                Logger.info("Found matching window \(windowID), raising it")
+                
+                // Unminimize the window
+                AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+                
+                // Activate the app
+                app.activate(options: [.activateIgnoringOtherApps])
+                
+                // Make it the main window
+                AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+                
+                // Raise it
                 AXUIElementPerformAction(window, Constants.Accessibility.raiseKey)
+                
+                // Focus it
+                AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
                 break
             }
         }
@@ -450,8 +479,9 @@ class DockWatcher {
             
             let chooser = WindowChooserController(at: point, windows: windows) { [weak self] windowID in
                 Logger.info("Selected window with ID: \(windowID)")
-                app.activate(options: [.activateIgnoringOtherApps])
+                // First raise the window
                 AccessibilityService.shared.raiseWindow(windowID: windowID, for: app)
+                // Then clean up the chooser
                 self?.windowChooser = nil
             }
             
