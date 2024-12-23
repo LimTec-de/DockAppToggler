@@ -4,17 +4,24 @@
         <title>DockAppToggler Updates</title>
         <item>
             <title>Version 1.0</title>
-            <pubDate>Wed, 09 Jan 2024 12:00:00 +0000</pubDate>
-            <sparkle:version>1.0</sparkle:version>
+            <pubDate>Mon, 23 Dec 2024 23:16:07 +0100</pubDate>
+            <sparkle:version>1</sparkle:version>
             <sparkle:shortVersionString>1.0</sparkle:shortVersionString>
-            <description>Initial release</description>
-            <link>https://github.com/LimTec-de/DockAppToggler/releases/YourApp-1.0.zip</link>
-            <enclosure url="https://github.com/LimTec-de/DockAppToggler/releases/YourApp-1.0.zip"
-                      sparkle:version="1.0"
-                      sparkle:shortVersionString="1.0"
-                      length="1234567"
-                      type="application/octet-stream"
-                      sparkle:edSignature="your_signature_here"/>
+            <description><![CDATA[
+                <h2>Changes in version 1.0:</h2>
+                <ul>
+                    <li>Latest updates</li>
+                </ul>
+            ]]></description>
+            <link>https://github.com/LimTec-de/DockAppToggler/releases/tag/v1.0</link>
+            <enclosure
+                url="https://github.com/LimTec-de/DockAppToggler/releases/download/v1.0/DockAppToggler_1.0.zip"
+                sparkle:version="1"
+                sparkle:shortVersionString="1.0"
+                length="2984400"
+                type="application/octet-stream"
+                sparkle:edSignature=""
+            />
         </item>
     </channel>
-</rss> 
+</rss>

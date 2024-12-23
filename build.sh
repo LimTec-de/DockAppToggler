@@ -54,7 +54,7 @@ echo "APPL????" > "$CONTENTS_DIR/PkgInfo"
 codesign --force --deep --sign - "$FRAMEWORKS_DIR/Sparkle.framework"
 
 # Enable hardened runtime and sign with entitlements
-codesign --force --deep --entitlements DockAppToggler.entitlements --sign - "$APP_DIR"
+codesign --force --deep --sign - "$APP_DIR"
 
 # Verify the app bundle
 echo "🔍 Verifying app bundle..."
