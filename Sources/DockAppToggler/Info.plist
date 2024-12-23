@@ -15,12 +15,17 @@
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>LSUIElement</key>
+    <true/>
     <!-- Sparkle specific keys -->
     <key>SUFeedURL</key>
-    <string>https://github.com/LimTec-de/DockAppToggler/appcast.xml</string>
+    <string>https://raw.githubusercontent.com/LimTec-de/DockAppToggler/refs/heads/development/appcast.xml?token=GHSAT0AAAAAACZVVMWRVN46OXKI23G4SXBQZ3J2VOQ</string>
     <key>SUPublicEDKey</key>
     <string>IAdDZbbjN2C8vfN0U+YM0RQ8G6EC7Ah7ndlfmTWIKjg=</string>
     <key>SUEnableAutomaticChecks</key>
     <true/>
+    <key>CFBundleIconFile</key>
+    <string>icon.icns</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>DockAppToggler needs to control system events to manage windows.</string>
 </dict>
 </plist> 

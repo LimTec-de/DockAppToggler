@@ -628,10 +628,27 @@ class DockWatcher {
     
     private func startMonitoring() {
         guard AccessibilityService.shared.requestAccessibilityPermissions() else {
+            Logger.error("Failed to start monitoring - accessibility permissions not granted")
+            DispatchQueue.main.async {
+                let alert = NSAlert()
+                alert.messageText = "Accessibility Permission Required"
+                alert.informativeText = "DockAppToggler needs accessibility permissions to monitor Dock clicks. Please grant access in System Settings > Privacy & Security > Accessibility, then restart the app."
+                alert.alertStyle = .warning
+                alert.addButton(withTitle: "Open System Settings")
+                alert.addButton(withTitle: "OK")
+                
+                if alert.runModal() == .alertFirstButtonReturn {
+                    NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+                }
+            }
             return
         }
         
-        let eventMask = CGEventMask(1 << CGEventType.leftMouseDown.rawValue)
+        let eventMask = CGEventMask(
+            (1 << CGEventType.leftMouseDown.rawValue) |
+            (1 << CGEventType.leftMouseUp.rawValue) |
+            (1 << CGEventType.mouseMoved.rawValue)
+        )
         
         // Create a static callback function
         let callback: CGEventTapCallBack = { proxy, type, event, refcon in
@@ -656,7 +673,7 @@ class DockWatcher {
         
         // Change the event tap to be a CGEventTapLocation.cghidEventTap to intercept events earlier
         guard let tap = CGEvent.tapCreate(
-            tap: .cghidEventTap,  // Changed from .cgSessionEventTap to intercept earlier
+            tap: .cgAnnotatedSessionEventTap,  // Changed from .cghidEventTap
             place: .headInsertEventTap,
             options: .defaultTap,
             eventsOfInterest: eventMask,
@@ -679,32 +696,36 @@ class DockWatcher {
     }
     
     private func handleDockClick(at point: CGPoint, clickCount: Int64) -> Bool {
+        Logger.info("Handling click at \(point.x), \(point.y) with count \(clickCount)")
+        
         // First check if we clicked on a Dock item
-        guard let (app, _) = DockService.shared.getClickedDockItem(at: point) else {
+        guard let (app, url) = DockService.shared.getClickedDockItem(at: point) else {
+            Logger.warning("No dock item found at click location")
             return false
         }
         
+        Logger.info("Found dock item: \(app.localizedName ?? "unknown") at \(url)")
+        
         // If the app is active, handle hide/terminate actions immediately
         if app.isActive {
+            Logger.info("App is active, handling action")
             _ = DockService.shared.handleAppAction(app: app, clickCount: clickCount)
-            // Always return true for active apps to prevent Dock from processing the click
             return true
         }
         
         // Get window information for inactive apps
         let windows = AccessibilityService.shared.getWindowInfo(for: app)
+        Logger.info("Found \(windows.count) windows for app")
         
-        // Show window chooser if:
-        // - there are multiple windows OR
-        // - there is at least one minimized window (indicated by "(minimized)" in the name)
+        // Show window chooser if multiple windows or minimized windows exist
         let hasMinimizedWindow = windows.contains { $0.name.contains("(minimized)") }
         if windows.count > 1 || hasMinimizedWindow {
-            Logger.info("Showing window chooser for \(windows.count) windows (minimized windows present: \(hasMinimizedWindow))")
+            Logger.info("Showing window chooser")
             showWindowChooser(for: app, at: point, windows: windows)
             return true
         }
         
-        // Let the Dock handle the click for other cases
+        Logger.info("Letting Dock handle click")
         return false
     }
 }
@@ -749,11 +770,13 @@ class StatusBarController {
 
 Logger.info("Starting Dock App Toggler...")
 let app = NSApplication.shared
+
 // Store references to prevent deallocation
 let appController = (
     watcher: DockWatcher(),
     statusBar: StatusBarController()
 )
+
 app.run()
 
 // Add this new class for handling updates

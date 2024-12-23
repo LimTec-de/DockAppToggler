@@ -1,37 +1,64 @@
 #!/bin/bash
 
-# Exit on error
-set -e
+# Clean previous build
+rm -rf DockAppToggler.app
 
-echo "🏗 Building DockAppToggler..."
-
-# ensure Sparkle is resolved
+# get sparkle framework
 swift package resolve
 
-# Build the executable
-swift build -c release --product DockAppToggler
+# Clean and build
+swift build -c release
 
 # Create app bundle structure
-BUNDLE_DIR="DockAppToggler.app"
-CONTENTS_DIR="$BUNDLE_DIR/Contents"
+APP_NAME="DockAppToggler"
+APP_DIR="$APP_NAME.app"
+CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
+FRAMEWORKS_DIR="$CONTENTS_DIR/Frameworks"
 
 # Create directories
 mkdir -p "$MACOS_DIR"
 mkdir -p "$RESOURCES_DIR"
+mkdir -p "$FRAMEWORKS_DIR"
 
 # Copy executable
-cp .build/release/DockAppToggler "$MACOS_DIR/"
-
-# Copy resources
-cp Sources/DockAppToggler/Resources/* "$RESOURCES_DIR/"
+cp -f ".build/release/$APP_NAME" "$MACOS_DIR/"
 
 # Copy Info.plist
-cp Sources/DockAppToggler/Info.plist "$CONTENTS_DIR/"
+cp -f "Sources/DockAppToggler/Info.plist" "$CONTENTS_DIR/"
 
-echo "✅ Build complete! App bundle created at $BUNDLE_DIR"
+# Copy resources
+cp -f "Sources/DockAppToggler/Resources/icon.icns" "$RESOURCES_DIR/"
 
-# Run the app
-echo "🚀 Launching app..."
-open "$BUNDLE_DIR" 
+# Copy Sparkle framework from SPM cache
+SPARKLE_PATH=$(find .build -name "Sparkle.framework" -type d | head -n 1)
+if [ -n "$SPARKLE_PATH" ]; then
+    echo "📦 Copying Sparkle framework from: $SPARKLE_PATH"
+    cp -R "$SPARKLE_PATH" "$FRAMEWORKS_DIR/"
+else
+    echo "❌ Error: Sparkle framework not found in build directory"
+    exit 1
+fi
+
+# Set permissions
+chmod +x "$MACOS_DIR/$APP_NAME"
+
+# Fix framework references
+install_name_tool -change "@rpath/Sparkle.framework/Versions/B/Sparkle" "@executable_path/../Frameworks/Sparkle.framework/Versions/B/Sparkle" "$MACOS_DIR/$APP_NAME"
+
+# Create PkgInfo file
+echo "APPL????" > "$CONTENTS_DIR/PkgInfo"
+
+# Sign the Sparkle framework first
+codesign --force --deep --sign - "$FRAMEWORKS_DIR/Sparkle.framework"
+
+# Enable hardened runtime and sign with entitlements
+codesign --force --deep --entitlements DockAppToggler.entitlements --sign - "$APP_DIR"
+
+# Verify the app bundle
+echo "🔍 Verifying app bundle..."
+codesign -vv --deep --strict "$APP_DIR"
+otool -L "$MACOS_DIR/$APP_NAME"
+
+echo "✅ App bundle created at $APP_DIR"
