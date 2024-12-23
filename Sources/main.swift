@@ -118,17 +118,18 @@ class WindowChooserView: NSView {
     
     private func configureButton(_ button: NSButton, title: String, tag: Int) {
         button.title = title
-        button.bezelStyle = .rounded
+        button.bezelStyle = .inline
         button.tag = tag
         button.target = self
         button.action = #selector(buttonClicked(_:))
         button.wantsLayer = true
-        button.layer?.cornerRadius = 6
+        
         button.isBordered = false
+        button.font = .menuFont(ofSize: 13)
         button.contentTintColor = .white
         
-        // Set background color to dark gray
-        button.layer?.backgroundColor = NSColor(calibratedWhite: 0.2, alpha: 0.6).cgColor
+        button.contentTintColor = .labelColor
+        button.setButtonType(.momentaryLight)
     }
     
     private func addHoverEffect(to button: NSButton) {
@@ -143,20 +144,21 @@ class WindowChooserView: NSView {
     
     override func mouseEntered(with event: NSEvent) {
         if let button = event.trackingArea?.owner as? NSButton {
-            animateButtonBackground(button, to: NSColor.selectedControlColor.cgColor)
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = Constants.UI.animationDuration
+                button.contentTintColor = .selectedMenuItemTextColor
+                button.layer?.backgroundColor = NSColor.selectedMenuItemColor.cgColor
+            }
         }
     }
     
     override func mouseExited(with event: NSEvent) {
         if let button = event.trackingArea?.owner as? NSButton {
-            animateButtonBackground(button, to: nil)
-        }
-    }
-    
-    private func animateButtonBackground(_ button: NSButton, to color: CGColor?) {
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = Constants.UI.animationDuration
-            button.layer?.backgroundColor = color ?? NSColor(calibratedWhite: 0.2, alpha: 0.6).cgColor
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = Constants.UI.animationDuration
+                button.contentTintColor = .labelColor
+                button.layer?.backgroundColor = .clear
+            }
         }
     }
     
@@ -179,33 +181,23 @@ class WindowChooserController: NSWindowController {
         let width = Constants.UI.windowWidth
         
         let screen = NSScreen.main ?? NSScreen.screens[0]
-        let adjustedX = max(Constants.UI.windowPadding, min(point.x - width/2, screen.frame.width - width - Constants.UI.windowPadding))
         
-        // Convert CG coordinates (0 at bottom) to NS coordinates (0 at top)
-        let nsY = screen.frame.height - point.y
+        // Keep x position aligned with the Dock icon click
+        let adjustedX = max(Constants.UI.windowPadding, 
+                           min(point.x - width/2, 
+                               screen.frame.width - width - Constants.UI.windowPadding))
         
-        // Calculate Y position - show above click point if near bottom of screen
-        let spaceBelow = point.y - Constants.UI.windowPadding
-        let spaceNeeded = height + Constants.UI.windowPadding
+        // Position above the Dock (Dock is at the bottom of the screen)
+        let dockHeight: CGFloat = 70 // Approximate Dock height
+        let adjustedY = dockHeight + Constants.UI.windowPadding
         
-        let adjustedY: CGFloat
-        if spaceBelow < spaceNeeded {
-            // Not enough space below, position above click point
-            adjustedY = nsY + height + Constants.UI.windowPadding
-        } else {
-            // Enough space below, position below click point
-            adjustedY = nsY - height - Constants.UI.windowPadding
-        }
+        Logger.info("Positioning window chooser at x: \(adjustedX), y: \(adjustedY) (click at: \(point.x), \(point.y))")
         
-        // Ensure the window stays within screen bounds
-        let finalY = min(screen.frame.height - Constants.UI.windowPadding, 
-                        max(height + Constants.UI.windowPadding, adjustedY))
-        
-        let frame = NSRect(x: adjustedX, y: finalY, width: width, height: height)
+        let frame = NSRect(x: adjustedX, y: adjustedY, width: width, height: height)
         
         let window = NSWindow(
             contentRect: frame,
-            styleMask: [.borderless],
+            styleMask: [],
             backing: .buffered,
             defer: false
         )
@@ -226,24 +218,22 @@ class WindowChooserController: NSWindowController {
         guard let window = window else { return }
         window.backgroundColor = .clear
         window.isOpaque = false
-        window.hasShadow = true
+        window.hasShadow = false
         window.level = .popUpMenu
+        window.appearance = NSAppearance(named: .vibrantDark)
+        window.contentView?.wantsLayer = true
+        window.contentView?.layer?.cornerRadius = 10
+        window.contentView?.layer?.masksToBounds = true
     }
     
     private func setupVisualEffect(width: CGFloat, height: CGFloat) {
         guard let window = window else { return }
         let visualEffect = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: width, height: height))
-        visualEffect.material = .hudWindow
+        visualEffect.material = .menu
         visualEffect.state = .active
         visualEffect.wantsLayer = true
-        visualEffect.layer?.cornerRadius = Constants.UI.cornerRadius
+        visualEffect.layer?.cornerRadius = 10
         window.contentView = visualEffect
-        
-        // Add a dark overlay to make it more opaque
-        let overlay = NSView(frame: visualEffect.bounds)
-        overlay.wantsLayer = true
-        overlay.layer?.backgroundColor = NSColor(calibratedWhite: 0, alpha: 0.5).cgColor
-        visualEffect.addSubview(overlay)
     }
     
     private func setupChooserView(windows: [WindowInfo]) {
