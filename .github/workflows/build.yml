@@ -1,10 +1,10 @@
 name: Build and Release
 
 on:
-  workflow_dispatch:
   push:
-    branches:
-      - release
+    tags:
+      - 'v*'
+  workflow_dispatch:
 
 jobs:
   build:
@@ -86,11 +86,10 @@ jobs:
         zip -r DockAppToggler.zip DockAppToggler.app
     
     - name: Create Release
+      if: startsWith(github.ref, 'refs/tags/')
       uses: softprops/action-gh-release@v1
       with:
         files: |
           build/DockAppToggler.zip
         draft: true
         prerelease: false
-        tag_name: v${{ env.VERSION }}
-        name: Release v${{ env.VERSION }}

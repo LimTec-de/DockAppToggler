@@ -5,7 +5,6 @@ import PackageDescription
 
 let package = Package(
     name: "DockAppToggler",
-    version: "1.0.0",
     platforms: [
         .macOS(.v13)
     ],

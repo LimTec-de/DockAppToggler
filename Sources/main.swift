@@ -18,21 +18,7 @@ class DockWatcher {
         return app.isActive
     }
     
-    private func handleWindows(_ app: NSRunningApplication) -> Bool {
-        // Check if app is active
-        if isAppActive(app) {
-            // If app is active, hide it
-            print("👻 Hiding app: \(app.localizedName ?? "Unknown")")
-            _ = app.hide()
-            return true // Indicate we handled it and should consume the event
-        } else {
-            // If app wasn't active, let Dock handle activation
-            print("⬆️ Letting Dock activate: \(app.localizedName ?? "Unknown")")
-            return false // Let the event pass through to the Dock
-        }
-    }
-    
-    private func handleDockClick(at point: CGPoint) -> Bool {
+    private func handleDockClick(at point: CGPoint, clickCount: Int64) -> Bool {
         // Find Dock process
         guard let dockApp = workspace.runningApplications.first(where: { $0.bundleIdentifier == "com.apple.dock" }) else {
             return false
@@ -57,7 +43,22 @@ class DockWatcher {
                     if let bundle = Bundle(url: url),
                        let bundleId = bundle.bundleIdentifier,
                        let app = workspace.runningApplications.first(where: { $0.bundleIdentifier == bundleId }) {
-                        handled = handleWindows(app)
+                        if isAppActive(app) {
+                            if clickCount == 2 {
+                                // Double click on active app: terminate
+                                print("🚫 Double-click detected, terminating app: \(app.localizedName ?? "Unknown")")
+                                _ = app.terminate()
+                                handled = true
+                            } else {
+                                // Single click on active app: hide
+                                print("👻 Single-click detected, hiding app: \(app.localizedName ?? "Unknown")")
+                                _ = app.hide()
+                                handled = true
+                            }
+                        } else {
+                            print("⬆️ Letting Dock handle click: \(app.localizedName ?? "Unknown")")
+                            handled = false
+                        }
                     }
                 }
             }
@@ -91,10 +92,11 @@ class DockWatcher {
                 
                 let watcher = Unmanaged<DockWatcher>.fromOpaque(refcon!).takeUnretainedValue()
                 let location = event.location
+                let clickCount = event.getIntegerValueField(.mouseEventClickState)
                 
-                // If we handled an active app click, consume the event
-                if watcher.handleDockClick(at: location) {
-                    return nil // Consume the event when we hide an active app
+                // If we handled the click (either hide or terminate), consume the event
+                if watcher.handleDockClick(at: location, clickCount: clickCount) {
+                    return nil
                 }
                 
                 return Unmanaged.passRetained(event)
