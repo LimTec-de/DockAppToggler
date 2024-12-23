@@ -147,7 +147,7 @@ class WindowChooserView: NSView {
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = Constants.UI.animationDuration
                 button.contentTintColor = .selectedMenuItemTextColor
-                button.layer?.backgroundColor = NSColor.selectedMenuItemColor.cgColor
+                button.layer?.backgroundColor = NSColor(white: 1.0, alpha: 0.15).cgColor
             }
         }
     }
@@ -173,9 +173,11 @@ class WindowChooserView: NSView {
 class WindowChooserController: NSWindowController {
     private let windowCallback: (CGWindowID) -> Void
     private var chooserView: WindowChooserView?
+    private let targetApp: NSRunningApplication
     
-    init(at point: CGPoint, windows: [WindowInfo], callback: @escaping (CGWindowID) -> Void) {
+    init(at point: CGPoint, windows: [WindowInfo], app: NSRunningApplication, callback: @escaping (CGWindowID) -> Void) {
         self.windowCallback = callback
+        self.targetApp = app
         
         let height = Constants.UI.windowHeight(for: windows.count)
         let width = Constants.UI.windowWidth
@@ -219,7 +221,7 @@ class WindowChooserController: NSWindowController {
         window.backgroundColor = .clear
         window.isOpaque = false
         window.hasShadow = false
-        window.level = .popUpMenu
+        window.level = .floating
         window.appearance = NSAppearance(named: .vibrantDark)
         window.contentView?.wantsLayer = true
         window.contentView?.layer?.cornerRadius = 10
@@ -239,8 +241,16 @@ class WindowChooserController: NSWindowController {
     private func setupChooserView(windows: [WindowInfo]) {
         guard let contentView = window?.contentView else { return }
         let chooserView = WindowChooserView(windows: windows) { [weak self] windowID in
-            self?.windowCallback(windowID)
-            self?.close()
+            guard let self = self else { return }
+            Logger.info("Selected window with ID: \(windowID)")
+            // First raise the window
+            AccessibilityService.shared.raiseWindow(windowID: windowID, for: self.targetApp)
+            // Hide other windows individually
+            for window in windows where window.windowID != windowID {
+                AccessibilityService.shared.hideWindow(windowID: window.windowID, for: self.targetApp)
+            }
+            // Close the chooser window
+            self.close()
         }
         contentView.addSubview(chooserView)
         self.chooserView = chooserView
@@ -430,6 +440,33 @@ class AccessibilityService {
             }
         }
     }
+    
+    func hideWindow(windowID: CGWindowID, for app: NSRunningApplication) {
+        // Create AX UI element for the application
+        let axApp = AXUIElementCreateApplication(app.processIdentifier)
+        
+        // Get all windows
+        var windowsRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(axApp, Constants.Accessibility.windowsKey, &windowsRef) == .success,
+              let windows = windowsRef as? [AXUIElement] else {
+            Logger.error("Failed to get windows from AX UI element")
+            return
+        }
+        
+        // Find and minimize the matching window
+        for window in windows {
+            var windowIDRef: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(window, Constants.Accessibility.windowIDKey, &windowIDRef) == .success,
+                  let numRef = windowIDRef as? NSNumber,
+                  numRef.uint32Value == windowID else {
+                continue
+            }
+            
+            // Perform minimize action
+            AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, true as CFTypeRef)
+            break
+        }
+    }
 }
 
 // MARK: - Dock Service
@@ -521,16 +558,23 @@ class DockWatcher {
         DispatchQueue.main.async { [weak self] in
             Logger.info("Showing window chooser at \(point.x), \(point.y)")
             
-            let chooser = WindowChooserController(at: point, windows: windows) { [weak self] windowID in
-                Logger.info("Selected window with ID: \(windowID)")
-                // First raise the window
-                AccessibilityService.shared.raiseWindow(windowID: windowID, for: app)
-                // Then clean up the chooser
-                self?.windowChooser = nil
-            }
+            let chooser = WindowChooserController(
+                at: point,
+                windows: windows,
+                app: app,
+                callback: { windowID in
+                    Logger.info("Selected window with ID: \(windowID)")
+                    // First raise the window
+                    AccessibilityService.shared.raiseWindow(windowID: windowID, for: app)
+                    // Hide other windows
+                    for window in windows where window.windowID != windowID {
+                        app.hide()
+                    }
+                }
+            )
             
             self?.windowChooser = chooser
-            chooser.showWindow(nil)
+            chooser.window?.makeKeyAndOrderFront(nil)
         }
     }
     
