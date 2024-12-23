@@ -43,6 +43,18 @@ class DockWatcher {
                     if let bundle = Bundle(url: url),
                        let bundleId = bundle.bundleIdentifier,
                        let app = workspace.runningApplications.first(where: { $0.bundleIdentifier == bundleId }) {
+                        // Check for multiple windows
+                        let appWindows = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[CFString: Any]] ?? []
+                        let windowCount = appWindows.filter { 
+                            ($0[kCGWindowOwnerPID] as? pid_t) == app.processIdentifier &&
+                            // Only count windows that are not desktop elements
+                            ($0[kCGWindowLayer] as? Int32 ?? 0) == kCGNormalWindowLevel
+                        }.count
+                        
+                        if windowCount > 1 {
+                            print("🪟 App with multiple windows (\(windowCount)): \(app.localizedName ?? "Unknown")")
+                        }
+                        
                         if isAppActive(app) {
                             if clickCount == 2 {
                                 // Double click on active app: terminate
