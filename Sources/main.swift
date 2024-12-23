@@ -1,19 +1,92 @@
-// The Swift Programming Language
-// https://docs.swift.org/swift-book
+/// DockAppToggler: A macOS utility that enhances Dock functionality by providing window management
+/// and app control features through Dock icon interactions.
+///
+/// Features:
+/// - Window selection for apps with multiple windows
+/// - Single-click to hide active apps
+/// - Double-click to terminate active apps
+/// - Modern UI with hover effects and animations
 
 @preconcurrency import Foundation
 import AppKit
 import Carbon
 
+// MARK: - Type Aliases and Constants
+
+/// Represents information about a window, including its ID and display name
+typealias WindowInfo = (windowID: CGWindowID, name: String)
+
+/// Application-wide constants
+enum Constants {
+    /// UI-related constants
+    enum UI {
+        static let windowWidth: CGFloat = 300
+        static let buttonHeight: CGFloat = 30
+        static let buttonSpacing: CGFloat = 40
+        static let cornerRadius: CGFloat = 6
+        static let windowPadding: CGFloat = 10
+        static let animationDuration: TimeInterval = 0.2
+        
+        // Additional constants for window sizing
+        static let verticalPadding: CGFloat = 10  // Padding at top and bottom of window
+        
+        // Calculate total height needed for a given number of buttons
+        static func windowHeight(for buttonCount: Int) -> CGFloat {
+            return CGFloat(buttonCount) * buttonSpacing + verticalPadding * 2
+        }
+    }
+    
+    /// Bundle identifiers
+    enum Identifiers {
+        static let dockBundleID = "com.apple.dock"
+    }
+    
+    /// Accessibility-related constants
+    enum Accessibility {
+        static let windowIDKey = "_AXWindowID" as CFString
+        static let windowsKey = kAXWindowsAttribute as CFString
+        static let urlKey = kAXURLAttribute as CFString
+        static let raiseKey = kAXRaiseAction as CFString
+    }
+}
+
+// MARK: - Logging
+
+/// Centralized logging functionality with different log levels and emoji indicators
+enum Logger {
+    static func debug(_ message: String) {
+        print("🔍 \(message)")
+    }
+    
+    static func info(_ message: String) {
+        print("ℹ️ \(message)")
+    }
+    
+    static func warning(_ message: String) {
+        print("⚠️ \(message)")
+    }
+    
+    static func error(_ message: String) {
+        print("❌ \(message)")
+    }
+    
+    static func success(_ message: String) {
+        print("✅ \(message)")
+    }
+}
+
+// MARK: - UI Components
+
+/// A custom view that displays a list of windows as buttons with hover effects
 class WindowChooserView: NSView {
-    private var options: [(windowID: CGWindowID, name: String)] = []
+    private var options: [WindowInfo] = []
     private var callback: ((CGWindowID) -> Void)?
     private var buttons: [NSButton] = []
     
-    init(windows: [(windowID: CGWindowID, name: String)], callback: @escaping (CGWindowID) -> Void) {
+    init(windows: [WindowInfo], callback: @escaping (CGWindowID) -> Void) {
         self.options = windows
         self.callback = callback
-        super.init(frame: NSRect(x: 0, y: 0, width: 300, height: CGFloat(windows.count * 40)))
+        super.init(frame: NSRect(x: 0, y: 0, width: Constants.UI.windowWidth, height: Constants.UI.windowHeight(for: windows.count)))
         setupButtons()
     }
     
@@ -23,46 +96,64 @@ class WindowChooserView: NSView {
     
     private func setupButtons() {
         for (index, window) in options.enumerated() {
-            let button = NSButton(frame: NSRect(x: 10, y: frame.height - CGFloat((index + 1) * 35), width: 280, height: 30))
-            button.title = window.name
-            button.bezelStyle = .rounded
-            button.tag = index
-            button.target = self
-            button.action = #selector(buttonClicked(_:))
-            button.wantsLayer = true
-            button.layer?.cornerRadius = 6
-            
-            // Style the button
-            button.isBordered = false
-            button.contentTintColor = .white
-            
-            // Add hover effect
-            let trackingArea = NSTrackingArea(rect: button.bounds,
-                                            options: [.mouseEnteredAndExited, .activeInKeyWindow],
-                                            owner: button,
-                                            userInfo: nil)
-            button.addTrackingArea(trackingArea)
-            
+            let button = createButton(for: window, at: index)
             addSubview(button)
             buttons.append(button)
         }
     }
     
+    private func createButton(for window: WindowInfo, at index: Int) -> NSButton {
+        let button = NSButton(frame: NSRect(
+            x: Constants.UI.windowPadding,
+            y: frame.height - CGFloat(index + 1) * Constants.UI.buttonSpacing - Constants.UI.verticalPadding,
+            width: Constants.UI.windowWidth - Constants.UI.windowPadding * 2,
+            height: Constants.UI.buttonHeight
+        ))
+        
+        configureButton(button, title: window.name, tag: index)
+        addHoverEffect(to: button)
+        
+        return button
+    }
+    
+    private func configureButton(_ button: NSButton, title: String, tag: Int) {
+        button.title = title
+        button.bezelStyle = .rounded
+        button.tag = tag
+        button.target = self
+        button.action = #selector(buttonClicked(_:))
+        button.wantsLayer = true
+        button.layer?.cornerRadius = Constants.UI.cornerRadius
+        button.isBordered = false
+        button.contentTintColor = .white
+    }
+    
+    private func addHoverEffect(to button: NSButton) {
+        let trackingArea = NSTrackingArea(
+            rect: button.bounds,
+            options: [.mouseEnteredAndExited, .activeInKeyWindow],
+            owner: button,
+            userInfo: nil
+        )
+        button.addTrackingArea(trackingArea)
+    }
+    
     override func mouseEntered(with event: NSEvent) {
         if let button = event.trackingArea?.owner as? NSButton {
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.2
-                button.layer?.backgroundColor = NSColor.selectedControlColor.cgColor
-            }
+            animateButtonBackground(button, to: NSColor.selectedControlColor.cgColor)
         }
     }
     
     override func mouseExited(with event: NSEvent) {
         if let button = event.trackingArea?.owner as? NSButton {
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.2
-                button.layer?.backgroundColor = nil
-            }
+            animateButtonBackground(button, to: nil)
+        }
+    }
+    
+    private func animateButtonBackground(_ button: NSButton, to color: CGColor?) {
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = Constants.UI.animationDuration
+            button.layer?.backgroundColor = color
         }
     }
     
@@ -73,293 +164,340 @@ class WindowChooserView: NSView {
     }
 }
 
-class WindowChooserWindow: NSWindow {
-    init(at point: CGPoint, windows: [(windowID: CGWindowID, name: String)], callback: @escaping (CGWindowID) -> Void) {
-        let height = CGFloat(windows.count * 40)
-        let width: CGFloat = 300
+/// A custom window controller that manages the window chooser interface
+class WindowChooserController: NSWindowController {
+    private let windowCallback: (CGWindowID) -> Void
+    private var chooserView: WindowChooserView?
+    
+    init(at point: CGPoint, windows: [WindowInfo], callback: @escaping (CGWindowID) -> Void) {
+        self.windowCallback = callback
         
-        // Get the main screen and convert the point to proper screen coordinates
-        guard let screen = NSScreen.main else {
-            // Fallback to a default position if no screen is available
-            super.init(contentRect: NSRect(x: 0, y: 0, width: width, height: height),
-                      styleMask: [.borderless],
-                      backing: .buffered,
-                      defer: false)
-            return
-        }
+        let height = Constants.UI.windowHeight(for: windows.count)
+        let width = Constants.UI.windowWidth
         
-        // Calculate position to be centered horizontally above the clicked point
-        let adjustedX = max(20, min(point.x - width/2, screen.frame.width - width - 20))
+        let screen = NSScreen.main ?? NSScreen.screens[0]
+        let adjustedX = max(Constants.UI.windowPadding, min(point.x - width/2, screen.frame.width - width - Constants.UI.windowPadding))
         
         // Convert CG coordinates (0 at bottom) to NS coordinates (0 at top)
         let nsY = screen.frame.height - point.y
-        // We want the window to appear above the click point, so subtract the height and add a small gap
-        let adjustedY = nsY - height - 10
         
-        print("📏 Screen height: \(screen.frame.height), CG Y: \(point.y), NS Y: \(nsY), Window Y: \(adjustedY)")
+        // Calculate Y position - show above click point if near bottom of screen
+        let spaceBelow = point.y - Constants.UI.windowPadding
+        let spaceNeeded = height + Constants.UI.windowPadding
         
-        let contentRect = NSRect(x: adjustedX, y: adjustedY, width: width, height: height)
-        super.init(contentRect: contentRect,
-                  styleMask: [.borderless],
-                  backing: .buffered,
-                  defer: false)
+        let adjustedY: CGFloat
+        if spaceBelow < spaceNeeded {
+            // Not enough space below, position above click point
+            adjustedY = nsY + height + Constants.UI.windowPadding
+        } else {
+            // Enough space below, position below click point
+            adjustedY = nsY - height - Constants.UI.windowPadding
+        }
         
-        backgroundColor = .clear
-        isOpaque = false
-        hasShadow = true
-        level = .popUpMenu
+        // Ensure the window stays within screen bounds
+        let finalY = min(screen.frame.height - Constants.UI.windowPadding, 
+                        max(height + Constants.UI.windowPadding, adjustedY))
         
+        let frame = NSRect(x: adjustedX, y: finalY, width: width, height: height)
+        
+        let window = NSWindow(
+            contentRect: frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        
+        super.init(window: window)
+        
+        configureWindow()
+        setupVisualEffect(width: width, height: height)
+        setupChooserView(windows: windows)
+        animateAppearance()
+    }
+    
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+    
+    private func configureWindow() {
+        guard let window = window else { return }
+        window.backgroundColor = .clear
+        window.isOpaque = false
+        window.hasShadow = true
+        window.level = .popUpMenu
+    }
+    
+    private func setupVisualEffect(width: CGFloat, height: CGFloat) {
+        guard let window = window else { return }
         let visualEffect = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: width, height: height))
         visualEffect.material = .hudWindow
         visualEffect.state = .active
         visualEffect.wantsLayer = true
-        visualEffect.layer?.cornerRadius = 10
-        contentView = visualEffect
-        
-        let chooserView = WindowChooserView(windows: windows, callback: callback)
-        visualEffect.addSubview(chooserView)
-        
-        // Add animation
-        alphaValue = 0
+        visualEffect.layer?.cornerRadius = Constants.UI.cornerRadius
+        window.contentView = visualEffect
+    }
+    
+    private func setupChooserView(windows: [WindowInfo]) {
+        guard let contentView = window?.contentView else { return }
+        let chooserView = WindowChooserView(windows: windows) { [weak self] windowID in
+            self?.windowCallback(windowID)
+            self?.close()
+        }
+        contentView.addSubview(chooserView)
+        self.chooserView = chooserView
+    }
+    
+    private func animateAppearance() {
+        guard let window = window else { return }
+        window.alphaValue = 0
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.2
-            animator().alphaValue = 1
+            context.duration = Constants.UI.animationDuration
+            window.animator().alphaValue = 1
         }
-        
-        // Ensure window is fully visible on screen
-        let screenFrame = screen.visibleFrame
-        var windowFrame = frame
-        
-        // Adjust if window would go off the top of the screen
-        if windowFrame.maxY > screenFrame.maxY {
-            windowFrame.origin.y = screenFrame.maxY - windowFrame.height - 10
-        }
-        
-        // Adjust if window would go off the bottom of the screen
-        if windowFrame.minY < screenFrame.minY {
-            windowFrame.origin.y = screenFrame.minY + 10
-        }
-        
-        setFrame(windowFrame, display: true)
     }
 }
 
+// MARK: - Accessibility Service
+
+@MainActor
+class AccessibilityService {
+    static let shared = AccessibilityService()
+    
+    private init() {}
+    
+    func requestAccessibilityPermissions() -> Bool {
+        let trusted = AXIsProcessTrusted()
+        Logger.info("🔐 Accessibility \(trusted ? "granted" : "not granted - please grant in System Settings")")
+        
+        if !trusted {
+            Logger.warning("⚠️ Please grant accessibility permissions in System Settings > Privacy & Security > Accessibility")
+        }
+        
+        return trusted
+    }
+    
+    func getWindowInfo(for app: NSRunningApplication) -> [WindowInfo] {
+        let element = AXUIElementCreateApplication(app.processIdentifier)
+        var windowsRef: CFTypeRef?
+        var appWindowsInfo: [WindowInfo] = []
+        
+        guard AXUIElementCopyAttributeValue(element, Constants.Accessibility.windowsKey, &windowsRef) == .success,
+              let windowList = windowsRef as? [AXUIElement] else {
+            return []
+        }
+        
+        Logger.info("🔍 Found \(windowList.count) windows for \(app.localizedName ?? "Unknown")")
+        
+        for (index, window) in windowList.enumerated() {
+            if let windowInfo = getWindowID(for: window, app: app, index: index) {
+                appWindowsInfo.append(windowInfo)
+            }
+        }
+        
+        Logger.info("📊 Found \(appWindowsInfo.count) windows")
+        return appWindowsInfo
+    }
+    
+    private func getWindowID(for window: AXUIElement, app: NSRunningApplication, index: Int) -> WindowInfo? {
+        var windowIDRef: CFTypeRef?
+        let result = AXUIElementCopyAttributeValue(window, Constants.Accessibility.windowIDKey, &windowIDRef)
+        
+        if result == .success,
+           let numRef = windowIDRef,
+           let number = numRef as? NSNumber {
+            let windowID = number.uint32Value
+            let windowName = "\(app.localizedName ?? "Window") \(index + 1)"
+            Logger.success("Adding window: '\(windowName)' ID: \(windowID)")
+            return (windowID: windowID, name: windowName)
+        } else {
+            Logger.error("Failed to get window ID")
+            return getFallbackWindowID(for: app, index: index)
+        }
+    }
+    
+    private func getFallbackWindowID(for app: NSRunningApplication, index: Int) -> WindowInfo? {
+        let appWindows = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[CFString: Any]] ?? []
+        let matchingWindows = appWindows.filter { windowInfo -> Bool in
+            guard let pid = windowInfo[kCGWindowOwnerPID] as? pid_t,
+                  pid == app.processIdentifier,
+                  let layer = windowInfo[kCGWindowLayer] as? Int32,
+                  layer == kCGNormalWindowLevel else {
+                return false
+            }
+            return true
+        }
+        
+        guard index < matchingWindows.count,
+              let windowID = matchingWindows[index][kCGWindowNumber] as? CGWindowID else {
+            return nil
+        }
+        
+        let windowName = "\(app.localizedName ?? "Window") \(index + 1)"
+        Logger.success("Adding window (fallback): '\(windowName)' ID: \(windowID)")
+        return (windowID: windowID, name: windowName)
+    }
+    
+    func raiseWindow(windowID: CGWindowID, for app: NSRunningApplication) {
+        let element = AXUIElementCreateApplication(app.processIdentifier)
+        var windowsRef: CFTypeRef?
+        
+        guard AXUIElementCopyAttributeValue(element, Constants.Accessibility.windowsKey, &windowsRef) == .success,
+              let windowList = windowsRef as? [AXUIElement] else {
+            return
+        }
+        
+        for window in windowList {
+            var windowIDRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(window, Constants.Accessibility.windowIDKey, &windowIDRef) == .success,
+               let windowNumber = (windowIDRef as? NSNumber)?.uint32Value,
+               windowNumber == windowID {
+                Logger.info("Found matching window, raising it")
+                AXUIElementPerformAction(window, Constants.Accessibility.raiseKey)
+                break
+            }
+        }
+    }
+}
+
+// MARK: - Dock Service
+
+@MainActor
+class DockService {
+    static let shared = DockService()
+    private let workspace = NSWorkspace.shared
+    
+    private init() {}
+    
+    func getDockApp() -> NSRunningApplication? {
+        return workspace.runningApplications.first(where: { $0.bundleIdentifier == Constants.Identifiers.dockBundleID })
+    }
+    
+    func getClickedDockItem(at point: CGPoint) -> (app: NSRunningApplication, url: URL)? {
+        let systemWide = AXUIElementCreateSystemWide()
+        var elementUntyped: AXUIElement?
+        
+        guard AXUIElementCopyElementAtPosition(systemWide, Float(point.x), Float(point.y), &elementUntyped) == .success,
+              let element = elementUntyped else {
+            return nil
+        }
+        
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(element, &pid) == .success,
+              let dockApp = getDockApp(),
+              pid == dockApp.processIdentifier else {
+            return nil
+        }
+        
+        var urlUntyped: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, Constants.Accessibility.urlKey, &urlUntyped) == .success,
+              let urlRef = urlUntyped as? NSURL,
+              let url = urlRef as URL?,
+              let bundle = Bundle(url: url),
+              let bundleId = bundle.bundleIdentifier,
+              let app = workspace.runningApplications.first(where: { $0.bundleIdentifier == bundleId }) else {
+            return nil
+        }
+        
+        Logger.info("Dock icon clicked: \(url.deletingPathExtension().lastPathComponent)")
+        return (app: app, url: url)
+    }
+    
+    func handleAppAction(app: NSRunningApplication, clickCount: Int64) -> Bool {
+        if app.isActive {
+            if clickCount == 2 {
+                Logger.info("Double-click detected, terminating app: \(app.localizedName ?? "Unknown")")
+                return app.terminate()
+            } else {
+                Logger.info("Single-click detected, hiding app: \(app.localizedName ?? "Unknown")")
+                return app.hide()
+            }
+        }
+        
+        Logger.info("Letting Dock handle click: \(app.localizedName ?? "Unknown")")
+        return false
+    }
+}
+
+// Update DockWatcher to use DockService
 @MainActor
 class DockWatcher {
     nonisolated(unsafe) private var eventTap: CFMachPort?
-    private let workspace = NSWorkspace.shared
-    private var windowChooser: WindowChooserWindow?
+    private var windowChooser: WindowChooserController?
+    private var runLoopSource: CFRunLoopSource?
     
     init() {
         startMonitoring()
-        print("🔄 DockWatcher initialized")
+        Logger.info("DockWatcher initialized")
     }
     
     deinit {
         if let tap = eventTap {
             CGEvent.tapEnable(tap: tap, enable: false)
         }
+        if let source = runLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .commonModes)
+        }
     }
     
-    private func isAppActive(_ app: NSRunningApplication) -> Bool {
-        return app.isActive
-    }
-    
-    private func showWindowChooser(for app: NSRunningApplication, at point: CGPoint, windows: [(windowID: CGWindowID, name: String)]) {
+    private func showWindowChooser(for app: NSRunningApplication, at point: CGPoint, windows: [WindowInfo]) {
         guard !windows.isEmpty else {
-            print("⚠️ No windows provided")
+            Logger.warning("No windows provided")
             return
         }
         
-        DispatchQueue.main.async {
-            print("🎯 Showing window chooser at \(point.x), \(point.y)")
-            self.windowChooser = WindowChooserWindow(at: point, windows: windows, callback: { windowID in
-                print("🎯 Selected window with ID: \(windowID)")
-                // Activate the chosen window
+        DispatchQueue.main.async { [weak self] in
+            Logger.info("Showing window chooser at \(point.x), \(point.y)")
+            
+            let chooser = WindowChooserController(at: point, windows: windows) { [weak self] windowID in
+                Logger.info("Selected window with ID: \(windowID)")
                 app.activate(options: [.activateIgnoringOtherApps])
-                
-                // Bring the specific window to front using AX API
-                let element = AXUIElementCreateApplication(app.processIdentifier)
-                var windowsRef: CFTypeRef?
-                if AXUIElementCopyAttributeValue(element, kAXWindowsAttribute as CFString, &windowsRef) == .success,
-                   let windowList = windowsRef as? [AXUIElement] {
-                    
-                    // Find the window with matching ID
-                    for window in windowList {
-                        var windowIDRef: CFTypeRef?
-                        if AXUIElementCopyAttributeValue(window, "_AXWindowID" as CFString, &windowIDRef) == .success,
-                           let windowNumber = (windowIDRef as? NSNumber)?.uint32Value,
-                           windowNumber == windowID {
-                            print("🎯 Found matching window, raising it")
-                            AXUIElementPerformAction(window, kAXRaiseAction as CFString)
-                            break
-                        }
-                    }
-                }
-            })
-            self.windowChooser?.makeKeyAndOrderFront(nil)
-        }
-    }
-    
-    private func handleDockClick(at point: CGPoint, clickCount: Int64) -> Bool {
-        // Find Dock process
-        guard let dockApp = workspace.runningApplications.first(where: { $0.bundleIdentifier == "com.apple.dock" }) else {
-            return false
-        }
-        
-        let systemWide = AXUIElementCreateSystemWide()
-        var elementUntyped: AXUIElement?
-        var handled = false
-        
-        if AXUIElementCopyElementAtPosition(systemWide, Float(point.x), Float(point.y), &elementUntyped) == .success,
-           let element = elementUntyped {
-            var pid: pid_t = 0
-            if AXUIElementGetPid(element, &pid) == .success,
-               pid == dockApp.processIdentifier {
-                
-                var urlUntyped: CFTypeRef?
-                if AXUIElementCopyAttributeValue(element, kAXURLAttribute as CFString, &urlUntyped) == .success,
-                   let urlRef = urlUntyped as? NSURL,
-                   let url = urlRef as URL? {
-                    print("🖱️ Dock icon clicked: \(url.deletingPathExtension().lastPathComponent)")
-                    
-                    if let bundle = Bundle(url: url),
-                       let bundleId = bundle.bundleIdentifier,
-                       let app = workspace.runningApplications.first(where: { $0.bundleIdentifier == bundleId }) {
-                        
-                        // Get windows using Accessibility API
-                        let element = AXUIElementCreateApplication(app.processIdentifier)
-                        var windowsRef: CFTypeRef?
-                        
-                        if AXUIElementCopyAttributeValue(element, kAXWindowsAttribute as CFString, &windowsRef) == .success,
-                           let windowList = windowsRef as? [AXUIElement] {
-                            
-                            let windowCount = windowList.count
-                            print("🔍 Found \(windowCount) windows for \(app.localizedName ?? "Unknown")")
-                            
-                            if windowCount > 1 {
-                                print("📱 App active: \(isAppActive(app))")
-                                
-                                // Build window info list with simple numbered names
-                                var appWindowsInfo: [(windowID: CGWindowID, name: String)] = []
-                                
-                                for (index, window) in windowList.enumerated() {
-                                    print("\n🪟 Checking window \(index + 1):")
-                                    
-                                    // Get all attributes for debugging
-                                    var attributeNames: CFArray?
-                                    AXUIElementCopyAttributeNames(window, &attributeNames)
-                                    if let attributes = attributeNames as? [String] {
-                                        print("📝 Available attributes: \(attributes.joined(separator: ", "))")
-                                    }
-                                    
-                                    var windowIDRef: CFTypeRef?
-                                    let result = AXUIElementCopyAttributeValue(window, "_AXWindowID" as CFString, &windowIDRef)
-                                    print("🔑 Window ID result: \(result)")
-                                    
-                                    if result == .success,
-                                       let numRef = windowIDRef,
-                                       let number = numRef as? NSNumber {
-                                        let windowID = number.uint32Value
-                                        let windowName = "\(app.localizedName ?? "Window") \(index + 1)"
-                                        print("✅ Adding window: '\(windowName)' ID: \(windowID)")
-                                        appWindowsInfo.append((windowID: windowID, name: windowName))
-                                    } else {
-                                        print("❌ Failed to get window ID")
-                                        
-                                        // Try getting window ID from CGWindowList as fallback
-                                        let appWindows = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[CFString: Any]] ?? []
-                                        let matchingWindows = appWindows.filter { windowInfo -> Bool in
-                                            guard let pid = windowInfo[kCGWindowOwnerPID] as? pid_t,
-                                                  pid == app.processIdentifier,
-                                                  let layer = windowInfo[kCGWindowLayer] as? Int32,
-                                                  layer == kCGNormalWindowLevel else {
-                                                return false
-                                            }
-                                            return true
-                                        }
-                                        
-                                        if index < matchingWindows.count,
-                                           let windowID = matchingWindows[index][kCGWindowNumber] as? CGWindowID {
-                                            let windowName = "\(app.localizedName ?? "Window") \(index + 1)"
-                                            print("✅ Adding window (fallback): '\(windowName)' ID: \(windowID)")
-                                            appWindowsInfo.append((windowID: windowID, name: windowName))
-                                        }
-                                    }
-                                }
-                                
-                                print("📊 Found \(appWindowsInfo.count) windows")
-                                
-                                if appWindowsInfo.count > 1 && !isAppActive(app) {
-                                    print("🎯 Showing window chooser for multiple windows")
-                                    showWindowChooser(for: app, at: point, windows: appWindowsInfo)
-                                    handled = true
-                                    return handled
-                                }
-                            }
-                            
-                            if isAppActive(app) {
-                                if clickCount == 2 {
-                                    // Double click on active app: terminate
-                                    print("🚫 Double-click detected, terminating app: \(app.localizedName ?? "Unknown")")
-                                    _ = app.terminate()
-                                    handled = true
-                                } else {
-                                    // Single click on active app: hide
-                                    print("👻 Single-click detected, hiding app: \(app.localizedName ?? "Unknown")")
-                                    _ = app.hide()
-                                    handled = true
-                                }
-                            } else {
-                                print("⬆️ Letting Dock handle click: \(app.localizedName ?? "Unknown")")
-                                handled = false
-                            }
-                        }
-                    }
-                }
+                AccessibilityService.shared.raiseWindow(windowID: windowID, for: app)
+                self?.windowChooser = nil
             }
+            
+            self?.windowChooser = chooser
+            chooser.showWindow(nil)
         }
-        
-        return handled
     }
     
     private func startMonitoring() {
-        // Request accessibility permissions
-        let trusted = AXIsProcessTrusted()
-        print("🔐 Accessibility \(trusted ? "granted" : "not granted - please grant in System Settings")")
-        
-        guard trusted else {
-            print("⚠️ Please grant accessibility permissions in System Settings > Privacy & Security > Accessibility")
+        guard AccessibilityService.shared.requestAccessibilityPermissions() else {
             return
         }
         
-        // Create event tap for mouse clicks
         let eventMask = CGEventMask(1 << CGEventType.leftMouseDown.rawValue)
         
+        // Create a static callback function
+        let callback: CGEventTapCallBack = { proxy, type, event, refcon in
+            guard type == .leftMouseDown,
+                  let refconUnwrapped = refcon else {
+                return Unmanaged.passRetained(event)
+            }
+            
+            let watcher = Unmanaged<DockWatcher>.fromOpaque(refconUnwrapped).takeUnretainedValue()
+            let location = event.location
+            let clickCount = event.getIntegerValueField(.mouseEventClickState)
+            
+            // Try to handle the click first
+            if watcher.handleDockClick(at: location, clickCount: clickCount) {
+                // If we handled it, prevent the event from propagating
+                return nil
+            }
+            
+            // If we didn't handle it, let the event propagate
+            return Unmanaged.passRetained(event)
+        }
+        
+        // Change the event tap to be a CGEventTapLocation.cghidEventTap to intercept events earlier
         guard let tap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
+            tap: .cghidEventTap,  // Changed from .cgSessionEventTap to intercept earlier
             place: .headInsertEventTap,
             options: .defaultTap,
             eventsOfInterest: eventMask,
-            callback: { proxy, type, event, refcon in
-                if type != .leftMouseDown {
-                    return Unmanaged.passRetained(event)
-                }
-                
-                let watcher = Unmanaged<DockWatcher>.fromOpaque(refcon!).takeUnretainedValue()
-                let location = event.location
-                let clickCount = event.getIntegerValueField(.mouseEventClickState)
-                
-                // If we handled the click (either hide or terminate), consume the event
-                if watcher.handleDockClick(at: location, clickCount: clickCount) {
-                    return nil
-                }
-                
-                return Unmanaged.passRetained(event)
-            },
+            callback: callback,
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else {
-            print("⚠️ Failed to create event tap")
+            Logger.warning("Failed to create event tap")
             return
         }
         
@@ -367,9 +505,38 @@ class DockWatcher {
         
         let runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
+        self.runLoopSource = runLoopSource
+        
         CGEvent.tapEnable(tap: tap, enable: true)
         
-        print("✅ Successfully started monitoring Dock clicks. Press Control + C to stop.")
+        Logger.success("Successfully started monitoring Dock clicks. Press Control + C to stop.")
+    }
+    
+    private func handleDockClick(at point: CGPoint, clickCount: Int64) -> Bool {
+        // First check if we clicked on a Dock item
+        guard let (app, _) = DockService.shared.getClickedDockItem(at: point) else {
+            return false
+        }
+        
+        // If the app is active, handle hide/terminate actions immediately
+        if app.isActive {
+            _ = DockService.shared.handleAppAction(app: app, clickCount: clickCount)
+            // Always return true for active apps to prevent Dock from processing the click
+            return true
+        }
+        
+        // Get window information for inactive apps
+        let windows = AccessibilityService.shared.getWindowInfo(for: app)
+        
+        // If the app has multiple windows and is not active, show window chooser
+        if windows.count > 1 {
+            Logger.info("Showing window chooser for multiple windows")
+            showWindowChooser(for: app, at: point, windows: windows)
+            return true
+        }
+        
+        // Let the Dock handle the click for other cases
+        return false
     }
 }
 
@@ -401,8 +568,13 @@ class StatusBarController {
     }
 }
 
-print("Starting Dock Watcher...")
+// MARK: - Application Entry Point
+
+Logger.info("Starting Dock App Toggler...")
 let app = NSApplication.shared
-let watcher = DockWatcher()
-let statusBar = StatusBarController()
+// Store references to prevent deallocation
+let appController = (
+    watcher: DockWatcher(),
+    statusBar: StatusBarController()
+)
 app.run()
