@@ -311,11 +311,17 @@ class AccessibilityService {
         var windowIDRef: CFTypeRef?
         let result = AXUIElementCopyAttributeValue(window, Constants.Accessibility.windowIDKey, &windowIDRef)
         
+        // Get window title
+        var titleRef: CFTypeRef?
+        AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleRef)
+        let windowTitle = (titleRef as? String) ?? ""
+        
         if result == .success,
            let numRef = windowIDRef,
            let number = numRef as? NSNumber {
             let windowID = number.uint32Value
-            let windowName = "\(app.localizedName ?? "Window") \(index + 1)"
+            // Use the actual window title, fallback to app name if title is empty
+            let windowName = windowTitle.isEmpty ? "\(app.localizedName ?? "Window") \(index + 1)" : windowTitle
             Logger.success("Adding window: '\(windowName)' ID: \(windowID)")
             return (windowID: windowID, name: windowName)
         } else {
@@ -341,7 +347,10 @@ class AccessibilityService {
             return nil
         }
         
-        let windowName = "\(app.localizedName ?? "Window") \(index + 1)"
+        // Get the actual window name from CGWindowListCopyWindowInfo
+        let windowTitle = matchingWindows[index][kCGWindowName as CFString] as? String
+        let windowName = windowTitle ?? "\(app.localizedName ?? "Window") \(index + 1)"
+        
         Logger.success("Adding window (fallback): '\(windowName)' ID: \(windowID)")
         return (windowID: windowID, name: windowName)
     }
