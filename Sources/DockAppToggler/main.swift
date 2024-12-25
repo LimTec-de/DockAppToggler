@@ -694,7 +694,7 @@ class StatusBarController {
         updateController = UpdateController()
         
         if let button = statusItem.button {
-            if let iconPath = Bundle.module.path(forResource: "icon", ofType: "png"),
+            if let iconPath = Bundle.module.path(forResource: "icon", ofType: "icns"),
                let image = NSImage(contentsOfFile: iconPath) {
                 image.size = NSSize(width: 18, height: 18)
                 button.image = image
