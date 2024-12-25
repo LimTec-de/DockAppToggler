@@ -250,7 +250,11 @@ class WindowChooserController: NSWindowController {
         guard let contentView = window?.contentView else { return }
         let chooserView = WindowChooserView(windows: windows) { [weak self] window in
             guard let self = self else { return }
-            Logger.info("Selected window element: \(window)")
+            if let selectedWindowInfo = windows.first(where: { $0.window == window }) {
+                Logger.info("Selected window element: \(window) with title: \(selectedWindowInfo.name)")
+            } else {
+                Logger.warning("Selected window element not found in the list")
+            }
             // First activate the app
             self.targetApp.activate(options: [.activateIgnoringOtherApps])
             
