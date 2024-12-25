@@ -79,17 +79,15 @@ jobs:
         codesign -vv --deep --strict DockAppToggler.app
         otool -L DockAppToggler.app/Contents/MacOS/DockAppToggler
         
-        # Create installer package
-        mkdir -p package_root/Applications
-        cp -r DockAppToggler.app package_root/Applications/
+        # Create DMG
+        mkdir -p dmg_root
+        cp -r DockAppToggler.app dmg_root/
         
-        pkgbuild \
-          --root package_root \
-          --component-plist "package.plist" \
-          --identifier "com.limtec.dockapptoggler" \
-          --version "${{ env.VERSION }}" \
-          --install-location "/" \
-          DockAppToggler.pkg
+        # Create symlink to Applications folder
+        ln -s /Applications dmg_root/Applications
+        
+        # Create DMG
+        hdiutil create -volname "DockAppToggler" -srcfolder dmg_root -ov -format UDZO DockAppToggler.dmg
         
         # Create zip for Sparkle updates
         ditto -c -k --keepParent DockAppToggler.app DockAppToggler.zip
@@ -112,13 +110,19 @@ jobs:
         # Staple app and create final zip
         xcrun stapler staple DockAppToggler.app
         ditto -c -k --keepParent DockAppToggler.app DockAppToggler_final.zip
+        
+        # Create final DMG with notarized app
+        mkdir -p dmg_root_final
+        cp -r DockAppToggler.app dmg_root_final/
+        ln -s /Applications dmg_root_final/Applications
+        hdiutil create -volname "DockAppToggler" -srcfolder dmg_root_final -ov -format UDZO DockAppToggler_final.dmg
 
     - name: Generate Appcast
       run: |
         # Create release directory and copy files
         mkdir -p release
         cp DockAppToggler_final.zip release/
-        cp DockAppToggler_signed.pkg release/
+        cp DockAppToggler_final.dmg release/
         
         # Find Sparkle tools
         SPARKLE_PATH=".build/artifacts/sparkle/Sparkle/bin"
@@ -138,7 +142,7 @@ jobs:
       with:
         files: |
           DockAppToggler_final.zip
-          DockAppToggler.pkg
+          DockAppToggler_final.dmg
           release/appcast.xml
         draft: true
         prerelease: false
