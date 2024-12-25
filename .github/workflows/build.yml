@@ -35,7 +35,7 @@ jobs:
         security default-keychain -s build.keychain
         security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
         echo $BUILD_CERTIFICATE_BASE64 | base64 --decode > certificate.p12
-        security import certificate.p12 -k build.keychain -P "$P12_PASSWORD" -T /usr/bin/codesign
+        security import certificate.p12 -k build.keychain -P "$P12_PASSWORD" -T /usr/bin/codesign -T /usr/bin/productsign
         security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
 
     - name: Build and Package App
@@ -83,18 +83,22 @@ jobs:
         mkdir -p package_root/Applications
         cp -r DockAppToggler.app package_root/Applications/
         
+        echo "🔍 Running pkgbuild"
         pkgbuild \
           --root package_root \
           --component-plist "package.plist" \
           --identifier "com.limtec.dockapptoggler" \
           --version "${{ env.VERSION }}" \
           --install-location "/" \
-          --verbose \
           DockAppToggler.pkg
 
+
+        # Debug: List available signing identities
+        echo "Available signing identities:"
+        security find-identity -v -p codesigning
         
         # Sign the installer
-        productsign --sign "Developer ID Installer: LimTec GmbH (${{ secrets.TEAM_ID }})" \
+        productsign --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" \
           DockAppToggler.pkg DockAppToggler_signed.pkg
         
         # Create zip for Sparkle updates
