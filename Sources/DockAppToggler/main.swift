@@ -341,6 +341,23 @@ class AccessibilityService {
         
         if !trusted {
             Logger.warning("⚠️ Please grant accessibility permissions in System Settings > Privacy & Security > Accessibility")
+            
+            // Create an alert to guide the user
+            let alert = NSAlert()
+            alert.messageText = "Accessibility Permissions Required"
+            alert.informativeText = "DockAppToggler requires accessibility permissions to function properly. Please grant these permissions in System Settings > Privacy & Security > Accessibility."
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "Open System Settings")
+            alert.addButton(withTitle: "Cancel")
+            
+            // Show the alert and handle the response
+            let response = alert.runModal()
+            if response == .alertFirstButtonReturn {
+                // Open the Accessibility settings
+                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+                    NSWorkspace.shared.open(url)
+                }
+            }
         }
         
         return trusted
