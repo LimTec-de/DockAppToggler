@@ -11,3 +11,4 @@ DerivedData/
 .env
 *.xcarchive
 .netrc
+release
