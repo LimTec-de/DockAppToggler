@@ -83,7 +83,6 @@ jobs:
         mkdir -p package_root/Applications
         cp -r DockAppToggler.app package_root/Applications/
         
-        echo "🔍 Running pkgbuild"
         pkgbuild \
           --root package_root \
           --component-plist "package.plist" \
@@ -91,15 +90,6 @@ jobs:
           --version "${{ env.VERSION }}" \
           --install-location "/" \
           DockAppToggler.pkg
-
-
-        # Debug: List available signing identities
-        echo "Available signing identities:"
-        security find-identity -v -p codesigning
-        
-        # Sign the installer
-        productsign --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" \
-          DockAppToggler.pkg DockAppToggler_signed.pkg
         
         # Create zip for Sparkle updates
         ditto -c -k --keepParent DockAppToggler.app DockAppToggler.zip
@@ -119,19 +109,9 @@ jobs:
           --issuer "$ASC_ISSUER_ID" \
           --wait
         
-        # Notarize installer
-        xcrun notarytool submit DockAppToggler_signed.pkg \
-          --key AuthKey.p8 \
-          --key-id "$ASC_KEY_ID" \
-          --issuer "$ASC_ISSUER_ID" \
-          --wait
-        
         # Staple app and create final zip
         xcrun stapler staple DockAppToggler.app
         ditto -c -k --keepParent DockAppToggler.app DockAppToggler_final.zip
-        
-        # Staple installer
-        xcrun stapler staple DockAppToggler_signed.pkg
 
     - name: Generate Appcast
       run: |
@@ -158,7 +138,7 @@ jobs:
       with:
         files: |
           DockAppToggler_final.zip
-          DockAppToggler_signed.pkg
+          DockAppToggler.pkg
           release/appcast.xml
         draft: true
         prerelease: false
