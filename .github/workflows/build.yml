@@ -30,66 +30,127 @@ jobs:
         P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
         KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
       run: |
-        # Create keychain
         security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
         security default-keychain -s build.keychain
         security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
-        
-        # Import certificate
         echo $BUILD_CERTIFICATE_BASE64 | base64 --decode > certificate.p12
         security import certificate.p12 -k build.keychain -P "$P12_PASSWORD" -T /usr/bin/codesign
-        security find-identity -v
         security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
 
-    - name: Build Swift package
+    - name: Build and Package App
       run: |
+        # Clean any previous build
+        rm -rf DockAppToggler.app
+        
+        # Resolve dependencies and build
+        swift package resolve
         swift build -c release
         
-        # Create app bundle structure
-        mkdir -p build/DockAppToggler.app/Contents/{MacOS,Resources}
-        cp -r .build/release/DockAppToggler build/DockAppToggler.app/Contents/MacOS/
-        cp Info.plist build/DockAppToggler.app/Contents/
+        # Create app bundle
+        mkdir -p DockAppToggler.app/Contents/{MacOS,Resources,Frameworks}
+        cp .build/release/DockAppToggler DockAppToggler.app/Contents/MacOS/
+        cp Sources/DockAppToggler/Info.plist DockAppToggler.app/Contents/
+        cp Sources/DockAppToggler/Resources/icon.icns DockAppToggler.app/Contents/Resources/
         
-    - name: Code Sign App
-      env:
-        TEAM_ID: ${{ secrets.TEAM_ID }}
-      run: |
-        /usr/bin/codesign --force --options runtime --sign "Developer ID Application: LimTec GmbH ($TEAM_ID)" build/DockAppToggler.app -v --timestamp --deep
+        # Create PkgInfo file
+        echo "APPL????" > DockAppToggler.app/Contents/PkgInfo
+        
+        # Set executable permissions
+        chmod +x DockAppToggler.app/Contents/MacOS/DockAppToggler
+        
+        # Copy and setup Sparkle framework
+        SPARKLE_PATH=$(find .build -name "Sparkle.framework" -type d | head -n 1)
+        if [ -z "$SPARKLE_PATH" ]; then
+          echo "❌ Error: Sparkle framework not found"
+          exit 1
+        fi
+        cp -R "$SPARKLE_PATH" DockAppToggler.app/Contents/Frameworks/
+        install_name_tool -change "@rpath/Sparkle.framework/Versions/B/Sparkle" "@executable_path/../Frameworks/Sparkle.framework/Versions/B/Sparkle" DockAppToggler.app/Contents/MacOS/DockAppToggler
+        
+        # Sign Sparkle framework first (since it's now part of our app bundle)
+        codesign --force --options runtime --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" DockAppToggler.app/Contents/Frameworks/Sparkle.framework --deep --timestamp
+        
+        # Sign the app with hardened runtime
+        codesign --force --options runtime --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" DockAppToggler.app --deep --timestamp
+        
+        # Verify the app bundle
+        echo "🔍 Verifying app bundle..."
+        codesign -vv --deep --strict DockAppToggler.app
+        otool -L DockAppToggler.app/Contents/MacOS/DockAppToggler
+        
+        # Create installer package
+        mkdir -p package_root/Applications
+        cp -r DockAppToggler.app package_root/Applications/
+        
+        pkgbuild \
+          --root package_root \
+          --identifier "com.limtec.dockapptoggler" \
+          --version "${{ env.VERSION }}" \
+          --install-location "/" \
+          DockAppToggler.pkg
+        
+        # Sign the installer
+        productsign --sign "Developer ID Installer: LimTec GmbH (${{ secrets.TEAM_ID }})" \
+          DockAppToggler.pkg DockAppToggler_signed.pkg
+        
+        # Create zip for Sparkle updates
+        ditto -c -k --keepParent DockAppToggler.app DockAppToggler.zip
 
-    - name: Create ZIP Archive
-      run: |
-        cd build
-        zip -r DockAppToggler.zip DockAppToggler.app
-
-    - name: Notarize App
+    - name: Notarize App and Installer
       env:
         ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
         ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
         ASC_KEY_CONTENT: ${{ secrets.ASC_KEY_CONTENT }}
       run: |
-        # Create temporary file for auth key
         echo "$ASC_KEY_CONTENT" > AuthKey.p8
         
-        # Submit for notarization
-        xcrun notarytool submit build/DockAppToggler.zip \
+        # Notarize app
+        xcrun notarytool submit DockAppToggler.zip \
           --key AuthKey.p8 \
           --key-id "$ASC_KEY_ID" \
           --issuer "$ASC_ISSUER_ID" \
           --wait
         
-        # Staple the notarization ticket
-        xcrun stapler staple build/DockAppToggler.app
+        # Notarize installer
+        xcrun notarytool submit DockAppToggler_signed.pkg \
+          --key AuthKey.p8 \
+          --key-id "$ASC_KEY_ID" \
+          --issuer "$ASC_ISSUER_ID" \
+          --wait
         
-        # Create new zip with stapled app
-        cd build
-        rm DockAppToggler.zip
-        zip -r DockAppToggler.zip DockAppToggler.app
+        # Staple app and create final zip
+        xcrun stapler staple DockAppToggler.app
+        ditto -c -k --keepParent DockAppToggler.app DockAppToggler_final.zip
+        
+        # Staple installer
+        xcrun stapler staple DockAppToggler_signed.pkg
+
+    - name: Generate Appcast
+      run: |
+        # Create release directory and copy files
+        mkdir -p release
+        cp DockAppToggler_final.zip release/
+        cp DockAppToggler_signed.pkg release/
+        
+        # Find Sparkle tools
+        SPARKLE_PATH=".build/artifacts/sparkle/Sparkle/bin"
+        if [ ! -f "$SPARKLE_PATH/generate_appcast" ]; then
+          echo "❌ Error: Sparkle tools not found in $SPARKLE_PATH"
+          exit 1
+        fi
+        
+        # Generate appcast
+        "$SPARKLE_PATH/generate_appcast" \
+          --download-url-prefix "https://github.com/LimTec-de/DockAppToggler/releases/download/v${{ env.VERSION }}/" \
+          release
     
     - name: Create Release
       if: startsWith(github.ref, 'refs/tags/')
       uses: softprops/action-gh-release@v1
       with:
         files: |
-          build/DockAppToggler.zip
+          DockAppToggler_final.zip
+          DockAppToggler_signed.pkg
+          release/appcast.xml
         draft: true
         prerelease: false
