@@ -139,12 +139,12 @@ jobs:
           release <<< "$SPARKLE_KEY"
 
     - name: Create Release
-      uses: softprops/action-gh-release@v1
-      with:
-        files: |
-          DockAppToggler_final.zip
-          DockAppToggler_final.dmg
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        gh release create "v${{ env.VERSION }}" \
+          --title "DockAppToggler v${{ env.VERSION }}" \
+          --draft \
+          DockAppToggler_final.zip \
+          DockAppToggler_final.dmg \
           release/appcast.xml
-        draft: true
-        name: "DockAppToggler v${{ env.VERSION }}"
-        prerelease: false
