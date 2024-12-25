@@ -16,7 +16,7 @@ jobs:
     - name: Get Version from Package.swift
       id: get_version
       run: |
-        VERSION=$(grep -m 1 "version:" Package.swift | awk -F'"' '{print $2}')
+        VERSION=$(grep -A 1 'CFBundleShortVersionString' Sources/DockAppToggler/Info.plist | grep string | sed -E 's/<[^>]+>//g' | tr -d ' \t')
         echo "VERSION=$VERSION" >> $GITHUB_ENV
         
     - name: Set up Xcode
@@ -84,10 +84,12 @@ jobs:
         
         pkgbuild \
           --root package_root \
+          --component-plist "package.plist" \
           --identifier "com.limtec.dockapptoggler" \
           --version "${{ env.VERSION }}" \
           --install-location "/" \
           DockAppToggler.pkg
+
         
         # Sign the installer
         productsign --sign "Developer ID Installer: LimTec GmbH (${{ secrets.TEAM_ID }})" \
