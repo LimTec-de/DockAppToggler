@@ -15,7 +15,6 @@ A macOS utility that enhances Dock functionality by allowing you to toggle app v
 - Xcode 14.0 or later
 - macOS 13.0 or later
 - Apple Developer Account (for signing and notarization)
-- Ruby (for Fastlane)
 
 ### Build Steps
 
@@ -25,34 +24,20 @@ A macOS utility that enhances Dock functionality by allowing you to toggle app v
    cd DockAppToggler
    ```
 
-2. Install dependencies:
+2. Build the app:
    ```bash
-   bundle install
-   ```
-
-3. Edit `fastlane/.env` and update these variables:
-   - `TEAM_ID`: Your Apple Developer Team ID
-
-4. Build the app:
-   ```bash
-   # Just build
-   bundle exec fastlane mac build
+   # Build the app
+   swift build
    
-   # Build, sign, and notarize
-   bundle exec fastlane mac release
+   # Run the app
+   swift run
    ```
 
 ### Setting up Code Signing
 
-1. Export your Developer ID certificate as a .p12 file from Keychain Access
-2. Create an App Store Connect API Key in App Store Connect
-3. Set up the following environment variables for CI/CD:
-   - `BUILD_CERTIFICATE_BASE64`: Your base64-encoded .p12 certificate
-   - `P12_PASSWORD`: Your .p12 file password
-   - `KEYCHAIN_PASSWORD`: Any password for a temporary keychain
-   - `ASC_KEY_ID`: App Store Connect API Key ID
-   - `ASC_ISSUER_ID`: App Store Connect Issuer ID
-   - `ASC_KEY_CONTENT`: App Store Connect API Key content
+1. Open the project in Xcode
+2. Select the target and update signing settings with your developer account
+3. Build and run from Xcode, or archive for distribution
 
 ## Installation
 
