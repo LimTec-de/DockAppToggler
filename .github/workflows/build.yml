@@ -139,7 +139,6 @@ jobs:
           release <<< "$SPARKLE_KEY"
 
     - name: Create Release
-      if: startsWith(github.ref, 'refs/tags/')
       uses: softprops/action-gh-release@v1
       with:
         files: |
@@ -147,4 +146,5 @@ jobs:
           DockAppToggler_final.dmg
           release/appcast.xml
         draft: true
+        name: "DockAppToggler v${{ env.VERSION }}"
         prerelease: false
