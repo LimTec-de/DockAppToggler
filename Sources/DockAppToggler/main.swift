@@ -553,6 +553,10 @@ class DockWatcher {
             return
         }
         
+        // Close any existing chooser window
+        windowChooser?.close()
+        windowChooser = nil
+        
         DispatchQueue.main.async { [weak self] in
             Logger.info("Showing window chooser at \(point.x), \(point.y)")
             
