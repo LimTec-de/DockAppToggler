@@ -23,6 +23,7 @@ let package = Package(
             dependencies: [
                 .product(name: "Sparkle", package: "Sparkle")
             ],
+            exclude: ["Info.plist"],
             resources: [
                 .process("Resources")
             ],

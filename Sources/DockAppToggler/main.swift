@@ -694,7 +694,7 @@ class StatusBarController {
         updateController = UpdateController()
         
         if let button = statusItem.button {
-            if let iconPath = Bundle.module.path(forResource: "icon", ofType: "icns"),
+            if let iconPath = Bundle.main.path(forResource: "icon", ofType: "icns"),
                let image = NSImage(contentsOfFile: iconPath) {
                 image.size = NSSize(width: 18, height: 18)
                 button.image = image
@@ -734,11 +734,22 @@ class UpdateController {
     private let driver: SPUStandardUserDriver
     
     init() {
-        driver = SPUStandardUserDriver(hostBundle: Bundle.main, delegate: nil)
+        // Get the main bundle
+        let bundle = Bundle.main
+        Logger.info("Initializing Sparkle with bundle path: \(bundle.bundlePath)")
+        
+        // Initialize Sparkle components
+        driver = SPUStandardUserDriver(hostBundle: bundle, delegate: nil)
         do {
-            updater = try SPUUpdater(hostBundle: Bundle.main, applicationBundle: Bundle.main, userDriver: driver, delegate: nil)
+            updater = SPUUpdater(hostBundle: bundle, applicationBundle: bundle, userDriver: driver, delegate: nil)
             try updater.start()
-            Logger.info("Sparkle updater initialized successfully")
+            
+            // Log bundle identifier for debugging
+            if let bundleId = bundle.bundleIdentifier {
+                Logger.info("Sparkle initialized with bundle identifier: \(bundleId)")
+            } else {
+                Logger.warning("No bundle identifier found")
+            }
         } catch {
             Logger.error("Failed to initialize Sparkle: \(error)")
         }
