@@ -257,11 +257,11 @@ class WindowChooserController: NSWindowController {
             }
             // First activate the app
             self.targetApp.activate(options: [.activateIgnoringOtherApps])
-            
+            /*
             // Unhide all windows of the app
             for windowInfo in windows {
                 AXUIElementSetAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
-            }
+            }*/
             
             // Bring the chosen window to the front
             AXUIElementPerformAction(window, kAXRaiseAction as CFString)
@@ -378,6 +378,9 @@ class AccessibilityService {
             Logger.debug("Window Name: \(displayTitle)")
             appWindowsInfo.append(WindowInfo(window: window, name: "\(displayTitle)"))
         }
+        
+        // Sort windows by their titles
+        appWindowsInfo.sort { $0.name < $1.name }
         
         return appWindowsInfo
     }
