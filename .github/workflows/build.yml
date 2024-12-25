@@ -118,11 +118,12 @@ jobs:
         hdiutil create -volname "DockAppToggler" -srcfolder dmg_root_final -ov -format UDZO DockAppToggler_final.dmg
 
     - name: Generate Appcast
+      env:
+        SPARKLE_KEY: ${{ secrets.SPARKLE_KEY }}
       run: |
-        # Create release directory and copy files
+        # Create release directory and copy only the zip file for updates
         mkdir -p release
         cp DockAppToggler_final.zip release/
-        cp DockAppToggler_final.dmg release/
         
         # Find Sparkle tools
         SPARKLE_PATH=".build/artifacts/sparkle/Sparkle/bin"
@@ -131,11 +132,19 @@ jobs:
           exit 1
         fi
         
+        # Save Sparkle key to file
+        echo "$SPARKLE_KEY" > sparkle_key.pem
+        chmod 600 sparkle_key.pem
+        
         # Generate appcast
         "$SPARKLE_PATH/generate_appcast" \
           --download-url-prefix "https://github.com/LimTec-de/DockAppToggler/releases/download/v${{ env.VERSION }}/" \
+          --key sparkle_key.pem \
           release
-    
+        
+        # Clean up key file
+        rm sparkle_key.pem
+
     - name: Create Release
       if: startsWith(github.ref, 'refs/tags/')
       uses: softprops/action-gh-release@v1
