@@ -18,7 +18,7 @@ import ApplicationServices
 
 /// Represents information about a window, including its ID and display name
 struct WindowInfo {
-    let windowID: CGWindowID
+    let window: AXUIElement
     let name: String
 }
 
@@ -86,10 +86,10 @@ enum Logger {
 /// A custom view that displays a list of windows as buttons with hover effects
 class WindowChooserView: NSView {
     private var options: [WindowInfo] = []
-    private var callback: ((CGWindowID) -> Void)?
+    private var callback: ((AXUIElement) -> Void)?
     private var buttons: [NSButton] = []
     
-    init(windows: [WindowInfo], callback: @escaping (CGWindowID) -> Void) {
+    init(windows: [WindowInfo], callback: @escaping (AXUIElement) -> Void) {
         self.options = windows
         self.callback = callback
         super.init(frame: NSRect(x: 0, y: 0, width: Constants.UI.windowWidth, height: Constants.UI.windowHeight(for: windows.count)))
@@ -101,14 +101,14 @@ class WindowChooserView: NSView {
     }
     
     private func setupButtons() {
-        for (index, window) in options.enumerated() {
-            let button = createButton(for: window, at: index)
+        for (index, windowInfo) in options.enumerated() {
+            let button = createButton(for: windowInfo, at: index)
             addSubview(button)
             buttons.append(button)
         }
     }
     
-    private func createButton(for window: WindowInfo, at index: Int) -> NSButton {
+    private func createButton(for windowInfo: WindowInfo, at index: Int) -> NSButton {
         let button = NSButton(frame: NSRect(
             x: Constants.UI.windowPadding,
             y: frame.height - CGFloat(index + 1) * Constants.UI.buttonSpacing - Constants.UI.verticalPadding,
@@ -116,7 +116,7 @@ class WindowChooserView: NSView {
             height: Constants.UI.buttonHeight
         ))
         
-        configureButton(button, title: window.name, tag: index)
+        configureButton(button, title: windowInfo.name, tag: index)
         addHoverEffect(to: button)
         
         return button
@@ -169,21 +169,20 @@ class WindowChooserView: NSView {
     }
     
     @objc private func buttonClicked(_ sender: NSButton) {
-        let windowID = options[sender.tag].windowID
-        callback?(windowID)
-        window?.close()
+        let window = options[sender.tag].window
+        callback?(window)
     }
 }
 
 /// A custom window controller that manages the window chooser interface
 class WindowChooserController: NSWindowController {
-    private let windowCallback: (CGWindowID) -> Void
+    private let windowCallback: (AXUIElement) -> Void
     private var chooserView: WindowChooserView?
     private let targetApp: NSRunningApplication
     private var trackingArea: NSTrackingArea?
     private let dismissalMargin: CGFloat = 20.0  // Pixels of margin around the window
     
-    init(at point: CGPoint, windows: [WindowInfo], app: NSRunningApplication, callback: @escaping (CGWindowID) -> Void) {
+    init(at point: CGPoint, windows: [WindowInfo], app: NSRunningApplication, callback: @escaping (AXUIElement) -> Void) {
         self.windowCallback = callback
         self.targetApp = app
         
@@ -249,14 +248,14 @@ class WindowChooserController: NSWindowController {
     
     private func setupChooserView(windows: [WindowInfo]) {
         guard let contentView = window?.contentView else { return }
-        let chooserView = WindowChooserView(windows: windows) { [weak self] windowID in
+        let chooserView = WindowChooserView(windows: windows) { [weak self] window in
             guard let self = self else { return }
-            Logger.info("Selected window with ID: \(windowID)")
+            Logger.info("Selected window with name: \(window)")
             // First raise the window
-            AccessibilityService.shared.raiseWindow(windowID: windowID, for: self.targetApp)
+            AXUIElementPerformAction(window, kAXRaiseAction as CFString)
             // Hide other windows individually
-            for window in windows where window.windowID != windowID {
-                AccessibilityService.shared.hideWindow(windowID: window.windowID, for: self.targetApp)
+            for windowInfo in windows where windowInfo.window != window {
+                AccessibilityService.shared.hideWindow(window: windowInfo.window, for: self.targetApp)
             }
             // Close the chooser window
             self.close()
@@ -367,25 +366,8 @@ class AccessibilityService {
                 ? (titleRef as! String)
                 : "Untitled").trimmingCharacters(in: .whitespacesAndNewlines)
             
-            // Window ID (AXWindowNumber)
-            var windowIDRef: CFTypeRef?
-            let windowIDResult = AXUIElementCopyAttributeValue(
-                window,
-                kCGWindowNumber as CFString,
-                &windowIDRef
-            )
-            
-            var windowID: CGWindowID = 0
-            if windowIDResult == .success,
-               let rawRef = windowIDRef,
-               CFGetTypeID(rawRef) == CFNumberGetTypeID()
-            {
-                let cfNumber = rawRef as! CFNumber
-                CFNumberGetValue(cfNumber, .intType, &windowID)
-            }
-            
-            Logger.debug("Window ID: \(windowID), Name: \(displayTitle)")
-            appWindowsInfo.append(WindowInfo(windowID: windowID, name: "\(displayTitle) (ID: \(windowID))"))
+            Logger.debug("Window Name: \(displayTitle)")
+            appWindowsInfo.append(WindowInfo(window: window, name: "\(displayTitle)"))
         }
         
         return appWindowsInfo
@@ -411,7 +393,7 @@ class AccessibilityService {
         let windowID = number.uint32Value
         let windowName = windowTitle
         Logger.success("Adding window: '\(windowName)' ID: \(windowID)")
-        return WindowInfo(windowID: windowID, name: windowName)
+        return WindowInfo(window: window, name: windowName)
     }
     
     private func getFallbackWindowID(for app: NSRunningApplication, index: Int) -> WindowInfo? {
@@ -431,62 +413,26 @@ class AccessibilityService {
             return nil
         }
         
+        // Create AXUIElement for the window
+        let window = AXUIElementCreateApplication(app.processIdentifier)
+        
         // Get the actual window name from CGWindowListCopyWindowInfo
         let windowTitle = matchingWindows[index][kCGWindowName as CFString] as? String
         let windowName = windowTitle ?? "\(app.localizedName ?? "Window") \(index + 1)"
         
         Logger.success("Adding window (fallback): '\(windowName)' ID: \(windowID)")
-        return WindowInfo(windowID: windowID, name: windowName)
+        return WindowInfo(window: window, name: windowName)
     }
     
-    func raiseWindow(windowID: CGWindowID, for app: NSRunningApplication) {
+    func raiseWindow(window: AXUIElement, for app: NSRunningApplication) {
         // First activate the app
         app.activate(options: [.activateIgnoringOtherApps])
         
-        // Get the window list to find the title for our windowID
-        let options = CGWindowListOption(arrayLiteral: .optionOnScreenOnly)
-        guard let windowList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[CFString: Any]] else {
-            return
-        }
-        
-        // Find our window's title
-        var targetTitle: String?
-        for window in windowList {
-            guard let pid = window[kCGWindowOwnerPID] as? pid_t,
-                  pid == app.processIdentifier,
-                  let wid = window[kCGWindowNumber] as? CGWindowID,
-                  wid == windowID,
-                  let title = window[kCGWindowName as CFString] as? String else {
-                continue
-            }
-            targetTitle = title
-            break
-        }
-        
-        guard let windowTitle = targetTitle else { return }
-        Logger.info("Raising window with title: '\(windowTitle)'")
-        
-        // Use AppleScript to raise the specific window by title
-        let script = """
-        tell application "System Events"
-            tell process "\(app.localizedName ?? "")"
-                set frontmost to true
-                delay 0.1
-                perform action "AXRaise" of window "\(windowTitle)"
-            end tell
-        end tell
-        """
-        
-        var error: NSDictionary?
-        if let scriptObject = NSAppleScript(source: script) {
-            scriptObject.executeAndReturnError(&error)
-            if let error = error {
-                Logger.error("Failed to execute AppleScript: \(error)")
-            }
-        }
+        // Use AXUIElementPerformAction to raise the window
+        AXUIElementPerformAction(window, kAXRaiseAction as CFString)
     }
     
-    func hideWindow(windowID: CGWindowID, for app: NSRunningApplication) {
+    func hideWindow(window: AXUIElement, for app: NSRunningApplication) {
         // Create AX UI element for the application
         let axApp = AXUIElementCreateApplication(app.processIdentifier)
         
@@ -499,17 +445,12 @@ class AccessibilityService {
         }
         
         // Find and minimize the matching window
-        for window in windows {
-            var windowIDRef: CFTypeRef?
-            guard AXUIElementCopyAttributeValue(window, Constants.Accessibility.windowIDKey, &windowIDRef) == .success,
-                  let numRef = windowIDRef as? NSNumber,
-                  numRef.uint32Value == windowID else {
-                continue
+        for windowElement in windows {
+            if windowElement == window {
+                // Perform minimize action
+                AXUIElementSetAttributeValue(windowElement, kAXMinimizedAttribute as CFString, true as CFTypeRef)
+                break
             }
-            
-            // Perform minimize action
-            AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, true as CFTypeRef)
-            break
         }
     }
 }
@@ -607,13 +548,13 @@ class DockWatcher {
                 at: point,
                 windows: windows,
                 app: app,
-                callback: { windowID in
-                    Logger.info("Selected window with ID: \(windowID)")
+                callback: { window in
+                    Logger.info("Selected window with name: \(window)")
                     // First raise the window
-                    AccessibilityService.shared.raiseWindow(windowID: windowID, for: app)
-                    // Hide other windows
-                    for window in windows where window.windowID != windowID {
-                        app.hide()
+                    AccessibilityService.shared.raiseWindow(window: window, for: app)
+                    // Hide other windows individually
+                    for windowInfo in windows where windowInfo.window != window {
+                        AccessibilityService.shared.hideWindow(window: windowInfo.window, for: app)
                     }
                 }
             )
