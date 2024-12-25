@@ -250,13 +250,18 @@ class WindowChooserController: NSWindowController {
         guard let contentView = window?.contentView else { return }
         let chooserView = WindowChooserView(windows: windows) { [weak self] window in
             guard let self = self else { return }
-            Logger.info("Selected window with name: \(window)")
-            // First raise the window
-            AXUIElementPerformAction(window, kAXRaiseAction as CFString)
-            // Hide other windows individually
-            for windowInfo in windows where windowInfo.window != window {
-                AccessibilityService.shared.hideWindow(window: windowInfo.window, for: self.targetApp)
+            Logger.info("Selected window element: \(window)")
+            // First activate the app
+            self.targetApp.activate(options: [.activateIgnoringOtherApps])
+            
+            // Unhide all windows of the app
+            for windowInfo in windows {
+                AXUIElementSetAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
             }
+            
+            // Bring the chosen window to the front
+            AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+            
             // Close the chooser window
             self.close()
         }
