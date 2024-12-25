@@ -132,18 +132,11 @@ jobs:
           exit 1
         fi
         
-        # Save Sparkle key to file
-        echo "$SPARKLE_KEY" > sparkle_key.pem
-        chmod 600 sparkle_key.pem
-        
-        # Generate appcast
+        # Use the key from stdin with the --ed-key-file option
         "$SPARKLE_PATH/generate_appcast" \
           --download-url-prefix "https://github.com/LimTec-de/DockAppToggler/releases/download/v${{ env.VERSION }}/" \
-          --key sparkle_key.pem \
-          release
-        
-        # Clean up key file
-        rm sparkle_key.pem
+          --ed-key-file - \
+          release <<< "$SPARKLE_KEY"
 
     - name: Create Release
       if: startsWith(github.ref, 'refs/tags/')
