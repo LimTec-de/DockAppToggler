@@ -17,6 +17,7 @@ jobs:
       id: get_version
       run: |
         VERSION=$(grep -A 1 'CFBundleShortVersionString' Sources/DockAppToggler/Info.plist | grep string | sed -E 's/<[^>]+>//g' | tr -d ' \t')
+        echo "Extracted version: $VERSION"
         echo "VERSION=$VERSION" >> $GITHUB_ENV
         
     - name: Set up Xcode
@@ -88,6 +89,7 @@ jobs:
           --identifier "com.limtec.dockapptoggler" \
           --version "${{ env.VERSION }}" \
           --install-location "/" \
+          --verbose \
           DockAppToggler.pkg
 
         

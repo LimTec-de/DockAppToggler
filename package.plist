@@ -3,10 +3,10 @@
 <plist version="1.0">
 <array>
     <dict>
-        <key>BundleHasStrictIdentifier</key>
-        <true/>
         <key>BundleIsRelocatable</key>
         <false/>
+        <key>BundleHasStrictIdentifier</key>
+        <true/>
         <key>BundleIsVersionChecked</key>
         <true/>
         <key>BundleOverwriteAction</key>
