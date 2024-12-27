@@ -26,7 +26,7 @@ struct WindowInfo {
 enum Constants {
     /// UI-related constants
     enum UI {
-        static let windowWidth: CGFloat = 200
+        static let windowWidth: CGFloat = 240
         static let buttonHeight: CGFloat = 30
         static let buttonSpacing: CGFloat = 32
         static let cornerRadius: CGFloat = 10
@@ -34,11 +34,21 @@ enum Constants {
         static let animationDuration: TimeInterval = 0.2
         
         // Additional constants for window sizing
-        static let verticalPadding: CGFloat = 4
+        static let verticalPadding: CGFloat = 8
+        static let titleHeight: CGFloat = 20
+        static let titlePadding: CGFloat = 8
+        
+        // Window positioning constants
+        static let leftSideButtonWidth: CGFloat = 20
+        static let rightSideButtonWidth: CGFloat = 20
+        static let sideButtonsSpacing: CGFloat = 0  // Reduced to 0 to place buttons right next to each other
+        static let screenEdgeMargin: CGFloat = 10.0  // Margin from screen edges
+        static let windowHeightMargin: CGFloat = 40.0  // Margin for window height
+        static let dockHeight: CGFloat = 70.0  // Approximate Dock height
         
         // Calculate total height needed for a given number of buttons
         static func windowHeight(for buttonCount: Int) -> CGFloat {
-            return CGFloat(buttonCount) * (buttonHeight + 2) + verticalPadding * 2
+            return titleHeight + CGFloat(buttonCount) * (buttonHeight + 2) + verticalPadding * 2
         }
     }
     
@@ -86,13 +96,18 @@ enum Logger {
 /// A custom view that displays a list of windows as buttons with hover effects
 class WindowChooserView: NSView {
     private var options: [WindowInfo] = []
-    private var callback: ((AXUIElement) -> Void)?
+    private var callback: ((AXUIElement, Bool) -> Void)?
     private var buttons: [NSButton] = []
+    private var hideButtons: [NSButton] = []
+    private var titleField: NSTextField!
+    private let targetApp: NSRunningApplication
     
-    init(windows: [WindowInfo], callback: @escaping (AXUIElement) -> Void) {
+    init(windows: [WindowInfo], appName: String, app: NSRunningApplication, callback: @escaping (AXUIElement, Bool) -> Void) {
         self.options = windows
         self.callback = callback
+        self.targetApp = app
         super.init(frame: NSRect(x: 0, y: 0, width: Constants.UI.windowWidth, height: Constants.UI.windowHeight(for: windows.count)))
+        setupTitle(appName)
         setupButtons()
     }
     
@@ -100,23 +115,97 @@ class WindowChooserView: NSView {
         fatalError("init(coder:) has not been implemented")
     }
     
+    private func setupTitle(_ appName: String) {
+        titleField = NSTextField(frame: NSRect(
+            x: Constants.UI.windowPadding,
+            y: frame.height - Constants.UI.titleHeight - Constants.UI.titlePadding,
+            width: frame.width - Constants.UI.windowPadding * 2,
+            height: Constants.UI.titleHeight
+        ))
+        
+        titleField.stringValue = appName
+        titleField.isEditable = false
+        titleField.isSelectable = false
+        titleField.isBordered = false
+        titleField.drawsBackground = false
+        titleField.textColor = .labelColor
+        titleField.font = .boldSystemFont(ofSize: 12)
+        titleField.alignment = .center
+        
+        addSubview(titleField)
+    }
+    
     private func setupButtons() {
         for (index, windowInfo) in options.enumerated() {
             let button = createButton(for: windowInfo, at: index)
+            let hideButton = createHideButton(for: windowInfo, at: index)
             addSubview(button)
+            addSubview(hideButton)
             buttons.append(button)
+            hideButtons.append(hideButton)
         }
     }
     
     private func createButton(for windowInfo: WindowInfo, at index: Int) -> NSButton {
         let button = NSButton(frame: NSRect(
-            x: Constants.UI.windowPadding,
-            y: frame.height - CGFloat(index + 1) * Constants.UI.buttonSpacing - Constants.UI.verticalPadding,
-            width: Constants.UI.windowWidth - Constants.UI.windowPadding * 2,
+            x: 24,
+            y: frame.height - Constants.UI.titleHeight - CGFloat(index + 1) * Constants.UI.buttonSpacing - Constants.UI.verticalPadding,
+            width: Constants.UI.windowWidth - Constants.UI.windowPadding * 2 - 24 - Constants.UI.leftSideButtonWidth - Constants.UI.rightSideButtonWidth - Constants.UI.sideButtonsSpacing,
             height: Constants.UI.buttonHeight
         ))
         
         configureButton(button, title: windowInfo.name, tag: index)
+        addHoverEffect(to: button)
+        
+        // Create left side button
+        let leftButton = createSideButton(for: windowInfo, at: index, isLeft: true)
+        addSubview(leftButton)
+        
+        // Create right side button
+        let rightButton = createSideButton(for: windowInfo, at: index, isLeft: false)
+        addSubview(rightButton)
+        
+        return button
+    }
+    
+    private func createHideButton(for windowInfo: WindowInfo, at index: Int) -> NSButton {
+        let button = NSButton(frame: NSRect(
+            x: Constants.UI.windowPadding,
+            y: frame.height - Constants.UI.titleHeight - CGFloat(index + 1) * Constants.UI.buttonSpacing - Constants.UI.verticalPadding,
+            width: 20,
+            height: Constants.UI.buttonHeight
+        ))
+        
+        // Check if window is minimized
+        var isVisible = false
+        var value: AnyObject?
+        if AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &value) == .success,
+           let minimized = value as? Bool {
+            isVisible = !minimized
+        }
+        
+        // Create minimize image
+        let config = NSImage.SymbolConfiguration(pointSize: 10, weight: .regular)
+        let image = NSImage(systemSymbolName: "minus.circle.fill", accessibilityDescription: "Minimize")?.withSymbolConfiguration(config)
+        button.image = image
+        button.imagePosition = .imageOnly
+        
+        // Set color based on window state
+        button.contentTintColor = isVisible ? 
+            NSColor(red: 1.0, green: 0.84, blue: 0.0, alpha: 1.0) : // Yellow minimize button color
+            .tertiaryLabelColor
+        
+        button.bezelStyle = .inline
+        button.tag = index
+        button.target = self
+        button.action = #selector(hideButtonClicked(_:))
+        button.isBordered = false
+        button.setButtonType(.momentaryLight)
+        
+        // Always enable the button, but use different colors to show state
+        button.isEnabled = true
+        
+        // Always add hover effect
         addHoverEffect(to: button)
         
         return button
@@ -152,8 +241,17 @@ class WindowChooserView: NSView {
         if let button = event.trackingArea?.owner as? NSButton {
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = Constants.UI.animationDuration
-                button.contentTintColor = .selectedMenuItemTextColor
-                button.layer?.backgroundColor = NSColor(white: 1.0, alpha: 0.15).cgColor
+                if hideButtons.contains(button) {
+                    // Existing hide button hover logic
+                    // ...
+                } else if button.action == #selector(moveWindowLeft(_:)) || button.action == #selector(moveWindowRight(_:)) {
+                    // Side button hover effect
+                    button.contentTintColor = .labelColor
+                    button.layer?.backgroundColor = NSColor(white: 1.0, alpha: 0.15).cgColor
+                } else {
+                    // Existing window button hover logic
+                    // ...
+                }
             }
         }
     }
@@ -162,15 +260,233 @@ class WindowChooserView: NSView {
         if let button = event.trackingArea?.owner as? NSButton {
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = Constants.UI.animationDuration
-                button.contentTintColor = .labelColor
-                button.layer?.backgroundColor = .clear
+                if hideButtons.contains(button) {
+                    // Existing hide button exit logic
+                    // ...
+                } else if button.action == #selector(moveWindowLeft(_:)) || button.action == #selector(moveWindowRight(_:)) {
+                    // Side button exit effect
+                    button.contentTintColor = .tertiaryLabelColor
+                    button.layer?.backgroundColor = .clear
+                } else {
+                    // Existing window button exit logic
+                    // ...
+                }
             }
         }
     }
     
     @objc private func buttonClicked(_ sender: NSButton) {
         let window = options[sender.tag].window
-        callback?(window)
+        // Always show and raise the window
+        AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
+        AccessibilityService.shared.raiseWindow(window: window, for: targetApp)
+        targetApp.activate(options: [.activateIgnoringOtherApps])
+        
+        // Update corresponding hide button state
+        let hideButton = hideButtons[sender.tag]
+        hideButton.isEnabled = true
+        hideButton.contentTintColor = NSColor(red: 1.0, green: 0.84, blue: 0.0, alpha: 1.0)  // Yellow minimize button color
+        
+        // Re-add hover effect
+        let trackingArea = NSTrackingArea(
+            rect: hideButton.bounds,
+            options: [.mouseEnteredAndExited, .activeInKeyWindow],
+            owner: hideButton,
+            userInfo: nil
+        )
+        hideButton.addTrackingArea(trackingArea)
+    }
+    
+    @objc private func hideButtonClicked(_ sender: NSButton) {
+        let window = options[sender.tag].window
+        
+        // Check current window state
+        var minimizedValue: AnyObject?
+        if AXUIElementCopyAttributeValue(window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success,
+           let isMinimized = minimizedValue as? Bool {
+            if isMinimized {
+                // Window is minimized - restore it
+                AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
+                AccessibilityService.shared.raiseWindow(window: window, for: targetApp)
+                targetApp.activate(options: [.activateIgnoringOtherApps])
+                
+                // Update button state to active
+                sender.contentTintColor = NSColor(red: 1.0, green: 0.84, blue: 0.0, alpha: 1.0)  // Yellow minimize button color
+            } else {
+                // Window is visible - minimize it
+                AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, true as CFTypeRef)
+                
+                // Update button state to inactive
+                sender.contentTintColor = .tertiaryLabelColor
+            }
+        }
+    }
+    
+    deinit {
+        // Remove tracking areas
+        let buttonsToClean = buttons + hideButtons
+        Task { @MainActor in
+            for button in buttonsToClean {
+                for area in button.trackingAreas {
+                    button.removeTrackingArea(area)
+                }
+            }
+        }
+    }
+    
+    // Add new method to create side buttons
+    private func createSideButton(for windowInfo: WindowInfo, at index: Int, isLeft: Bool) -> NSButton {
+        let totalButtonsWidth = Constants.UI.leftSideButtonWidth + Constants.UI.rightSideButtonWidth
+        let button = NSButton(frame: NSRect(
+            x: isLeft ? 
+                Constants.UI.windowWidth - Constants.UI.windowPadding - totalButtonsWidth :
+                Constants.UI.windowWidth - Constants.UI.windowPadding - Constants.UI.rightSideButtonWidth,
+            y: frame.height - Constants.UI.titleHeight - CGFloat(index + 1) * Constants.UI.buttonSpacing - Constants.UI.verticalPadding,
+            width: Constants.UI.leftSideButtonWidth,
+            height: Constants.UI.buttonHeight
+        ))
+        
+        // Create arrow image
+        let config = NSImage.SymbolConfiguration(pointSize: 10, weight: .regular)
+        let imageName = isLeft ? "arrow.left.square.fill" : "arrow.right.square.fill"
+        let image = NSImage(systemSymbolName: imageName, accessibilityDescription: isLeft ? "Move Left" : "Move Right")?.withSymbolConfiguration(config)
+        button.image = image
+        button.imagePosition = NSControl.ImagePosition.imageOnly
+        
+        button.bezelStyle = NSButton.BezelStyle.inline
+        button.isBordered = false
+        button.tag = index
+        button.target = self
+        button.action = isLeft ? #selector(moveWindowLeft(_:)) : #selector(moveWindowRight(_:))
+        
+        // Set initial color based on window position
+        let isInPosition = isWindowInPosition(windowInfo.window, onLeft: isLeft)
+        button.contentTintColor = isInPosition ? .white : NSColor.tertiaryLabelColor
+        
+        addHoverEffect(to: button)
+        
+        return button
+    }
+    
+    // Add methods to handle window positioning
+    @objc private func moveWindowLeft(_ sender: NSButton) {
+        let window = options[sender.tag].window
+        positionWindow(window, onLeft: true)
+    }
+    
+    @objc private func moveWindowRight(_ sender: NSButton) {
+        let window = options[sender.tag].window
+        positionWindow(window, onLeft: false)
+    }
+    
+    private func positionWindow(_ window: AXUIElement, onLeft: Bool) {
+        guard let screen = NSScreen.main else { return }
+        
+        // First unminimize and unhide to ensure proper sizing
+        AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
+        AXUIElementSetAttributeValue(window, kAXHiddenAttribute as CFString, false as CFTypeRef)
+        
+        // Ensure window is active and raised first
+        AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+        targetApp.activate(options: [.activateIgnoringOtherApps])
+        
+        // Small delay to ensure window is ready
+        usleep(5000)
+        
+        // Get the screen's available space (excluding Dock and Menu Bar)
+        let visibleFrame = screen.visibleFrame
+        let margin = Constants.UI.screenEdgeMargin
+        
+        // Calculate usable area (only horizontal margins)
+        let usableWidth = (visibleFrame.width - (margin * 3)) / 2  // Three margins (left, middle, right)
+        let usableHeight = visibleFrame.height  // Full height, no vertical margins
+        
+        // Calculate position (only horizontal margin)
+        let xPosition = onLeft ? 
+            visibleFrame.minX + margin :  // Left margin
+            visibleFrame.maxX - usableWidth - margin  // Right margin
+        
+        var position = CGPoint(
+            x: xPosition,
+            y: 0  // Position at the top of visible frame
+        )
+        
+        // Set size and position in a single batch
+        var newSize = CGSize(width: usableWidth, height: usableHeight)
+        
+        if let sizeValue = AXValueCreate(.cgSize, &newSize),
+           let positionValue = AXValueCreate(.cgPoint, &position) {
+            // Set size and position in quick succession
+            AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, sizeValue)
+            usleep(1000)  // Tiny delay between size and position
+            AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, positionValue)
+        }
+        
+        // Force window refresh to ensure it's frontmost
+        usleep(5000)
+        var refreshPos = CGPoint(x: position.x + 1, y: position.y)
+        if let refreshValue = AXValueCreate(.cgPoint, &refreshPos) {
+            AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, refreshValue)
+            usleep(1000)
+            
+            if let originalValue = AXValueCreate(.cgPoint, &position) {
+                AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, originalValue)
+            }
+        }
+        
+        // After window is positioned, update button colors
+        for (index, windowInfo) in options.enumerated() {
+            if windowInfo.window == window {
+                // Find and update both left and right buttons for this window
+                let buttons = self.subviews.compactMap { $0 as? NSButton }
+                for button in buttons {
+                    if button.tag == index && (button.action == #selector(moveWindowLeft(_:)) || button.action == #selector(moveWindowRight(_:))) {
+                        let isLeft = button.action == #selector(moveWindowLeft(_:))
+                        let isInPosition = isWindowInPosition(window, onLeft: isLeft)
+                        button.contentTintColor = isInPosition ? .white : NSColor.tertiaryLabelColor
+                    }
+                }
+                break
+            }
+        }
+    }
+    
+    // Add helper method to WindowChooserView to check window position
+    private func isWindowInPosition(_ window: AXUIElement, onLeft: Bool) -> Bool {
+        guard let screen = NSScreen.main else { return false }
+        
+        // Get window position and size
+        var positionValue: AnyObject?
+        var sizeValue: AnyObject?
+        var position = CGPoint.zero
+        var size = CGSize.zero
+        
+        if AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &positionValue) == .success,
+           let cfPosition = positionValue,
+           CFGetTypeID(cfPosition) == AXValueGetTypeID(),
+           AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &sizeValue) == .success,
+           let cfSize = sizeValue,
+           CFGetTypeID(cfSize) == AXValueGetTypeID() {
+            let posRef = cfPosition as! AXValue
+            let sizeRef = cfSize as! AXValue
+            AXValueGetValue(posRef, .cgPoint, &position)
+            AXValueGetValue(sizeRef, .cgSize, &size)
+            
+            let visibleFrame = screen.visibleFrame
+            let margin = Constants.UI.screenEdgeMargin
+            let expectedWidth = (visibleFrame.width - (margin * 3)) / 2
+            
+            // Check if window is in expected position and size
+            let leftPosition = visibleFrame.minX + margin
+            let rightPosition = visibleFrame.maxX - expectedWidth - margin
+            
+            if onLeft {
+                return abs(position.x - leftPosition) < 1 && abs(size.width - expectedWidth) < 1
+            } else {
+                return abs(position.x - rightPosition) < 1 && abs(size.width - expectedWidth) < 1
+            }
+        }
+        return false
     }
 }
 
@@ -191,18 +507,22 @@ class WindowChooserController: NSWindowController {
         
         let screen = NSScreen.main ?? NSScreen.screens[0]
         
+        // Calculate position to be just above the Dock
+        let dockHeight: CGFloat = 70 // Approximate Dock height
+        let tooltipOffset: CGFloat = -4 // Negative offset to overlap the Dock slightly
+        
         // Keep x position aligned with the Dock icon click
         let adjustedX = max(Constants.UI.windowPadding, 
                            min(point.x - width/2, 
                                screen.frame.width - width - Constants.UI.windowPadding))
         
-        // Position above the Dock (Dock is at the bottom of the screen)
-        let dockHeight: CGFloat = 70 // Approximate Dock height
-        let adjustedY = dockHeight + Constants.UI.windowPadding
+        // Position the window just above the Dock
+        let adjustedY = dockHeight + tooltipOffset
         
-        Logger.info("Positioning window chooser at x: \(adjustedX), y: \(adjustedY) (click at: \(point.x), \(point.y))")
-        
-        let frame = NSRect(x: adjustedX, y: adjustedY, width: width, height: height)
+        let frame = NSRect(x: adjustedX, 
+                          y: adjustedY, 
+                          width: width, 
+                          height: height)
         
         let window = NSWindow(
             contentRect: frame,
@@ -218,6 +538,8 @@ class WindowChooserController: NSWindowController {
         setupChooserView(windows: windows)
         setupTrackingArea()
         animateAppearance()
+        
+        window.ignoresMouseEvents = false
     }
     
     required init?(coder: NSCoder) {
@@ -229,7 +551,7 @@ class WindowChooserController: NSWindowController {
         window.backgroundColor = .clear
         window.isOpaque = false
         window.hasShadow = false
-        window.level = .floating
+        window.level = .screenSaver
         window.appearance = NSAppearance(named: .vibrantDark)
         window.contentView?.wantsLayer = true
         window.contentView?.layer?.cornerRadius = 10
@@ -248,27 +570,30 @@ class WindowChooserController: NSWindowController {
     
     private func setupChooserView(windows: [WindowInfo]) {
         guard let contentView = window?.contentView else { return }
-        let chooserView = WindowChooserView(windows: windows) { [weak self] window in
-            guard let self = self else { return }
-            if let selectedWindowInfo = windows.first(where: { $0.window == window }) {
-                Logger.info("Selected window element: \(window) with title: \(selectedWindowInfo.name)")
-            } else {
-                Logger.warning("Selected window element not found in the list")
+        let chooserView = WindowChooserView(
+            windows: windows,
+            appName: targetApp.localizedName ?? "Application",
+            app: targetApp,
+            callback: { [weak self] window, isHideAction in
+                guard let self = self else { return }
+                
+                if isHideAction {
+                    // Hide the selected window
+                    AccessibilityService.shared.hideWindow(window: window, for: self.targetApp)
+                } else {
+                    // Always show and raise the window
+                    AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
+                    AccessibilityService.shared.raiseWindow(window: window, for: self.targetApp)
+                    self.targetApp.activate(options: [.activateIgnoringOtherApps])
+                }
+                
+                // Notify DockWatcher about menu closure
+                NotificationCenter.default.post(name: NSNotification.Name("WindowChooserDidClose"), object: nil)
+                
+                // Close the chooser window
+                self.close()
             }
-            // First activate the app
-            self.targetApp.activate(options: [.activateIgnoringOtherApps])
-            /*
-            // Unhide all windows of the app
-            for windowInfo in windows {
-                AXUIElementSetAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
-            }*/
-            
-            // Bring the chosen window to the front
-            AXUIElementPerformAction(window, kAXRaiseAction as CFString)
-            
-            // Close the chooser window
-            self.close()
-        }
+        )
         contentView.addSubview(chooserView)
         self.chooserView = chooserView
     }
@@ -294,30 +619,6 @@ class WindowChooserController: NSWindowController {
             window.animator().alphaValue = 1
         }
     }
-    
-    override func mouseExited(with event: NSEvent) {
-        super.mouseExited(with: event)
-        
-        // Add a small delay before closing to prevent accidental dismissals
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-            guard let self = self,
-                  let window = self.window,
-                  let mouseLocation = NSEvent.mouseLocation.cgPoint else { return }
-            
-            // Create an expanded frame with margin
-            let expandedFrame = NSRect(
-                x: window.frame.minX - self.dismissalMargin,
-                y: window.frame.minY - self.dismissalMargin,
-                width: window.frame.width + (self.dismissalMargin * 2),
-                height: window.frame.height + (self.dismissalMargin * 2)
-            )
-            
-            // Check if mouse is outside the expanded frame
-            if !expandedFrame.contains(mouseLocation) {
-                self.close()
-            }
-        }
-    }
 }
 
 // Helper extension to convert NSPoint to CGPoint
@@ -332,6 +633,9 @@ extension NSPoint {
 @MainActor
 class AccessibilityService {
     static let shared = AccessibilityService()
+    
+    // Modify the window state struct to include order
+    private var windowStates: [pid_t: [(window: AXUIElement, wasVisible: Bool, order: Int, stackOrder: Int)]] = [:]
     
     private init() {}
     
@@ -391,6 +695,11 @@ class AccessibilityService {
             let displayTitle = ((titleResult == .success && titleRef is String)
                 ? (titleRef as! String)
                 : "Untitled").trimmingCharacters(in: .whitespacesAndNewlines)
+            
+            // Skip windows with empty or "Untitled" titles
+            /*guard !displayTitle.isEmpty && displayTitle.lowercased() != "untitled" else {
+                continue
+            }*/
             
             Logger.debug("Window Name: \(displayTitle)")
             appWindowsInfo.append(WindowInfo(window: window, name: "\(displayTitle)"))
@@ -462,25 +771,244 @@ class AccessibilityService {
     }
     
     func hideWindow(window: AXUIElement, for app: NSRunningApplication) {
-        // Create AX UI element for the application
-        let axApp = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetAttributeValue(window, kAXHiddenAttribute as CFString, true as CFTypeRef)
+    }
+    
+    func isWindowVisible(_ window: AXUIElement) -> Bool {
+        // Check hidden state
+        var hiddenValue: AnyObject?
+        let hiddenResult = AXUIElementCopyAttributeValue(window, kAXHiddenAttribute as CFString, &hiddenValue)
+        let isHidden = (hiddenResult == .success && (hiddenValue as? Bool == true))
         
-        // Get all windows
+        // Check minimized state
+        var minimizedValue: AnyObject?
+        let minimizedResult = AXUIElementCopyAttributeValue(window, kAXMinimizedAttribute as CFString, &minimizedValue)
+        let isMinimized = (minimizedResult == .success && (minimizedValue as? Bool == true))
+        
+        return !isHidden && !isMinimized
+    }
+    
+    func hideAllWindows(for app: NSRunningApplication) {
+        let pid = app.processIdentifier
+        let axApp = AXUIElementCreateApplication(pid)
+        
+        // Get current window stacking order
+        let stackOrder = getWindowStackOrder(for: app)
+        
         var windowsRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(axApp, Constants.Accessibility.windowsKey, &windowsRef) == .success,
               let windows = windowsRef as? [AXUIElement] else {
-            Logger.error("Failed to get windows from AX UI element")
+            Logger.error("Failed to get windows for app: \(app.localizedName ?? "Unknown")")
             return
         }
         
-        // Find and minimize the matching window
-        for windowElement in windows {
-            if windowElement == window {
-                // Perform minimize action
-                AXUIElementSetAttributeValue(windowElement, kAXMinimizedAttribute as CFString, true as CFTypeRef)
-                break
+        // If there's only one window and it's minimized, don't store any state
+        if windows.count == 1 {
+            var minimizedValue: AnyObject?
+            if AXUIElementCopyAttributeValue(windows[0], kAXMinimizedAttribute as CFString, &minimizedValue) == .success,
+               let isMinimized = minimizedValue as? Bool,
+               isMinimized {
+                Logger.debug("Single minimized window detected - skipping state storage")
+                return
             }
         }
+        
+        var states: [(window: AXUIElement, wasVisible: Bool, order: Int, stackOrder: Int)] = []
+        var visibleCount = 0
+        
+        NSAnimationContext.beginGrouping()
+        NSAnimationContext.current.duration = 0
+        
+        // Process windows and store their states
+        for (index, window) in windows.enumerated() {
+            let wasVisible = isWindowVisible(window)
+            if wasVisible {
+                visibleCount += 1
+            }
+            
+            // Get window ID for stack order
+            var windowIDRef: CFTypeRef?
+            let result = AXUIElementCopyAttributeValue(window, Constants.Accessibility.windowIDKey, &windowIDRef)
+            let windowStackOrder: Int
+            if result == .success,
+               let numRef = windowIDRef as? NSNumber {
+                // Invert the stack order so higher numbers are in front
+                windowStackOrder = Int.max - (stackOrder[CGWindowID(numRef.uint32Value)] ?? 0)
+            } else {
+                windowStackOrder = 0
+            }
+            
+            states.append((window: window,
+                          wasVisible: wasVisible,
+                          order: index,
+                          stackOrder: windowStackOrder))
+            
+            if wasVisible {
+                AXUIElementSetAttributeValue(window, kAXHiddenAttribute as CFString, true as CFTypeRef)
+            }
+        }
+        
+        NSAnimationContext.endGrouping()
+        
+        // Store states sorted by stack order (back to front)
+        windowStates[pid] = states.sorted { $0.stackOrder < $1.stackOrder }
+        Logger.debug("Stored states for \(visibleCount) visible windows of \(app.localizedName ?? "Unknown")")
+    }
+    
+    func restoreAllWindows(for app: NSRunningApplication) {
+        let pid = app.processIdentifier
+        let axApp = AXUIElementCreateApplication(pid)
+        
+        // Get current windows
+        var windowsRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(axApp, Constants.Accessibility.windowsKey, &windowsRef) == .success,
+              let windows = windowsRef as? [AXUIElement] else {
+            return
+        }
+        
+        // If there's only one window, use simple restore
+        if windows.count == 1 {
+            let window = windows[0]
+            // Unminimize if needed
+            var minimizedValue: AnyObject?
+            if AXUIElementCopyAttributeValue(window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success,
+               let isMinimized = minimizedValue as? Bool,
+               isMinimized {
+                AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
+            }
+            // Unhide if needed
+            var hiddenValue: AnyObject?
+            if AXUIElementCopyAttributeValue(window, kAXHiddenAttribute as CFString, &hiddenValue) == .success,
+               let isHidden = hiddenValue as? Bool,
+               isHidden {
+                AXUIElementSetAttributeValue(window, kAXHiddenAttribute as CFString, false as CFTypeRef)
+            }
+            // Raise the window
+            AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+            Logger.debug("Restored single window for \(app.localizedName ?? "Unknown")")
+            return
+        }
+        
+        // For multiple windows, use the full restore procedure
+        NSAnimationContext.beginGrouping()
+        NSAnimationContext.current.duration = 0
+        
+        // First pass: Show all windows from back to front (normal stack order)
+        for state in windowStates[pid] ?? [] where state.wasVisible {
+            AXUIElementSetAttributeValue(state.window, kAXHiddenAttribute as CFString, false as CFTypeRef)
+            AXUIElementSetAttributeValue(state.window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
+        }
+        
+        usleep(20000) // 20ms delay
+        
+        // Second pass: Raise windows from back to front to maintain z-order
+        for state in (windowStates[pid] ?? []).reversed() where state.wasVisible {
+            // Force window refresh
+            var position = CGPoint.zero
+            var valueRef: AnyObject?
+            
+            if AXUIElementCopyAttributeValue(state.window, kAXPositionAttribute as CFString, &valueRef) == .success,
+               let cfValue = valueRef,
+               CFGetTypeID(cfValue) == AXValueGetTypeID() {
+                // Since we already checked the CFTypeID, we can safely force cast
+                let axValue = cfValue as! AXValue
+                AXValueGetValue(axValue, .cgPoint, &position)
+                
+                // Raise the window
+                AXUIElementPerformAction(state.window, kAXRaiseAction as CFString)
+                usleep(5000) // Small delay after raising
+                
+                // Force refresh by moving slightly
+                var newPos = CGPoint(x: position.x + 1, y: position.y)
+                if let posValue = AXValueCreate(.cgPoint, &newPos) {
+                    AXUIElementSetAttributeValue(state.window, kAXPositionAttribute as CFString, posValue)
+                    usleep(5000)
+                    
+                    if let originalPosValue = AXValueCreate(.cgPoint, &position) {
+                        AXUIElementSetAttributeValue(state.window, kAXPositionAttribute as CFString, originalPosValue)
+                    }
+                }
+            }
+        }
+        
+        NSAnimationContext.endGrouping()
+        
+        windowStates.removeValue(forKey: pid)
+        Logger.debug("Restored \(windowStates[pid]?.filter { $0.wasVisible }.count ?? 0) windows for \(app.localizedName ?? "Unknown")")
+    }
+    
+    // Fix the clearWindowStates method
+    nonisolated func clearWindowStates(for app: NSRunningApplication) {
+        // Use @unchecked Sendable to bypass the Sendable check
+        Task<Void, Never> { @MainActor [self] in 
+            self.windowStates.removeValue(forKey: app.processIdentifier)
+        }
+    }
+    
+    // Add a new method to get window stacking order
+    private func getWindowStackOrder(for app: NSRunningApplication) -> [CGWindowID: Int] {
+        var stackOrder: [CGWindowID: Int] = [:]
+        
+        // Get all windows in current stacking order
+        let options = CGWindowListOption([.optionOnScreenOnly, .excludeDesktopElements])
+        guard let windowList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[CFString: Any]] else {
+            return stackOrder
+        }
+        
+        // Create mapping of window IDs to their stacking order
+        for (index, windowInfo) in windowList.enumerated() {
+            guard let pid = windowInfo[kCGWindowOwnerPID] as? pid_t,
+                  pid == app.processIdentifier,
+                  let windowID = windowInfo[kCGWindowNumber] as? CGWindowID else {
+                continue
+            }
+            stackOrder[windowID] = index
+        }
+        
+        return stackOrder
+    }
+    
+    func initializeWindowStates(for app: NSRunningApplication) {
+        let pid = app.processIdentifier
+        
+        // Skip if we already have states for this app
+        guard windowStates[pid] == nil else { return }
+        
+        let axApp = AXUIElementCreateApplication(pid)
+        var windowsRef: CFTypeRef?
+        
+        guard AXUIElementCopyAttributeValue(axApp, Constants.Accessibility.windowsKey, &windowsRef) == .success,
+              let windows = windowsRef as? [AXUIElement] else {
+            return
+        }
+        
+        // Get window stacking order
+        let stackOrder = getWindowStackOrder(for: app)
+        var states: [(window: AXUIElement, wasVisible: Bool, order: Int, stackOrder: Int)] = []
+        
+        // Initialize states for all windows
+        for (index, window) in windows.enumerated() {
+            let isVisible = isWindowVisible(window)
+            
+            // Get window ID for stack order
+            var windowIDRef: CFTypeRef?
+            let result = AXUIElementCopyAttributeValue(window, Constants.Accessibility.windowIDKey, &windowIDRef)
+            let windowStackOrder: Int
+            if result == .success,
+               let numRef = windowIDRef as? NSNumber {
+                windowStackOrder = Int.max - (stackOrder[CGWindowID(numRef.uint32Value)] ?? 0)
+            } else {
+                windowStackOrder = 0
+            }
+            
+            states.append((window: window,
+                          wasVisible: isVisible,
+                          order: index,
+                          stackOrder: windowStackOrder))
+        }
+        
+        // Store states sorted by stack order
+        windowStates[pid] = states.sorted { $0.stackOrder < $1.stackOrder }
     }
 }
 
@@ -523,6 +1051,29 @@ class DockService {
             return nil
         }
         
+        // Check if app has any non-minimized windows before returning
+        let axApp = AXUIElementCreateApplication(app.processIdentifier)
+        var windowsRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(axApp, Constants.Accessibility.windowsKey, &windowsRef) == .success,
+              let windows = windowsRef as? [AXUIElement] else {
+            return nil
+        }
+        
+        // Check if there are any non-minimized windows
+        let hasVisibleWindows = windows.contains { window in
+            var minimizedValue: AnyObject?
+            if AXUIElementCopyAttributeValue(window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success,
+               let isMinimized = minimizedValue as? Bool {
+                return !isMinimized
+            }
+            return false
+        }
+        
+        if !hasVisibleWindows {
+            Logger.debug("No visible windows for \(app.localizedName ?? "Unknown"), ignoring click")
+            return nil
+        }
+        
         Logger.info("Dock icon clicked: \(url.deletingPathExtension().lastPathComponent)")
         return (app: app, url: url)
     }
@@ -547,87 +1098,121 @@ class DockService {
 @MainActor
 class DockWatcher {
     nonisolated(unsafe) private var eventTap: CFMachPort?
-    private var windowChooser: WindowChooserController?
-    private var runLoopSource: CFRunLoopSource?
+    nonisolated(unsafe) private var runLoopSource: CFRunLoopSource?
+    nonisolated(unsafe) private var windowChooser: WindowChooserController?
+    nonisolated(unsafe) private var menuShowTask: DispatchWorkItem?
+    private var lastHoveredApp: NSRunningApplication?
+    private var lastWindowOrder: [AXUIElement]?
+    private let menuShowDelay: TimeInterval = 0.05
+    private var lastClickTime: TimeInterval = 0
+    private let clickDebounceInterval: TimeInterval = 0.3
+    private var clickedApp: NSRunningApplication?
+    private let dismissalMargin: CGFloat = 20.0  // Add this line
     
     init() {
-        startMonitoring()
+        setupEventTap()
+        setupNotifications()
         Logger.info("DockWatcher initialized")
     }
     
+    nonisolated private func cleanup() {
+        // Since we're nonisolated, we need to use DispatchQueue.main
+        DispatchQueue.main.async { [windowChooser, menuShowTask] in
+            // Cancel any pending tasks
+            menuShowTask?.cancel()
+            
+            // Clean up window chooser
+            windowChooser?.close()
+        }
+    }
+    
     deinit {
+        // Remove observer
+        NotificationCenter.default.removeObserver(self)
+        
+        // Clean up event tap
         if let tap = eventTap {
             CGEvent.tapEnable(tap: tap, enable: false)
+            CFMachPortInvalidate(tap)
         }
+        
+        // Clean up run loop source
         if let source = runLoopSource {
             CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .commonModes)
-        }
-    }
-    
-    private func showWindowChooser(for app: NSRunningApplication, at point: CGPoint, windows: [WindowInfo]) {
-        guard !windows.isEmpty else {
-            Logger.warning("No windows provided")
-            return
+            CFRunLoopSourceInvalidate(source)
         }
         
-        // Close any existing chooser window
-        windowChooser?.close()
-        windowChooser = nil
+        // Clean up references
+        eventTap = nil
+        runLoopSource = nil
         
-        DispatchQueue.main.async { [weak self] in
-            Logger.info("Showing window chooser at \(point.x), \(point.y)")
-            
-            let chooser = WindowChooserController(
-                at: point,
-                windows: windows,
-                app: app,
-                callback: { window in
-                    Logger.info("Selected window with name: \(window)")
-                    // First raise the window
-                    AccessibilityService.shared.raiseWindow(window: window, for: app)
-                    // Hide other windows individually
-                    for windowInfo in windows where windowInfo.window != window {
-                        AccessibilityService.shared.hideWindow(window: windowInfo.window, for: app)
-                    }
-                }
-            )
-            
-            self?.windowChooser = chooser
-            chooser.window?.makeKeyAndOrderFront(nil)
-        }
+        // Call cleanup synchronously before deinit completes
+        cleanup()
     }
     
-    private func startMonitoring() {
+    private func setupEventTap() {
         guard AccessibilityService.shared.requestAccessibilityPermissions() else {
             return
         }
         
-        let eventMask = CGEventMask(1 << CGEventType.leftMouseDown.rawValue)
+        // Add rightMouseDown to event mask
+        let eventMask = CGEventMask(1 << CGEventType.mouseMoved.rawValue | 
+                                   1 << CGEventType.leftMouseDown.rawValue |
+                                   1 << CGEventType.leftMouseUp.rawValue |
+                                   1 << CGEventType.rightMouseDown.rawValue)
         
-        // Create a static callback function
         let callback: CGEventTapCallBack = { proxy, type, event, refcon in
-            guard type == .leftMouseDown,
-                  let refconUnwrapped = refcon else {
+            guard let refconUnwrapped = refcon else {
                 return Unmanaged.passRetained(event)
             }
             
             let watcher = Unmanaged<DockWatcher>.fromOpaque(refconUnwrapped).takeUnretainedValue()
             let location = event.location
-            let clickCount = event.getIntegerValueField(.mouseEventClickState)
             
-            // Try to handle the click first
-            if watcher.handleDockClick(at: location, clickCount: clickCount) {
-                // If we handled it, prevent the event from propagating
-                return nil
+            switch type {
+            case .mouseMoved:
+                Task { @MainActor in
+                    watcher.handleMouseMove(at: location)
+                }
+            case .leftMouseDown:
+                // Debounce clicks
+                let currentTime = ProcessInfo.processInfo.systemUptime
+                if currentTime - watcher.lastClickTime >= watcher.clickDebounceInterval {
+                    watcher.lastClickTime = currentTime
+                    
+                    // Store the app being clicked for mouseUp handling
+                    if let (app, _) = DockService.shared.getClickedDockItem(at: location) {
+                        watcher.clickedApp = app
+                        // Return nil to prevent the event from propagating
+                        return nil
+                    }
+                }
+            case .leftMouseUp:
+                // Process the click on mouseUp if we have a stored app
+                if let app = watcher.clickedApp {
+                    if watcher.handleDockClick(app: app) {
+                        watcher.clickedApp = nil
+                        // Return nil to prevent the event from propagating
+                        return nil
+                    }
+                }
+                watcher.clickedApp = nil
+            case .rightMouseDown:
+                // Immediately close menu on right click
+                Task { @MainActor in
+                    watcher.windowChooser?.close()
+                    watcher.windowChooser = nil
+                    watcher.lastHoveredApp = nil
+                }
+            default:
+                break
             }
             
-            // If we didn't handle it, let the event propagate
             return Unmanaged.passRetained(event)
         }
         
-        // Change the event tap to be a CGEventTapLocation.cghidEventTap to intercept events earlier
         guard let tap = CGEvent.tapCreate(
-            tap: .cghidEventTap,  // Changed from .cgSessionEventTap to intercept earlier
+            tap: .cghidEventTap,
             place: .headInsertEventTap,
             options: .defaultTap,
             eventsOfInterest: eventMask,
@@ -646,37 +1231,146 @@ class DockWatcher {
         
         CGEvent.tapEnable(tap: tap, enable: true)
         
-        Logger.success("Successfully started monitoring Dock clicks. Press Control + C to stop.")
+        Logger.success("Successfully started monitoring mouse movements")
     }
     
-    private func handleDockClick(at point: CGPoint, clickCount: Int64) -> Bool {
-        // First check if we clicked on a Dock item
-        guard let (app, _) = DockService.shared.getClickedDockItem(at: point) else {
-            return false
+    private func setupNotifications() {
+        NotificationCenter.default.addObserver(
+            forName: NSNotification.Name("WindowChooserDidClose"),
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.lastHoveredApp = nil
+            }
         }
         
-        // If the app is active, handle hide/terminate actions immediately
+        // Add notification for app termination
+        NotificationCenter.default.addObserver(
+            forName: NSWorkspace.didTerminateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { notification in
+            // Wrap in Task to access main actor
+            Task { @MainActor in
+                if let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication {
+                    AccessibilityService.shared.clearWindowStates(for: app)
+                }
+            }
+        }
+    }
+    
+    private func showWindowChooser(for app: NSRunningApplication, at point: CGPoint, windows: [WindowInfo]) {
+        // Close any existing window chooser
+        windowChooser?.close()
+        windowChooser = nil
+        
+        let chooser = WindowChooserController(
+            at: point,
+            windows: windows,
+            app: app,
+            callback: { window in
+                // First raise the window
+                AccessibilityService.shared.raiseWindow(window: window, for: app)
+                // Hide other windows individually
+                for windowInfo in windows where windowInfo.window != window {
+                    AccessibilityService.shared.hideWindow(window: windowInfo.window, for: app)
+                }
+            }
+        )
+        
+        self.windowChooser = chooser
+        chooser.window?.makeKeyAndOrderFront(nil)
+    }
+    
+    private func handleMouseMove(at point: CGPoint) {
+        // Cancel and nil out previous task
+        menuShowTask?.cancel()
+        menuShowTask = nil
+        
+        // Check if mouse is over a dock item
+        if let (app, _) = DockService.shared.getClickedDockItem(at: point) {
+            // Don't show menu if we're in the middle of a click
+            if clickedApp == nil {
+                if app != lastHoveredApp {
+                    let task = DispatchWorkItem { [weak self] in
+                        guard let self = self else { return }
+                        
+                        // Close existing menu
+                        self.windowChooser?.close()
+                        self.windowChooser = nil
+                        
+                        // Show new menu
+                        let windows = AccessibilityService.shared.getWindowInfo(for: app)
+                        if !windows.isEmpty {
+                            self.showWindowChooser(for: app, at: point, windows: windows)
+                            self.lastHoveredApp = app
+                        }
+                    }
+                    
+                    menuShowTask = task
+                    DispatchQueue.main.asyncAfter(deadline: .now() + menuShowDelay, execute: task)
+                }
+            }
+            return
+        }
+        
+        // Mouse is not over a dock item, check if it's over the window chooser
+        guard let chooser = windowChooser,
+              let window = chooser.window else {
+            lastHoveredApp = nil
+            return
+        }
+        
+        let mouseLocation = NSEvent.mouseLocation
+        let windowFrame = window.frame
+        let expandedFrame = NSRect(
+            x: windowFrame.minX - dismissalMargin,
+            y: windowFrame.minY - dismissalMargin,
+            width: windowFrame.width + dismissalMargin * 2,
+            height: windowFrame.height + dismissalMargin * 2
+        )
+        
+        // Only close if mouse is outside expanded frame AND not over a dock item
+        if !expandedFrame.contains(mouseLocation) {
+            let task = DispatchWorkItem { [weak self] in
+                guard let self = self else { return }
+                let currentLocation = NSEvent.mouseLocation
+                if !expandedFrame.contains(currentLocation) && 
+                   DockService.shared.getClickedDockItem(at: currentLocation) == nil {
+                    self.windowChooser?.close()
+                    self.windowChooser = nil
+                    self.lastHoveredApp = nil
+                }
+            }
+            
+            menuShowTask = task
+            DispatchQueue.main.asyncAfter(deadline: .now() + menuShowDelay, execute: task)
+        }
+    }
+    
+    private func handleDockClick(app: NSRunningApplication) -> Bool {
+        Logger.debug("Processing click for app: \(app.localizedName ?? "Unknown")")
+        
+        // Close any existing menu
+        windowChooser?.close()
+        windowChooser = nil
+        lastHoveredApp = nil
+        
+        // Initialize window states if needed
+        AccessibilityService.shared.initializeWindowStates(for: app)
+        
         if app.isActive {
-            _ = DockService.shared.handleAppAction(app: app, clickCount: clickCount)
-            // Always return true for active apps to prevent Dock from processing the click
+            Logger.debug("App is active, hiding all windows")
+            AccessibilityService.shared.hideAllWindows(for: app)
+            return app.hide()
+        } else {
+            Logger.debug("App is inactive, showing and restoring windows")
+            app.unhide()
+            app.activate(options: [.activateIgnoringOtherApps])
+            AccessibilityService.shared.restoreAllWindows(for: app)
             return true
         }
-        
-        // Get window information for inactive apps
-        let windows = AccessibilityService.shared.getWindowInfo(for: app)
-        
-        // Show window chooser if:
-        // - there are multiple windows OR
-        // - there is at least one minimized window (indicated by "(minimized)" in the name)
-        let hasMinimizedWindow = windows.contains { $0.name.contains("(minimized)") }
-        if windows.count > 1 || hasMinimizedWindow {
-            Logger.info("Showing window chooser for \(windows.count) windows (minimized windows present: \(hasMinimizedWindow))")
-            showWindowChooser(for: app, at: point, windows: windows)
-            return true
-        }
-        
-        // Let the Dock handle the click for other cases
-        return false
     }
 }
 
@@ -757,5 +1451,12 @@ class UpdateController {
     
     func checkForUpdates() {
         updater.checkForUpdates()
+    }
+}
+
+// Add this extension near the top of the file
+extension Array {
+    subscript(safe index: Index) -> Element? {
+        return indices.contains(index) ? self[index] : nil
     }
 }
