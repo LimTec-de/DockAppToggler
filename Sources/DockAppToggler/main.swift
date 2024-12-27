@@ -278,7 +278,6 @@ class WindowChooserView: NSView {
         
         // Create minimize image with proper styling
         let config = NSImage.SymbolConfiguration(pointSize: 11, weight: .regular)
-            .applying(.init(paletteColors: [.systemYellow]))  // Use system yellow with proper transparency
         let image = NSImage(systemSymbolName: "minus.circle.fill", accessibilityDescription: "Minimize")?
             .withSymbolConfiguration(config)
         button.image = image
@@ -293,14 +292,21 @@ class WindowChooserView: NSView {
         button.setButtonType(.momentaryLight)
         
         // Set color based on window state
-        let activeColor = NSColor.systemYellow.withAlphaComponent(0.85)  // Use system yellow with proper transparency
-        let inactiveColor = NSColor.systemGray.withAlphaComponent(0.5)   // Use system gray with transparency
+        let activeColor = Constants.UI.Theme.iconTintColor  // Use same color as other active icons
+        let inactiveColor = NSColor.tertiaryLabelColor.withAlphaComponent(0.5)  // Subtle gray for minimized state
         
         button.wantsLayer = true
         button.layer?.cornerRadius = 5.5
         button.layer?.masksToBounds = true
         
-        button.contentTintColor = isVisible ? activeColor : inactiveColor
+        // Set initial state
+        if isVisible {
+            button.contentTintColor = activeColor
+            button.alphaValue = 1.0
+        } else {
+            button.contentTintColor = inactiveColor
+            button.alphaValue = 0.5
+        }
         
         // Always enable the button
         button.isEnabled = true
@@ -347,8 +353,20 @@ class WindowChooserView: NSView {
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = Constants.UI.animationDuration
                 if hideButtons.contains(button) {
-                    // Existing hide button hover logic
-                    // ...
+                    // Get window state
+                    let window = options[button.tag].window
+                    var isMinimized = false
+                    var value: AnyObject?
+                    if AXUIElementCopyAttributeValue(window, kAXMinimizedAttribute as CFString, &value) == .success,
+                       let minimized = value as? Bool {
+                        isMinimized = minimized
+                    }
+                    
+                    // Update button appearance based on window state
+                    button.contentTintColor = isMinimized ? 
+                        NSColor.tertiaryLabelColor.withAlphaComponent(0.5) :
+                        Constants.UI.Theme.iconTintColor
+                    button.alphaValue = isMinimized ? 0.5 : 1.0
                 } else if button.action == #selector(moveWindowLeft(_:)) || 
                           button.action == #selector(moveWindowRight(_:)) ||
                           button.action == #selector(maximizeWindow(_:)) {
@@ -410,10 +428,11 @@ class WindowChooserView: NSView {
         // Update topmost window state
         updateTopmostWindow(window)
         
-        // Update corresponding hide button state
+        // Update corresponding hide button state with correct styling
         let hideButton = hideButtons[sender.tag]
         hideButton.isEnabled = true
-        hideButton.contentTintColor = NSColor(red: 1.0, green: 0.84, blue: 0.0, alpha: 1.0)  // Yellow minimize button color
+        hideButton.contentTintColor = Constants.UI.Theme.iconTintColor
+        hideButton.alphaValue = 1.0
         
         // Re-add hover effect
         let trackingArea = NSTrackingArea(
@@ -428,8 +447,8 @@ class WindowChooserView: NSView {
     @objc private func hideButtonClicked(_ sender: NSButton) {
         let window = options[sender.tag].window
         
-        let activeColor = NSColor.systemYellow.withAlphaComponent(0.85)
-        let inactiveColor = NSColor.systemGray.withAlphaComponent(0.5)
+        let activeColor = Constants.UI.Theme.iconTintColor  // Use same color as other active icons
+        let inactiveColor = NSColor.tertiaryLabelColor.withAlphaComponent(0.5)
         
         // Check current window state
         var minimizedValue: AnyObject?
@@ -446,6 +465,7 @@ class WindowChooserView: NSView {
                 
                 // Update button state to active
                 sender.contentTintColor = activeColor
+                sender.alphaValue = 1.0
             } else {
                 // Window is visible - minimize it
                 AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, true as CFTypeRef)
@@ -468,6 +488,7 @@ class WindowChooserView: NSView {
                 
                 // Update button state to inactive
                 sender.contentTintColor = inactiveColor
+                sender.alphaValue = 0.5
             }
         }
     }
@@ -1294,15 +1315,27 @@ class AccessibilityService {
         Task<Void, Never> { @MainActor in
             guard let states = windowStates[pid] else { return }
             
-            // Update window operations with MainActor isolation
-            await executeWindowOperationsInBatches(states.map { $0.window }) { @MainActor window in
-                let _ = AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
-                let _ = AXUIElementSetAttributeValue(window, kAXHiddenAttribute as CFString, false as CFTypeRef)
-                
-                try? await Task.sleep(nanoseconds: UInt64(Constants.Performance.windowRefreshDelay * 1_000_000_000))
-                
-                let _ = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+            // First pass: restore all windows in their original order (back to front)
+            for state in states {
+                if state.wasVisible {
+                    let _ = AXUIElementSetAttributeValue(state.window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
+                    let _ = AXUIElementSetAttributeValue(state.window, kAXHiddenAttribute as CFString, false as CFTypeRef)
+                }
             }
+            
+            // Small delay to allow windows to be restored
+            try? await Task.sleep(nanoseconds: UInt64(Constants.Performance.windowRefreshDelay * 1_000_000_000))
+            
+            // Second pass: raise windows in reverse order to maintain z-order (front to back)
+            for state in states.reversed() {
+                if state.wasVisible {
+                    let _ = AXUIElementPerformAction(state.window, kAXRaiseAction as CFString)
+                    try? await Task.sleep(nanoseconds: UInt64(Constants.Performance.windowRefreshDelay * 1_000_000_000))
+                }
+            }
+            
+            // Activate the app after all windows are restored
+            app.activate(options: [.activateIgnoringOtherApps])
             
             windowStates.removeValue(forKey: pid)
         }
@@ -2114,9 +2147,32 @@ class BubbleVisualEffectView: NSVisualEffectView {
         let roundedRect = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
         path.append(roundedRect)
         
-        // Create mask layer using our custom cgPath extension
+        // Create mask layer
         let maskLayer = CAShapeLayer()
         maskLayer.path = path.cgPath
         self.layer?.mask = maskLayer
+        
+        // Add border layer
+        let borderLayer = CAShapeLayer()
+        borderLayer.path = path.cgPath
+        borderLayer.lineWidth = 0.5
+        borderLayer.fillColor = nil
+        borderLayer.strokeColor = NSColor(white: 1.0, alpha: 0.3).cgColor
+        
+        // Remove any existing border layers
+        self.layer?.sublayers?.removeAll(where: { $0.name == "borderLayer" })
+        
+        // Add new border layer
+        borderLayer.name = "borderLayer"
+        self.layer?.addSublayer(borderLayer)
+    }
+    
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        
+        // Update border color when appearance changes
+        if let borderLayer = self.layer?.sublayers?.first(where: { $0.name == "borderLayer" }) as? CAShapeLayer {
+            borderLayer.strokeColor = NSColor(white: 1.0, alpha: 0.3).cgColor
+        }
     }
 }
