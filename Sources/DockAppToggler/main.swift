@@ -1756,7 +1756,7 @@ class UpdateController: NSObject, SPUStandardUserDriverDelegate, SPUUpdaterDeleg
     private var driver: SPUStandardUserDriver?
     private var statusItem: NSStatusItem?
     
-    init() {
+    override init() {
         super.init()
         
         // Get the main bundle
@@ -1803,50 +1803,65 @@ class UpdateController: NSObject, SPUStandardUserDriverDelegate, SPUUpdaterDeleg
     
     // MARK: - SPUStandardUserDriverDelegate
     
-    var supportsGentleScheduledUpdateReminders: Bool {
+    nonisolated var supportsGentleScheduledUpdateReminders: Bool {
         return true
     }
     
-    func standardUserDriverWillHandleShowingUpdate(_ handleShowingUpdate: Bool, forUpdate update: SUAppcastItem, state: SPUUserUpdateState) {
-        // When an update alert will be presented, place the app in the foreground
-        NSApp.setActivationPolicy(.regular)
+    nonisolated func standardUserDriverWillHandleShowingUpdate(_ handleShowingUpdate: Bool, forUpdate update: SUAppcastItem, state: SPUUserUpdateState) {
+        // Create an immutable copy of the version string
+        let updateInfo = (version: String(update.displayVersionString), userInitiated: state.userInitiated)
         
-        if !state.userInitiated {
-            // Add a badge to the app's dock icon indicating one alert occurred
-            NSApp.dockTile.badgeLabel = "1"
+        Task { @MainActor in
+            // When an update alert will be presented, place the app in the foreground
+            NSApp.setActivationPolicy(.regular)
             
-            // Post a user notification
-            let content = UNMutableNotificationContent()
-            content.title = "A new update is available"
-            content.body = "Version \(update.displayVersionString) is now available"
-            
-            let request = UNNotificationRequest(identifier: "UpdateCheck", content: content, trigger: nil)
-            UNUserNotificationCenter.current().add(request)
+            if !updateInfo.userInitiated {
+                // Add a badge to the app's dock icon indicating one alert occurred
+                NSApp.dockTile.badgeLabel = "1"
+                
+                // Post a user notification
+                let content = UNMutableNotificationContent()
+                content.title = "A new update is available"
+                content.body = "Version \(updateInfo.version) is now available"
+                
+                let request = UNNotificationRequest(identifier: "UpdateCheck", content: content, trigger: nil)
+                
+                do {
+                    try await UNUserNotificationCenter.current().add(request)
+                } catch {
+                    Logger.error("Failed to add notification: \(error)")
+                }
+            }
         }
     }
     
-    func standardUserDriverDidReceiveUserAttention(forUpdate update: SUAppcastItem) {
-        // Clear the dock badge indicator for the update
-        NSApp.dockTile.badgeLabel = ""
-        
-        // Dismiss active update notifications
-        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ["UpdateCheck"])
+    nonisolated func standardUserDriverDidReceiveUserAttention(forUpdate update: SUAppcastItem) {
+        Task { @MainActor in
+            // Clear the dock badge indicator for the update
+            NSApp.dockTile.badgeLabel = ""
+            
+            // Dismiss active update notifications
+            UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ["UpdateCheck"])
+        }
     }
     
-    func standardUserDriverWillFinishUpdateSession() {
-        // Put app back in background when the user session for the update finished
-        NSApp.setActivationPolicy(.accessory)
+    nonisolated func standardUserDriverWillFinishUpdateSession() {
+        Task { @MainActor in
+            // Put app back in background when the user session for the update finished
+            NSApp.setActivationPolicy(.accessory)
+        }
     }
     
     // MARK: - SPUUpdaterDelegate
     
-    func updater(_ updater: SPUUpdater, willScheduleUpdateCheckAfterDelay delay: TimeInterval) {
-        // Request notification permissions when Sparkle schedules an update check
-        UNUserNotificationCenter.current().requestAuthorization(options: [.badge, .alert, .sound]) { granted, error in
-            if let error = error {
-                Logger.error("Failed to request notification authorization: \(error)")
-            } else {
+    nonisolated func updater(_ updater: SPUUpdater, willScheduleUpdateCheckAfterDelay delay: TimeInterval) {
+        Task { @MainActor in
+            // Request notification permissions when Sparkle schedules an update check
+            do {
+                let granted = try await UNUserNotificationCenter.current().requestAuthorization(options: [.badge, .alert, .sound])
                 Logger.info("Notification authorization granted: \(granted)")
+            } catch {
+                Logger.error("Failed to request notification authorization: \(error)")
             }
         }
     }
