@@ -70,13 +70,19 @@ jobs:
           echo "❌ Error: Sparkle framework not found"
           exit 1
         fi
-        cp -R "$SPARKLE_PATH" DockAppToggler.app/Contents/Frameworks/
+        
+        # Copy Sparkle framework maintaining symlinks
+        ditto --rsrc "$SPARKLE_PATH" DockAppToggler.app/Contents/Frameworks/Sparkle.framework
+        
+        # Verify framework structure
+        echo "🔍 Verifying Sparkle framework structure..."
+        ls -la DockAppToggler.app/Contents/Frameworks/Sparkle.framework/
+        
+        # Update install name
         install_name_tool -change "@rpath/Sparkle.framework/Versions/B/Sparkle" "@executable_path/../Frameworks/Sparkle.framework/Versions/B/Sparkle" DockAppToggler.app/Contents/MacOS/DockAppToggler
         
         # Sign Sparkle framework components in the correct order
-        
-        # 0. Determine Sparkle version
-        SPARKLE_VERSION=$(defaults read DockAppToggler.app/Contents/Frameworks/Sparkle.framework/Resources/Info.plist CFBundleShortVersionString || echo "B")
+        SPARKLE_VERSION="B"  # Sparkle typically uses version B
         
         # 1. Sign XPC Services
         codesign --force --options runtime --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" --timestamp --entitlements Sources/DockAppToggler/Resources/sparkle.entitlements DockAppToggler.app/Contents/Frameworks/Sparkle.framework/Versions/$SPARKLE_VERSION/XPCServices/Downloader.xpc
@@ -92,11 +98,9 @@ jobs:
         codesign --force --options runtime --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" --timestamp DockAppToggler.app/Contents/Frameworks/Sparkle.framework/Versions/$SPARKLE_VERSION/Sparkle
         
         # 5. Finally sign the Sparkle framework itself
-        /usr/libexec/PlistBuddy -c "Add :CFBundlePackageType string FMWK" DockAppToggler.app/Contents/Frameworks/Sparkle.framework/Resources/Info.plist 2>/dev/null || true
         codesign --force --options runtime --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" \
           --timestamp \
-          --preserve-metadata=identifier,entitlements,flags,runtime,requirements \
-          --identifier "org.sparkle-project.Sparkle" \
+          --preserve-metadata=identifier,entitlements,flags,runtime \
           DockAppToggler.app/Contents/Frameworks/Sparkle.framework
         
         # Sign the main app with hardened runtime
