@@ -1724,9 +1724,13 @@ class StatusBarController {
     }
     
     private func setupMenu() {
-        menu.addItem(NSMenuItem(title: "Check for Updates...", action: #selector(checkForUpdates), keyEquivalent: ""))
+        let updateItem = NSMenuItem(title: "Check for Updates...", action: #selector(checkForUpdates), keyEquivalent: "")
+        updateItem.target = self
+        menu.addItem(updateItem)
         menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        let quitItem = NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        quitItem.target = NSApp
+        menu.addItem(quitItem)
         statusItem.menu = menu
     }
     
@@ -1749,8 +1753,8 @@ app.run()
 // Add this new class for handling updates
 @MainActor
 class UpdateController {
-    private let updater: SPUUpdater
-    private let driver: SPUStandardUserDriver
+    private var updater: SPUUpdater?
+    private var driver: SPUStandardUserDriver?
     
     init() {
         // Get the main bundle
@@ -1759,23 +1763,40 @@ class UpdateController {
         
         // Initialize Sparkle components
         driver = SPUStandardUserDriver(hostBundle: bundle, delegate: nil)
-        do {
-            updater = SPUUpdater(hostBundle: bundle, applicationBundle: bundle, userDriver: driver, delegate: nil)
-            try updater.start()
-            
-            // Log bundle identifier for debugging
-            if let bundleId = bundle.bundleIdentifier {
-                Logger.info("Sparkle initialized with bundle identifier: \(bundleId)")
-            } else {
-                Logger.warning("No bundle identifier found")
+        
+        if let driver = driver {
+            do {
+                let updater = try SPUUpdater(hostBundle: bundle, applicationBundle: bundle, userDriver: driver, delegate: nil)
+                try updater.start()
+                self.updater = updater
+                
+                // Log bundle identifier and appcast URL for debugging
+                if let bundleId = bundle.bundleIdentifier {
+                    Logger.info("Sparkle initialized with bundle identifier: \(bundleId)")
+                } else {
+                    Logger.warning("No bundle identifier found")
+                }
+                
+                if let appcastURL = bundle.infoDictionary?["SUFeedURL"] as? String {
+                    Logger.info("Appcast URL configured: \(appcastURL)")
+                } else {
+                    Logger.warning("No SUFeedURL found in Info.plist")
+                }
+            } catch {
+                Logger.error("Failed to initialize Sparkle: \(error)")
             }
-        } catch {
-            Logger.error("Failed to initialize Sparkle: \(error)")
+        } else {
+            Logger.error("Failed to initialize Sparkle driver")
         }
     }
     
     func checkForUpdates() {
-        updater.checkForUpdates()
+        if let updater = updater {
+            Logger.info("Checking for updates...")
+            updater.checkForUpdates()
+        } else {
+            Logger.error("Cannot check for updates - Sparkle updater not initialized")
+        }
     }
 }
 
