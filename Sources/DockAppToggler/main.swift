@@ -39,10 +39,11 @@ enum Constants {
         static let titlePadding: CGFloat = 8
         
         // Window positioning constants
-        static let leftSideButtonWidth: CGFloat = 20
-        static let rightSideButtonWidth: CGFloat = 20
-        static let sideButtonsSpacing: CGFloat = 0  // Reduced to 0 to place buttons right next to each other
-        static let screenEdgeMargin: CGFloat = 10.0  // Margin from screen edges
+        static let leftSideButtonWidth: CGFloat = 16
+        static let centerButtonWidth: CGFloat = 16
+        static let rightSideButtonWidth: CGFloat = 16
+        static let sideButtonsSpacing: CGFloat = 1
+        static let screenEdgeMargin: CGFloat = 8.0
         static let windowHeightMargin: CGFloat = 40.0  // Margin for window height
         static let dockHeight: CGFloat = 70.0  // Approximate Dock height
         
@@ -101,11 +102,27 @@ class WindowChooserView: NSView {
     private var hideButtons: [NSButton] = []
     private var titleField: NSTextField!
     private let targetApp: NSRunningApplication
+    private var lastMaximizeClickTime: TimeInterval = 0
+    private let doubleClickInterval: TimeInterval = 0.3
+    private var topmostWindow: AXUIElement?
     
     init(windows: [WindowInfo], appName: String, app: NSRunningApplication, callback: @escaping (AXUIElement, Bool) -> Void) {
         self.options = windows
         self.callback = callback
         self.targetApp = app
+        
+        // Find the topmost window
+        if let frontmost = windows.first(where: { window in
+            var frontValue: AnyObject?
+            if AXUIElementCopyAttributeValue(window.window, "AXMain" as CFString, &frontValue) == .success,
+               let isFront = frontValue as? Bool {
+                return isFront
+            }
+            return false
+        }) {
+            self.topmostWindow = frontmost.window
+        }
+        
         super.init(frame: NSRect(x: 0, y: 0, width: Constants.UI.windowWidth, height: Constants.UI.windowHeight(for: windows.count)))
         setupTitle(appName)
         setupButtons()
@@ -150,16 +167,29 @@ class WindowChooserView: NSView {
         let button = NSButton(frame: NSRect(
             x: 24,
             y: frame.height - Constants.UI.titleHeight - CGFloat(index + 1) * Constants.UI.buttonSpacing - Constants.UI.verticalPadding,
-            width: Constants.UI.windowWidth - Constants.UI.windowPadding * 2 - 24 - Constants.UI.leftSideButtonWidth - Constants.UI.rightSideButtonWidth - Constants.UI.sideButtonsSpacing,
+            width: Constants.UI.windowWidth - Constants.UI.windowPadding * 2 - 24 - 
+                  (Constants.UI.leftSideButtonWidth + Constants.UI.centerButtonWidth + Constants.UI.rightSideButtonWidth + Constants.UI.sideButtonsSpacing * 2) - 8,
             height: Constants.UI.buttonHeight
         ))
         
         configureButton(button, title: windowInfo.name, tag: index)
+        
+        // Highlight the topmost window with brighter text
+        if windowInfo.window == topmostWindow {
+            button.contentTintColor = .white
+        } else {
+            button.contentTintColor = .secondaryLabelColor
+        }
+        
         addHoverEffect(to: button)
         
         // Create left side button
         let leftButton = createSideButton(for: windowInfo, at: index, isLeft: true)
         addSubview(leftButton)
+        
+        // Create center (maximize) button
+        let centerButton = createSideButton(for: windowInfo, at: index, isLeft: false, isCenter: true)
+        addSubview(centerButton)
         
         // Create right side button
         let rightButton = createSideButton(for: windowInfo, at: index, isLeft: false)
@@ -244,13 +274,18 @@ class WindowChooserView: NSView {
                 if hideButtons.contains(button) {
                     // Existing hide button hover logic
                     // ...
-                } else if button.action == #selector(moveWindowLeft(_:)) || button.action == #selector(moveWindowRight(_:)) {
-                    // Side button hover effect
+                } else if button.action == #selector(moveWindowLeft(_:)) || 
+                          button.action == #selector(moveWindowRight(_:)) ||
+                          button.action == #selector(maximizeWindow(_:)) {
+                    // Side and maximize button hover effect
                     button.contentTintColor = .labelColor
                     button.layer?.backgroundColor = NSColor(white: 1.0, alpha: 0.15).cgColor
                 } else {
-                    // Existing window button hover logic
-                    // ...
+                    // Window button hover logic
+                    let window = options[button.tag].window
+                    if window != topmostWindow {
+                        button.contentTintColor = .labelColor
+                    }
                 }
             }
         }
@@ -263,13 +298,24 @@ class WindowChooserView: NSView {
                 if hideButtons.contains(button) {
                     // Existing hide button exit logic
                     // ...
-                } else if button.action == #selector(moveWindowLeft(_:)) || button.action == #selector(moveWindowRight(_:)) {
-                    // Side button exit effect
-                    button.contentTintColor = .tertiaryLabelColor
+                } else if button.action == #selector(moveWindowLeft(_:)) || 
+                          button.action == #selector(moveWindowRight(_:)) ||
+                          button.action == #selector(maximizeWindow(_:)) {
+                    // Side and maximize button exit effect
+                    let window = options[button.tag].window
+                    let isMaximize = button.action == #selector(maximizeWindow(_:))
+                    let isLeft = button.action == #selector(moveWindowLeft(_:))
+                    let isInPosition = isMaximize ? 
+                        isWindowMaximized(window) : 
+                        isWindowInPosition(window, onLeft: isLeft)
+                    button.contentTintColor = isInPosition ? .white : .tertiaryLabelColor
                     button.layer?.backgroundColor = .clear
                 } else {
-                    // Existing window button exit logic
-                    // ...
+                    // Window button exit logic
+                    let window = options[button.tag].window
+                    if window != topmostWindow {
+                        button.contentTintColor = .secondaryLabelColor
+                    }
                 }
             }
         }
@@ -277,10 +323,14 @@ class WindowChooserView: NSView {
     
     @objc private func buttonClicked(_ sender: NSButton) {
         let window = options[sender.tag].window
+        
         // Always show and raise the window
         AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
         AccessibilityService.shared.raiseWindow(window: window, for: targetApp)
         targetApp.activate(options: [.activateIgnoringOtherApps])
+        
+        // Update topmost window state
+        updateTopmostWindow(window)
         
         // Update corresponding hide button state
         let hideButton = hideButtons[sender.tag]
@@ -310,11 +360,30 @@ class WindowChooserView: NSView {
                 AccessibilityService.shared.raiseWindow(window: window, for: targetApp)
                 targetApp.activate(options: [.activateIgnoringOtherApps])
                 
+                // Update topmost window state
+                updateTopmostWindow(window)
+                
                 // Update button state to active
-                sender.contentTintColor = NSColor(red: 1.0, green: 0.84, blue: 0.0, alpha: 1.0)  // Yellow minimize button color
+                sender.contentTintColor = NSColor(red: 1.0, green: 0.84, blue: 0.0, alpha: 1.0)
             } else {
                 // Window is visible - minimize it
                 AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, true as CFTypeRef)
+                
+                // If this was the topmost window, find new topmost
+                if window == topmostWindow {
+                    if let nextWindow = options.first(where: { windowInfo in
+                        var minimizedValue: AnyObject?
+                        if AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success,
+                           let isMinimized = minimizedValue as? Bool {
+                            return !isMinimized
+                        }
+                        return false
+                    })?.window {
+                        updateTopmostWindow(nextWindow)
+                    } else {
+                        topmostWindow = nil
+                    }
+                }
                 
                 // Update button state to inactive
                 sender.contentTintColor = .tertiaryLabelColor
@@ -335,52 +404,124 @@ class WindowChooserView: NSView {
     }
     
     // Add new method to create side buttons
-    private func createSideButton(for windowInfo: WindowInfo, at index: Int, isLeft: Bool) -> NSButton {
-        let totalButtonsWidth = Constants.UI.leftSideButtonWidth + Constants.UI.rightSideButtonWidth
+    private func createSideButton(for windowInfo: WindowInfo, at index: Int, isLeft: Bool, isCenter: Bool = false) -> NSButton {
+        let spacing = Constants.UI.sideButtonsSpacing
+        let buttonWidth = Constants.UI.leftSideButtonWidth
+        let totalWidth = buttonWidth * 3 + spacing * 2
+        
+        // Calculate x position based on button type
+        let xPosition: CGFloat
+        if isLeft {
+            xPosition = Constants.UI.windowWidth - Constants.UI.windowPadding - totalWidth
+        } else if isCenter {
+            xPosition = Constants.UI.windowWidth - Constants.UI.windowPadding - buttonWidth * 2 - spacing
+        } else {
+            xPosition = Constants.UI.windowWidth - Constants.UI.windowPadding - buttonWidth
+        }
+        
         let button = NSButton(frame: NSRect(
-            x: isLeft ? 
-                Constants.UI.windowWidth - Constants.UI.windowPadding - totalButtonsWidth :
-                Constants.UI.windowWidth - Constants.UI.windowPadding - Constants.UI.rightSideButtonWidth,
+            x: xPosition,
             y: frame.height - Constants.UI.titleHeight - CGFloat(index + 1) * Constants.UI.buttonSpacing - Constants.UI.verticalPadding,
-            width: Constants.UI.leftSideButtonWidth,
+            width: buttonWidth,
             height: Constants.UI.buttonHeight
         ))
         
-        // Create arrow image
+        // Create button image
         let config = NSImage.SymbolConfiguration(pointSize: 10, weight: .regular)
-        let imageName = isLeft ? "arrow.left.square.fill" : "arrow.right.square.fill"
-        let image = NSImage(systemSymbolName: imageName, accessibilityDescription: isLeft ? "Move Left" : "Move Right")?.withSymbolConfiguration(config)
-        button.image = image
-        button.imagePosition = NSControl.ImagePosition.imageOnly
+        let imageName: String
+        let accessibilityDescription: String
         
-        button.bezelStyle = NSButton.BezelStyle.inline
+        if isCenter {
+            // Check if window is on secondary display
+            let isOnSecondary = isWindowOnSecondaryDisplay(windowInfo.window)
+            imageName = isOnSecondary ? "2.square.fill" : "square.fill"
+            accessibilityDescription = isOnSecondary ? "Maximize on Primary" : "Maximize"
+        } else {
+            imageName = isLeft ? "arrow.left.square.fill" : "arrow.right.square.fill"
+            accessibilityDescription = isLeft ? "Move Left" : "Move Right"
+        }
+        
+        let image = NSImage(systemSymbolName: imageName, accessibilityDescription: accessibilityDescription)?.withSymbolConfiguration(config)
+        button.image = image
+        button.imagePosition = .imageOnly
+        
+        button.bezelStyle = .inline
         button.isBordered = false
         button.tag = index
         button.target = self
-        button.action = isLeft ? #selector(moveWindowLeft(_:)) : #selector(moveWindowRight(_:))
+        button.action = isCenter ? #selector(maximizeWindow(_:)) : (isLeft ? #selector(moveWindowLeft(_:)) : #selector(moveWindowRight(_:)))
         
-        // Set initial color based on window position
-        let isInPosition = isWindowInPosition(windowInfo.window, onLeft: isLeft)
+        // Set initial color based on window position/state
+        let isInPosition = isCenter ? isWindowMaximized(windowInfo.window) : isWindowInPosition(windowInfo.window, onLeft: isLeft)
         button.contentTintColor = isInPosition ? .white : NSColor.tertiaryLabelColor
         
         addHoverEffect(to: button)
-        
         return button
     }
     
-    // Add methods to handle window positioning
-    @objc private func moveWindowLeft(_ sender: NSButton) {
-        let window = options[sender.tag].window
-        positionWindow(window, onLeft: true)
+    // Add method to check if window is maximized
+    private func isWindowMaximized(_ window: AXUIElement) -> Bool {
+        guard let screen = NSScreen.main else { return false }
+        
+        var positionValue: AnyObject?
+        var sizeValue: AnyObject?
+        var position = CGPoint.zero
+        var size = CGSize.zero
+        
+        if AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &positionValue) == .success,
+           let cfPosition = positionValue,
+           CFGetTypeID(cfPosition) == AXValueGetTypeID(),
+           AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &sizeValue) == .success,
+           let cfSize = sizeValue,
+           CFGetTypeID(cfSize) == AXValueGetTypeID() {
+            let posRef = cfPosition as! AXValue
+            let sizeRef = cfSize as! AXValue
+            AXValueGetValue(posRef, .cgPoint, &position)
+            AXValueGetValue(sizeRef, .cgSize, &size)
+            
+            let visibleFrame = screen.visibleFrame
+            
+            // Calculate window coverage percentage
+            let windowArea = size.width * size.height
+            let screenArea = visibleFrame.width * visibleFrame.height
+            let coveragePercentage = (windowArea / screenArea) * 100
+            
+            // Consider window maximized if it covers more than 80% of screen space
+            return coveragePercentage > 80
+        }
+        return false
     }
     
-    @objc private func moveWindowRight(_ sender: NSButton) {
+    // Add maximize window action
+    @objc private func maximizeWindow(_ sender: NSButton) {
+        let currentTime = ProcessInfo.processInfo.systemUptime
+        let isDoubleClick = (currentTime - lastMaximizeClickTime) < doubleClickInterval
+        lastMaximizeClickTime = currentTime
+        
         let window = options[sender.tag].window
-        positionWindow(window, onLeft: false)
+        
+        if isDoubleClick && NSScreen.screens.count > 1 {
+            // On double-click, maximize on secondary display
+            positionWindow(window, maximize: true, useSecondaryDisplay: true)
+        } else {
+            // Single click, maximize on current/primary display
+            positionWindow(window, maximize: true, useSecondaryDisplay: false)
+        }
     }
     
-    private func positionWindow(_ window: AXUIElement, onLeft: Bool) {
-        guard let screen = NSScreen.main else { return }
+    // Update positionWindow to handle maximization
+    private func positionWindow(_ window: AXUIElement, onLeft: Bool? = nil, maximize: Bool = false, useSecondaryDisplay: Bool = false) {
+        // Get the appropriate screen
+        let screen: NSScreen
+        if useSecondaryDisplay {
+            guard let secondaryScreen = NSScreen.screens.first(where: { $0 != NSScreen.main }) else {
+                return
+            }
+            screen = secondaryScreen
+        } else {
+            guard let mainScreen = NSScreen.main else { return }
+            screen = mainScreen
+        }
         
         // First unminimize and unhide to ensure proper sizing
         AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
@@ -393,33 +534,64 @@ class WindowChooserView: NSView {
         // Small delay to ensure window is ready
         usleep(5000)
         
-        // Get the screen's available space (excluding Dock and Menu Bar)
+        // Get the target screen's frame
         let visibleFrame = screen.visibleFrame
-        let margin = Constants.UI.screenEdgeMargin
         
-        // Calculate usable area (only horizontal margins)
-        let usableWidth = (visibleFrame.width - (margin * 3)) / 2  // Three margins (left, middle, right)
-        let usableHeight = visibleFrame.height  // Full height, no vertical margins
+        var newSize: CGSize
+        var position: CGPoint
         
-        // Calculate position (only horizontal margin)
-        let xPosition = onLeft ? 
-            visibleFrame.minX + margin :  // Left margin
-            visibleFrame.maxX - usableWidth - margin  // Right margin
-        
-        var position = CGPoint(
-            x: xPosition,
-            y: 0  // Position at the top of visible frame
-        )
+        if maximize {
+            // Use the screen's full dimensions
+            newSize = CGSize(
+                width: visibleFrame.width,
+                height: visibleFrame.height
+            )
+            position = CGPoint(
+                x: visibleFrame.minX,
+                y: screen == NSScreen.main ? 0 : visibleFrame.minY  // Set Y to 0 for primary screen only
+            )
+            
+            // Set position first
+            if let positionValue = AXValueCreate(.cgPoint, &position) {
+                AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, positionValue)
+            }
+            usleep(1000)
+            
+            // Then set size
+            if let sizeValue = AXValueCreate(.cgSize, &newSize) {
+                AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, sizeValue)
+            }
+            usleep(1000)
+            
+            // Update all buttons after maximizing
+            if let index = options.firstIndex(where: { $0.window == window }) {
+                refreshButtons(for: window, at: index)
+            }
+        } else {
+            let margin = Constants.UI.screenEdgeMargin
+            let usableWidth = (visibleFrame.width - (margin * 3)) / 2
+            newSize = CGSize(width: usableWidth, height: visibleFrame.height)
+            position = CGPoint(
+                x: onLeft! ? visibleFrame.minX + margin : visibleFrame.maxX - usableWidth - margin,
+                y: 0
+            )
+        }
         
         // Set size and position in a single batch
-        var newSize = CGSize(width: usableWidth, height: usableHeight)
-        
         if let sizeValue = AXValueCreate(.cgSize, &newSize),
            let positionValue = AXValueCreate(.cgPoint, &position) {
-            // Set size and position in quick succession
+            // Set size first
             AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, sizeValue)
-            usleep(1000)  // Tiny delay between size and position
+            usleep(1000)
+            
+            // Set position
             AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, positionValue)
+            usleep(1000)
+            
+            // Update all buttons after positioning
+            if let index = options.firstIndex(where: { $0.window == window }) {
+                refreshButtons(for: window, at: index)
+            }
         }
         
         // Force window refresh to ensure it's frontmost
@@ -433,17 +605,52 @@ class WindowChooserView: NSView {
                 AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, originalValue)
             }
         }
-        
-        // After window is positioned, update button colors
+    }
+    
+    // Add new method to refresh all buttons
+    private func refreshButtons(for window: AXUIElement, at index: Int) {
+        let buttons = self.subviews.compactMap { $0 as? NSButton }
+        for button in buttons {
+            if button.tag == index {
+                if button.action == #selector(moveWindowLeft(_:)) {
+                    button.contentTintColor = isWindowInPosition(window, onLeft: true) ? .white : NSColor.tertiaryLabelColor
+                } else if button.action == #selector(moveWindowRight(_:)) {
+                    button.contentTintColor = isWindowInPosition(window, onLeft: false) ? .white : NSColor.tertiaryLabelColor
+                } else if button.action == #selector(maximizeWindow(_:)) {
+                    // Update both color and image for maximize button
+                    let isOnSecondary = isWindowOnSecondaryDisplay(window)
+                    let isMaximized = isWindowMaximized(window)
+                    
+                    // Update image
+                    let config = NSImage.SymbolConfiguration(pointSize: 10, weight: .regular)
+                    let imageName = isOnSecondary ? "2.square.fill" : "square.fill"
+                    let accessibilityDescription = isOnSecondary ? "Maximize on Primary" : "Maximize"
+                    if let image = NSImage(systemSymbolName: imageName, accessibilityDescription: accessibilityDescription)?
+                        .withSymbolConfiguration(config) {
+                        button.image = image
+                    }
+                    
+                    // Update color
+                    button.contentTintColor = isMaximized ? .white : NSColor.tertiaryLabelColor
+                }
+            }
+        }
+    }
+    
+    // Add method to update all button colors
+    private func updateButtonColors(for window: AXUIElement) {
         for (index, windowInfo) in options.enumerated() {
             if windowInfo.window == window {
-                // Find and update both left and right buttons for this window
                 let buttons = self.subviews.compactMap { $0 as? NSButton }
                 for button in buttons {
-                    if button.tag == index && (button.action == #selector(moveWindowLeft(_:)) || button.action == #selector(moveWindowRight(_:))) {
-                        let isLeft = button.action == #selector(moveWindowLeft(_:))
-                        let isInPosition = isWindowInPosition(window, onLeft: isLeft)
-                        button.contentTintColor = isInPosition ? .white : NSColor.tertiaryLabelColor
+                    if button.tag == index {
+                        if button.action == #selector(moveWindowLeft(_:)) {
+                            button.contentTintColor = isWindowInPosition(window, onLeft: true) ? .white : NSColor.tertiaryLabelColor
+                        } else if button.action == #selector(moveWindowRight(_:)) {
+                            button.contentTintColor = isWindowInPosition(window, onLeft: false) ? .white : NSColor.tertiaryLabelColor
+                        } else if button.action == #selector(maximizeWindow(_:)) {
+                            button.contentTintColor = isWindowMaximized(window) ? .white : NSColor.tertiaryLabelColor
+                        }
                     }
                 }
                 break
@@ -455,7 +662,6 @@ class WindowChooserView: NSView {
     private func isWindowInPosition(_ window: AXUIElement, onLeft: Bool) -> Bool {
         guard let screen = NSScreen.main else { return false }
         
-        // Get window position and size
         var positionValue: AnyObject?
         var sizeValue: AnyObject?
         var position = CGPoint.zero
@@ -476,17 +682,118 @@ class WindowChooserView: NSView {
             let margin = Constants.UI.screenEdgeMargin
             let expectedWidth = (visibleFrame.width - (margin * 3)) / 2
             
-            // Check if window is in expected position and size
+            // Calculate expected positions
             let leftPosition = visibleFrame.minX + margin
             let rightPosition = visibleFrame.maxX - expectedWidth - margin
             
+            // Allow for some tolerance in position and size
+            let tolerance: CGFloat = 5.0
+            let isExpectedWidth = abs(size.width - expectedWidth) < tolerance
+            
             if onLeft {
-                return abs(position.x - leftPosition) < 1 && abs(size.width - expectedWidth) < 1
+                return abs(position.x - leftPosition) < tolerance && isExpectedWidth
             } else {
-                return abs(position.x - rightPosition) < 1 && abs(size.width - expectedWidth) < 1
+                return abs(position.x - rightPosition) < tolerance && isExpectedWidth
             }
         }
         return false
+    }
+    
+    @objc private func moveWindowLeft(_ sender: NSButton) {
+        let window = options[sender.tag].window
+        positionWindow(window, onLeft: true)
+    }
+    
+    @objc private func moveWindowRight(_ sender: NSButton) {
+        let window = options[sender.tag].window
+        positionWindow(window, onLeft: false)
+    }
+    
+    // Add method to check if window is on secondary display
+    private func isWindowOnSecondaryDisplay(_ window: AXUIElement) -> Bool {
+        guard NSScreen.screens.count > 1,
+              let mainScreen = NSScreen.main,
+              let windowFrame = getWindowFrame(window) else {
+            return false
+        }
+        
+        let windowCenter = CGPoint(
+            x: windowFrame.midX,
+            y: windowFrame.midY
+        )
+        
+        // Check if window center is on any non-main screen
+        return NSScreen.screens
+            .filter { $0 != mainScreen }
+            .contains { screen in
+                screen.frame.contains(windowCenter)
+            }
+    }
+    
+    // Add helper to get window frame
+    private func getWindowFrame(_ window: AXUIElement) -> CGRect? {
+        var positionValue: AnyObject?
+        var sizeValue: AnyObject?
+        var position = CGPoint.zero
+        var size = CGSize.zero
+        
+        guard AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &positionValue) == .success,
+              let cfPosition = positionValue,
+              CFGetTypeID(cfPosition) == AXValueGetTypeID(),
+              AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &sizeValue) == .success,
+              let cfSize = sizeValue,
+              CFGetTypeID(cfSize) == AXValueGetTypeID() else {
+            return nil
+        }
+        
+        let posRef = cfPosition as! AXValue
+        let sizeRef = cfSize as! AXValue
+        AXValueGetValue(posRef, .cgPoint, &position)
+        AXValueGetValue(sizeRef, .cgSize, &size)
+        
+        return CGRect(origin: position, size: size)
+    }
+    
+    // Add method to update button image and color
+    private func updateMaximizeButton(for window: AXUIElement, at index: Int) {
+        let buttons = self.subviews.compactMap { $0 as? NSButton }
+        for button in buttons {
+            if button.tag == index && button.action == #selector(maximizeWindow(_:)) {
+                // Check if window is on secondary display
+                let isOnSecondary = isWindowOnSecondaryDisplay(window)
+                
+                // Update button image
+                let config = NSImage.SymbolConfiguration(pointSize: 10, weight: .regular)
+                let imageName = isOnSecondary ? "2.square.fill" : "square.fill"
+                let accessibilityDescription = isOnSecondary ? "Maximize on Primary" : "Maximize"
+                let image = NSImage(systemSymbolName: imageName, accessibilityDescription: accessibilityDescription)?
+                    .withSymbolConfiguration(config)
+                
+                button.image = image
+                
+                // Update color based on maximized state
+                let isMaximized = isWindowMaximized(window)
+                button.contentTintColor = isMaximized ? .white : NSColor.tertiaryLabelColor
+            }
+        }
+    }
+    
+    // Add method to update topmost window state
+    private func updateTopmostWindow(_ window: AXUIElement) {
+        topmostWindow = window
+        
+        // Refresh all window buttons
+        for (index, windowInfo) in options.enumerated() {
+            let buttons = self.subviews.compactMap { $0 as? NSButton }
+            for button in buttons {
+                if button.tag == index {
+                    if button.action == #selector(buttonClicked(_:)) {
+                        // Update window button color based on topmost state
+                        button.contentTintColor = windowInfo.window == topmostWindow ? .white : .secondaryLabelColor
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -668,47 +975,28 @@ class AccessibilityService {
     }
     
     func getWindowInfo(for app: NSRunningApplication) -> [WindowInfo] {
-        var appWindowsInfo = [WindowInfo]()
-        
         let pid = app.processIdentifier
-        let appElement = AXUIElementCreateApplication(pid)
-        
+        let axApp = AXUIElementCreateApplication(pid)
         var windowsRef: CFTypeRef?
-        let windowsResult = AXUIElementCopyAttributeValue(
-            appElement,
-            kAXWindowsAttribute as CFString,
-            &windowsRef
-        )
+        var windows: [WindowInfo] = []
         
-        guard windowsResult == .success, let windows = windowsRef as? [AXUIElement] else {
-            return appWindowsInfo
+        guard AXUIElementCopyAttributeValue(axApp, Constants.Accessibility.windowsKey, &windowsRef) == .success,
+              let windowArray = windowsRef as? [AXUIElement] else {
+            return []
         }
         
-        for window in windows {
-            // Title
-            var titleRef: CFTypeRef?
-            let titleResult = AXUIElementCopyAttributeValue(
-                window,
-                kAXTitleAttribute as CFString,
-                &titleRef
-            )
-            let displayTitle = ((titleResult == .success && titleRef is String)
-                ? (titleRef as! String)
-                : "Untitled").trimmingCharacters(in: .whitespacesAndNewlines)
-            
-            // Skip windows with empty or "Untitled" titles
-            /*guard !displayTitle.isEmpty && displayTitle.lowercased() != "untitled" else {
-                continue
-            }*/
-            
-            Logger.debug("Window Name: \(displayTitle)")
-            appWindowsInfo.append(WindowInfo(window: window, name: "\(displayTitle)"))
+        for window in windowArray {
+            var titleValue: AnyObject?
+            if AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleValue) == .success,
+               let title = titleValue as? String {
+                // Skip the Finder desktop window
+                if !isFinderDesktop(window, app: app) {
+                    windows.append(WindowInfo(window: window, name: title))
+                }
+            }
         }
         
-        // Sort windows by their titles
-        appWindowsInfo.sort { $0.name < $1.name }
-        
-        return appWindowsInfo
+        return windows
     }
     
     private func getWindowID(for window: AXUIElement, app: NSRunningApplication, index: Int) -> WindowInfo? {
@@ -1010,6 +1298,20 @@ class AccessibilityService {
         // Store states sorted by stack order
         windowStates[pid] = states.sorted { $0.stackOrder < $1.stackOrder }
     }
+    
+    // Add helper method to check if a window is the Finder desktop
+    private func isFinderDesktop(_ window: AXUIElement, app: NSRunningApplication) -> Bool {
+        // Only check for Finder windows
+        guard app.bundleIdentifier == "com.apple.finder" else { return false }
+        
+        // Check window title
+        var titleValue: AnyObject?
+        if AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleValue) == .success,
+           let title = titleValue as? String {
+            return title == "Desktop"
+        }
+        return false
+    }
 }
 
 // MARK: - Dock Service
@@ -1103,7 +1405,7 @@ class DockWatcher {
     nonisolated(unsafe) private var menuShowTask: DispatchWorkItem?
     private var lastHoveredApp: NSRunningApplication?
     private var lastWindowOrder: [AXUIElement]?
-    private let menuShowDelay: TimeInterval = 0.05
+    private let menuShowDelay: TimeInterval = 0.01
     private var lastClickTime: TimeInterval = 0
     private let clickDebounceInterval: TimeInterval = 0.3
     private var clickedApp: NSRunningApplication?
@@ -1245,15 +1547,16 @@ class DockWatcher {
             }
         }
         
-        // Add notification for app termination
+        // Fix the app termination notification handler
         NotificationCenter.default.addObserver(
             forName: NSWorkspace.didTerminateApplicationNotification,
             object: nil,
             queue: .main
         ) { notification in
-            // Wrap in Task to access main actor
-            Task { @MainActor in
-                if let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication {
+            // Capture the app reference outside the Task
+            if let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication {
+                // Create a new task with the captured value
+                Task { @MainActor in
                     AccessibilityService.shared.clearWindowStates(for: app)
                 }
             }
@@ -1261,20 +1564,24 @@ class DockWatcher {
     }
     
     private func showWindowChooser(for app: NSRunningApplication, at point: CGPoint, windows: [WindowInfo]) {
-        // Close any existing window chooser
-        windowChooser?.close()
-        windowChooser = nil
+        // Close any existing window chooser immediately
+        if let existingChooser = windowChooser {
+            existingChooser.close()
+            windowChooser = nil
+        }
         
+        // Create and show new chooser immediately
         let chooser = WindowChooserController(
             at: point,
             windows: windows,
             app: app,
             callback: { window in
-                // First raise the window
                 AccessibilityService.shared.raiseWindow(window: window, for: app)
-                // Hide other windows individually
-                for windowInfo in windows where windowInfo.window != window {
-                    AccessibilityService.shared.hideWindow(window: windowInfo.window, for: app)
+                Task {
+                    // Hide other windows in background
+                    for windowInfo in windows where windowInfo.window != window {
+                        AccessibilityService.shared.hideWindow(window: windowInfo.window, for: app)
+                    }
                 }
             }
         )
@@ -1284,33 +1591,29 @@ class DockWatcher {
     }
     
     private func handleMouseMove(at point: CGPoint) {
-        // Cancel and nil out previous task
+        // Cancel any pending task immediately
         menuShowTask?.cancel()
         menuShowTask = nil
         
         // Check if mouse is over a dock item
         if let (app, _) = DockService.shared.getClickedDockItem(at: point) {
             // Don't show menu if we're in the middle of a click
-            if clickedApp == nil {
-                if app != lastHoveredApp {
-                    let task = DispatchWorkItem { [weak self] in
-                        guard let self = self else { return }
-                        
-                        // Close existing menu
-                        self.windowChooser?.close()
-                        self.windowChooser = nil
-                        
-                        // Show new menu
-                        let windows = AccessibilityService.shared.getWindowInfo(for: app)
-                        if !windows.isEmpty {
-                            self.showWindowChooser(for: app, at: point, windows: windows)
-                            self.lastHoveredApp = app
-                        }
-                    }
+            if clickedApp == nil && app != lastHoveredApp {
+                let task = DispatchWorkItem { [weak self] in
+                    guard let self = self else { return }
                     
-                    menuShowTask = task
-                    DispatchQueue.main.asyncAfter(deadline: .now() + menuShowDelay, execute: task)
+                    // Get windows info immediately
+                    let windows = AccessibilityService.shared.getWindowInfo(for: app)
+                    
+                    if !windows.isEmpty {
+                        self.showWindowChooser(for: app, at: point, windows: windows)
+                        self.lastHoveredApp = app
+                    }
                 }
+                
+                menuShowTask = task
+                // Execute almost immediately
+                DispatchQueue.main.asyncAfter(deadline: .now() + menuShowDelay, execute: task)
             }
             return
         }
@@ -1357,7 +1660,29 @@ class DockWatcher {
         windowChooser = nil
         lastHoveredApp = nil
         
-        // Initialize window states if needed
+        // Special handling for Finder
+        if app.bundleIdentifier == "com.apple.finder" {
+            let windows = AccessibilityService.shared.getWindowInfo(for: app)
+            
+            // Only create a new window if there are no existing windows
+            if windows.isEmpty {
+                Logger.debug("No Finder windows found, creating new window")
+                // If Finder is not active, activate it first
+                if !app.isActive {
+                    app.activate(options: [.activateIgnoringOtherApps])
+                }
+                
+                // Create a new Finder window
+                let workspace = NSWorkspace.shared
+                workspace.open(URL(fileURLWithPath: NSHomeDirectory()))
+                return true
+            }
+            
+            // If there are existing windows, handle like any other app
+            Logger.debug("Existing Finder windows found, handling normally")
+        }
+        
+        // Regular handling for all apps (including Finder with existing windows)
         AccessibilityService.shared.initializeWindowStates(for: app)
         
         if app.isActive {
