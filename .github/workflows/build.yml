@@ -74,24 +74,36 @@ jobs:
         install_name_tool -change "@rpath/Sparkle.framework/Versions/B/Sparkle" "@executable_path/../Frameworks/Sparkle.framework/Versions/B/Sparkle" DockAppToggler.app/Contents/MacOS/DockAppToggler
         
         # Sign Sparkle framework components in the correct order
+        
+        # 0. Determine Sparkle version
+        SPARKLE_VERSION=$(defaults read DockAppToggler.app/Contents/Frameworks/Sparkle.framework/Resources/Info.plist CFBundleShortVersionString || echo "B")
+        
         # 1. Sign XPC Services
-        codesign --force --options runtime --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" --timestamp --entitlements Sources/DockAppToggler/Resources/sparkle.entitlements DockAppToggler.app/Contents/Frameworks/Sparkle.framework/Versions/Current/XPCServices/Downloader.xpc
-        codesign --force --options runtime --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" --timestamp --entitlements Sources/DockAppToggler/Resources/sparkle.entitlements DockAppToggler.app/Contents/Frameworks/Sparkle.framework/Versions/Current/XPCServices/Installer.xpc
+        codesign --force --options runtime --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" --timestamp --entitlements Sources/DockAppToggler/Resources/sparkle.entitlements DockAppToggler.app/Contents/Frameworks/Sparkle.framework/Versions/$SPARKLE_VERSION/XPCServices/Downloader.xpc
+        codesign --force --options runtime --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" --timestamp --entitlements Sources/DockAppToggler/Resources/sparkle.entitlements DockAppToggler.app/Contents/Frameworks/Sparkle.framework/Versions/$SPARKLE_VERSION/XPCServices/Installer.xpc
         
         # 2. Sign the Autoupdate binary
-        codesign --force --options runtime --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" --timestamp --entitlements Sources/DockAppToggler/Resources/sparkle.entitlements DockAppToggler.app/Contents/Frameworks/Sparkle.framework/Versions/Current/Autoupdate
+        codesign --force --options runtime --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" --timestamp --entitlements Sources/DockAppToggler/Resources/sparkle.entitlements DockAppToggler.app/Contents/Frameworks/Sparkle.framework/Versions/$SPARKLE_VERSION/Autoupdate
         
         # 3. Sign the Updater app
-        codesign --force --options runtime --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" --timestamp --entitlements Sources/DockAppToggler/Resources/sparkle.entitlements DockAppToggler.app/Contents/Frameworks/Sparkle.framework/Versions/Current/Updater.app
+        codesign --force --options runtime --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" --timestamp --entitlements Sources/DockAppToggler/Resources/sparkle.entitlements DockAppToggler.app/Contents/Frameworks/Sparkle.framework/Versions/$SPARKLE_VERSION/Updater.app
         
         # 4. Sign the main Sparkle binary
-        codesign --force --options runtime --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" --timestamp DockAppToggler.app/Contents/Frameworks/Sparkle.framework/Versions/Current/Sparkle
+        codesign --force --options runtime --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" --timestamp DockAppToggler.app/Contents/Frameworks/Sparkle.framework/Versions/$SPARKLE_VERSION/Sparkle
         
         # 5. Finally sign the Sparkle framework itself with explicit bundle format
-        codesign --force --options runtime --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" --timestamp --preserve-metadata=identifier,entitlements,flags,runtime --identifier "org.sparkle-project.Sparkle" DockAppToggler.app/Contents/Frameworks/Sparkle.framework
+        codesign --force --options runtime --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" \
+          --timestamp \
+          --preserve-metadata=identifier,entitlements,flags,runtime,requirements \
+          --identifier "org.sparkle-project.Sparkle" \
+          --type framework \
+          DockAppToggler.app/Contents/Frameworks/Sparkle.framework
         
-        # Sign the main app with hardened runtime
-        codesign --force --options runtime --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" --deep --timestamp DockAppToggler.app
+        # Sign the main app with hardened runtime and explicit type
+        codesign --force --options runtime --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" \
+          --deep --timestamp \
+          --type application \
+          DockAppToggler.app
         
         # Verify the app bundle
         echo "🔍 Verifying app bundle..."
