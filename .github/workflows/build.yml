@@ -91,18 +91,17 @@ jobs:
         # 4. Sign the main Sparkle binary
         codesign --force --options runtime --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" --timestamp DockAppToggler.app/Contents/Frameworks/Sparkle.framework/Versions/$SPARKLE_VERSION/Sparkle
         
-        # 5. Finally sign the Sparkle framework itself with explicit bundle format
+        # 5. Finally sign the Sparkle framework itself
+        /usr/libexec/PlistBuddy -c "Add :CFBundlePackageType string FMWK" DockAppToggler.app/Contents/Frameworks/Sparkle.framework/Resources/Info.plist 2>/dev/null || true
         codesign --force --options runtime --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" \
           --timestamp \
           --preserve-metadata=identifier,entitlements,flags,runtime,requirements \
           --identifier "org.sparkle-project.Sparkle" \
-          --type framework \
           DockAppToggler.app/Contents/Frameworks/Sparkle.framework
         
-        # Sign the main app with hardened runtime and explicit type
+        # Sign the main app with hardened runtime
         codesign --force --options runtime --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" \
           --deep --timestamp \
-          --type application \
           DockAppToggler.app
         
         # Verify the app bundle
