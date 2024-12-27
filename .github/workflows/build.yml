@@ -6,13 +6,10 @@ on:
       - 'v*'
   workflow_dispatch:
 
-
-
 jobs:
   build:
     permissions:
       contents: write
-
     runs-on: macos-latest
     
     steps:
@@ -36,19 +33,23 @@ jobs:
         P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
         KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
       run: |
+        # Create keychain
         security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
         security default-keychain -s build.keychain
         security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+        
+        # Import certificate
         echo $BUILD_CERTIFICATE_BASE64 | base64 --decode > certificate.p12
         security import certificate.p12 -k build.keychain -P "$P12_PASSWORD" -T /usr/bin/codesign -T /usr/bin/productsign
         security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
+        
+        # Allow codesign to access keychain
+        security set-keychain-settings -t 3600 -l build.keychain
 
     - name: Build and Package App
       run: |
-        # Clean any previous build
+        # Clean and build
         rm -rf DockAppToggler.app
-        
-        # Resolve dependencies and build
         swift package resolve
         swift build -c release
         
@@ -57,91 +58,71 @@ jobs:
         cp .build/release/DockAppToggler DockAppToggler.app/Contents/MacOS/
         cp Sources/DockAppToggler/Info.plist DockAppToggler.app/Contents/
         cp Sources/DockAppToggler/Resources/icon.icns DockAppToggler.app/Contents/Resources/
+        cp DockAppToggler.entitlements DockAppToggler.app/Contents/Resources/
         
-        # Create PkgInfo file
+        # Create PkgInfo
         echo "APPL????" > DockAppToggler.app/Contents/PkgInfo
         
-        # Set executable permissions
+        # Set permissions
         chmod +x DockAppToggler.app/Contents/MacOS/DockAppToggler
         
-        # Copy and setup Sparkle framework
+        # Copy Sparkle framework
         SPARKLE_PATH=$(find .build -name "Sparkle.framework" -type d | head -n 1)
-        if [ -z "$SPARKLE_PATH" ]; then
-          echo "❌ Error: Sparkle framework not found"
-          exit 1
-        fi
         cp -R "$SPARKLE_PATH" DockAppToggler.app/Contents/Frameworks/
+        
+        # Fix framework path
         install_name_tool -change "@rpath/Sparkle.framework/Versions/B/Sparkle" "@executable_path/../Frameworks/Sparkle.framework/Versions/B/Sparkle" DockAppToggler.app/Contents/MacOS/DockAppToggler
         
-        # Sign Sparkle framework first (since it's now part of our app bundle)
-        codesign --force --options runtime --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" DockAppToggler.app/Contents/Frameworks/Sparkle.framework --deep --timestamp
+        # Sign Sparkle framework
+        codesign --force --options runtime --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" --entitlements DockAppToggler.entitlements DockAppToggler.app/Contents/Frameworks/Sparkle.framework --deep --timestamp
         
-        # Sign the app with hardened runtime
-        codesign --force --options runtime --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" DockAppToggler.app --deep --timestamp
+        # Sign the app
+        codesign --force --options runtime --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" --entitlements DockAppToggler.entitlements DockAppToggler.app --deep --timestamp
         
-        # Verify the app bundle
-        echo "🔍 Verifying app bundle..."
+        # Verify signing
         codesign -vv --deep --strict DockAppToggler.app
-        otool -L DockAppToggler.app/Contents/MacOS/DockAppToggler
         
         # Create DMG
         mkdir -p dmg_root
         cp -r DockAppToggler.app dmg_root/
-        
-        # Create symlink to Applications folder
         ln -s /Applications dmg_root/Applications
-        
-        # Create DMG
         hdiutil create -volname "DockAppToggler" -srcfolder dmg_root -ov -format UDZO DockAppToggler.dmg
         
-        # Create zip for Sparkle updates
+        # Create zip for notarization
         ditto -c -k --keepParent DockAppToggler.app DockAppToggler.zip
 
-    - name: Notarize App and Installer
+    - name: Notarize App
       env:
         ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
         ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
         ASC_KEY_CONTENT: ${{ secrets.ASC_KEY_CONTENT }}
       run: |
+        # Save API key
         echo "$ASC_KEY_CONTENT" > AuthKey.p8
         
-        # Notarize app
+        # Submit for notarization
+        echo "Submitting for notarization..."
         xcrun notarytool submit DockAppToggler.zip \
           --key AuthKey.p8 \
           --key-id "$ASC_KEY_ID" \
           --issuer "$ASC_ISSUER_ID" \
           --wait
         
-        # Staple app and create final zip
+        # Staple the app
+        echo "Stapling app..."
         xcrun stapler staple DockAppToggler.app
+        
+        # Create final distributions
         ditto -c -k --keepParent DockAppToggler.app DockAppToggler_final.zip
         
-        # Create final DMG with notarized app
+        # Create final DMG
         mkdir -p dmg_root_final
         cp -r DockAppToggler.app dmg_root_final/
         ln -s /Applications dmg_root_final/Applications
         hdiutil create -volname "DockAppToggler" -srcfolder dmg_root_final -ov -format UDZO DockAppToggler_final.dmg
-
-    - name: Generate Appcast
-      env:
-        SPARKLE_KEY: ${{ secrets.SPARKLE_KEY }}
-      run: |
-        # Create release directory and copy only the zip file for updates
-        mkdir -p release
-        cp DockAppToggler_final.zip release/
         
-        # Find Sparkle tools
-        SPARKLE_PATH=".build/artifacts/sparkle/Sparkle/bin"
-        if [ ! -f "$SPARKLE_PATH/generate_appcast" ]; then
-          echo "❌ Error: Sparkle tools not found in $SPARKLE_PATH"
-          exit 1
-        fi
-        
-        # Use the key from stdin with the --ed-key-file option
-        "$SPARKLE_PATH/generate_appcast" \
-          --download-url-prefix "https://github.com/LimTec-de/DockAppToggler/releases/download/v${{ env.VERSION }}/" \
-          --ed-key-file - \
-          release <<< "$SPARKLE_KEY"
+        # Sign DMG
+        codesign --force --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" DockAppToggler_final.dmg
 
     - name: Create Release
       env:
@@ -151,5 +132,4 @@ jobs:
           --title "DockAppToggler v${{ env.VERSION }}" \
           --draft \
           DockAppToggler_final.zip \
-          DockAppToggler_final.dmg \
-          release/appcast.xml
+          DockAppToggler_final.dmg
