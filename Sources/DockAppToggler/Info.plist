@@ -23,6 +23,10 @@
     <string>IAdDZbbjN2C8vfN0U+YM0RQ8G6EC7Ah7ndlfmTWIKjg=</string>
     <key>SUEnableAutomaticChecks</key>
     <true/>
+    <key>SUAutomaticallyUpdate</key>
+    <true/>
+    <key>SUScheduledCheckInterval</key>
+    <integer>86400</integer>
     <key>CFBundleIconFile</key>
     <string>icon.icns</string>
     <key>NSAppleEventsUsageDescription</key>

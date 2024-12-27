@@ -13,6 +13,7 @@ import Carbon
 import Sparkle
 import Cocoa
 import ApplicationServices
+import UserNotifications
 
 // MARK: - Type Aliases and Constants
 
@@ -1704,13 +1705,15 @@ class StatusBarController {
     private var statusBar: NSStatusBar
     private var statusItem: NSStatusItem
     private var menu: NSMenu
-    private let updateController: UpdateController
+    private let updaterController: SPUStandardUpdaterController
     
     init() {
         statusBar = NSStatusBar.system
         statusItem = statusBar.statusItem(withLength: NSStatusItem.squareLength)
         menu = NSMenu()
-        updateController = UpdateController()
+        
+        // Initialize the updater controller
+        updaterController = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
         
         if let button = statusItem.button {
             if let iconPath = Bundle.main.path(forResource: "icon", ofType: "icns"),
@@ -1724,18 +1727,14 @@ class StatusBarController {
     }
     
     private func setupMenu() {
-        let updateItem = NSMenuItem(title: "Check for Updates...", action: #selector(checkForUpdates), keyEquivalent: "")
-        updateItem.target = self
+        let updateItem = NSMenuItem(title: "Check for Updates...", action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)), keyEquivalent: "")
+        updateItem.target = updaterController
         menu.addItem(updateItem)
         menu.addItem(NSMenuItem.separator())
         let quitItem = NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quitItem.target = NSApp
         menu.addItem(quitItem)
         statusItem.menu = menu
-    }
-    
-    @objc private func checkForUpdates() {
-        updateController.checkForUpdates()
     }
 }
 
@@ -1752,21 +1751,24 @@ app.run()
 
 // Add this new class for handling updates
 @MainActor
-class UpdateController {
+class UpdateController: NSObject, SPUStandardUserDriverDelegate, SPUUpdaterDelegate {
     private var updater: SPUUpdater?
     private var driver: SPUStandardUserDriver?
+    private var statusItem: NSStatusItem?
     
     init() {
+        super.init()
+        
         // Get the main bundle
         let bundle = Bundle.main
         Logger.info("Initializing Sparkle with bundle path: \(bundle.bundlePath)")
         
-        // Initialize Sparkle components
-        driver = SPUStandardUserDriver(hostBundle: bundle, delegate: nil)
+        // Initialize Sparkle components with delegates
+        driver = SPUStandardUserDriver(hostBundle: bundle, delegate: self)
         
         if let driver = driver {
             do {
-                let updater = try SPUUpdater(hostBundle: bundle, applicationBundle: bundle, userDriver: driver, delegate: nil)
+                let updater = try SPUUpdater(hostBundle: bundle, applicationBundle: bundle, userDriver: driver, delegate: self)
                 try updater.start()
                 self.updater = updater
                 
@@ -1796,6 +1798,56 @@ class UpdateController {
             updater.checkForUpdates()
         } else {
             Logger.error("Cannot check for updates - Sparkle updater not initialized")
+        }
+    }
+    
+    // MARK: - SPUStandardUserDriverDelegate
+    
+    var supportsGentleScheduledUpdateReminders: Bool {
+        return true
+    }
+    
+    func standardUserDriverWillHandleShowingUpdate(_ handleShowingUpdate: Bool, forUpdate update: SUAppcastItem, state: SPUUserUpdateState) {
+        // When an update alert will be presented, place the app in the foreground
+        NSApp.setActivationPolicy(.regular)
+        
+        if !state.userInitiated {
+            // Add a badge to the app's dock icon indicating one alert occurred
+            NSApp.dockTile.badgeLabel = "1"
+            
+            // Post a user notification
+            let content = UNMutableNotificationContent()
+            content.title = "A new update is available"
+            content.body = "Version \(update.displayVersionString) is now available"
+            
+            let request = UNNotificationRequest(identifier: "UpdateCheck", content: content, trigger: nil)
+            UNUserNotificationCenter.current().add(request)
+        }
+    }
+    
+    func standardUserDriverDidReceiveUserAttention(forUpdate update: SUAppcastItem) {
+        // Clear the dock badge indicator for the update
+        NSApp.dockTile.badgeLabel = ""
+        
+        // Dismiss active update notifications
+        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ["UpdateCheck"])
+    }
+    
+    func standardUserDriverWillFinishUpdateSession() {
+        // Put app back in background when the user session for the update finished
+        NSApp.setActivationPolicy(.accessory)
+    }
+    
+    // MARK: - SPUUpdaterDelegate
+    
+    func updater(_ updater: SPUUpdater, willScheduleUpdateCheckAfterDelay delay: TimeInterval) {
+        // Request notification permissions when Sparkle schedules an update check
+        UNUserNotificationCenter.current().requestAuthorization(options: [.badge, .alert, .sound]) { granted, error in
+            if let error = error {
+                Logger.error("Failed to request notification authorization: \(error)")
+            } else {
+                Logger.info("Notification authorization granted: \(granted)")
+            }
         }
     }
 }
