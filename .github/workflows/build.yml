@@ -6,8 +6,6 @@ on:
       - 'v*'
   workflow_dispatch:
 
-
-
 jobs:
   build:
     permissions:
@@ -103,14 +101,14 @@ jobs:
           --preserve-metadata=identifier,entitlements,flags,runtime \
           DockAppToggler.app/Contents/Frameworks/Sparkle.framework
         
-        # Sign the main app with hardened runtime
+        # Sign the main app with hardened runtime (NO --deep)
         codesign --force --options runtime --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" \
-          --deep --timestamp \
+          --timestamp \
           DockAppToggler.app
         
-        # Verify the app bundle
+        # Verify the app bundle (NO --deep here either)
         echo "🔍 Verifying app bundle..."
-        codesign -vv --deep --strict DockAppToggler.app
+        codesign -vv --strict DockAppToggler.app
         otool -L DockAppToggler.app/Contents/MacOS/DockAppToggler
         
         # Create DMG
