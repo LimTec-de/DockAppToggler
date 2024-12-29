@@ -1778,6 +1778,9 @@ class DockWatcher {
         }
         lastMouseMoveTime = currentTime
         
+        // Cancel any pending menu show/hide tasks
+        menuShowTask?.cancel()
+        
         // Check if mouse is over any dock item
         if let (app, _, iconCenter) = DockService.shared.findAppUnderCursor(at: point) {
             // Don't show menu if we're in the middle of a click
@@ -1790,6 +1793,10 @@ class DockWatcher {
                         
                         if !windows.isEmpty {
                             await MainActor.run {
+                                // Close any existing window chooser before showing new one
+                                self.windowChooser?.close()
+                                self.windowChooser = nil
+                                
                                 self.displayWindowSelector(for: app, at: iconCenter, windows: windows)
                                 self.lastHoveredApp = app
                             }
@@ -1806,6 +1813,7 @@ class DockWatcher {
         // Mouse is not over a dock item, check if it's over the window chooser
         guard let chooser = windowChooser,
               let window = chooser.window else {
+            // If we're not over a dock item and there's no window chooser, clear state
             lastHoveredApp = nil
             return
         }
@@ -1822,9 +1830,20 @@ class DockWatcher {
         // Only close if mouse is outside expanded frame AND not over a dock item
         if !expandedFrame.contains(mouseLocation) {
             let task = DispatchWorkItem { [weak self] in
-                guard let self = self else { return }
+                guard let self = self,
+                      let currentWindow = self.windowChooser?.window else { return }
+                
                 let currentLocation = NSEvent.mouseLocation
-                if !expandedFrame.contains(currentLocation) && 
+                let currentFrame = currentWindow.frame
+                let currentExpandedFrame = NSRect(
+                    x: currentFrame.minX - self.dismissalMargin,
+                    y: currentFrame.minY - self.dismissalMargin,
+                    width: currentFrame.width + self.dismissalMargin * 2,
+                    height: currentFrame.height + self.dismissalMargin * 2
+                )
+                
+                // Double-check position before closing
+                if !currentExpandedFrame.contains(currentLocation) && 
                    DockService.shared.findAppUnderCursor(at: currentLocation) == nil {
                     self.windowChooser?.close()
                     self.windowChooser = nil
