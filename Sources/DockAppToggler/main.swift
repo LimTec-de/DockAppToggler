@@ -208,7 +208,7 @@ class WindowChooserView: NSView {
         titleField.isBordered = false
         titleField.drawsBackground = false
         titleField.textColor = Constants.UI.Theme.titleColor
-        titleField.font = .boldSystemFont(ofSize: 12)
+        titleField.font = .systemFont(ofSize: 13.5)  // Adjusted title font size to match Dock tooltip
         titleField.alignment = .center
         
         addSubview(titleField)
@@ -326,7 +326,7 @@ class WindowChooserView: NSView {
         button.wantsLayer = true
         
         button.isBordered = false
-        button.font = .menuFont(ofSize: 13)
+        button.font = .systemFont(ofSize: 13.5)  // Adjusted font size to match Dock tooltip
         
         // Set initial color based on window state
         if options[tag].window == topmostWindow {
@@ -971,6 +971,7 @@ class WindowChooserController: NSWindowController {
     private var trackingArea: NSTrackingArea?
     private let dismissalMargin: CGFloat = 20.0
     private var visualEffectView: NSVisualEffectView?  // Add this property
+    private var isClosing = false
     
     init(at point: CGPoint, windows: [WindowInfo], app: NSRunningApplication, callback: @escaping (AXUIElement) -> Void) {
         self.windowCallback = callback
@@ -1029,9 +1030,9 @@ class WindowChooserController: NSWindowController {
         containerView.wantsLayer = true
         containerView.layer?.masksToBounds = false
         containerView.layer?.shadowColor = NSColor.black.cgColor
-        containerView.layer?.shadowOpacity = 0.08  // Reduced from 0.1
-        containerView.layer?.shadowRadius = 1.0    // Reduced from 1.5
-        containerView.layer?.shadowOffset = NSSize(width: 0, height: -0.5)
+        containerView.layer?.shadowOpacity = 0.15  // Adjusted shadow opacity
+        containerView.layer?.shadowRadius = 3.0    // Adjusted shadow radius
+        containerView.layer?.shadowOffset = .zero   // Center shadow
         
         // Create and configure the visual effect view with bubble arrow
         let visualEffect = BubbleVisualEffectView(frame: containerView.bounds)
@@ -1104,6 +1105,28 @@ class WindowChooserController: NSWindowController {
             context.duration = Constants.UI.animationDuration
             window.animator().alphaValue = 1
         }
+    }
+    
+    override func close() {
+        guard !isClosing else { return }
+        isClosing = true
+        
+        // Store self reference before animation
+        let controller = self
+        
+        // Animate window closing
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = Constants.UI.animationDuration
+            window?.animator().alphaValue = 0
+        }, completionHandler: {
+            // Use stored reference to call super and update state
+            controller.finishClosing()
+        })
+    }
+    
+    private func finishClosing() {
+        super.close()
+        isClosing = false
     }
 }
 
@@ -1549,6 +1572,8 @@ class DockWatcher {
     private let dismissalMargin: CGFloat = 20.0  // Add this line
     private var lastMouseMoveTime: TimeInterval = 0
     private var isContextMenuActive: Bool = false
+    // Add strong reference to prevent deallocation
+    private var chooserControllers: [NSRunningApplication: WindowChooserController] = [:]
     
     init() {
         setupEventTap()
@@ -1557,13 +1582,16 @@ class DockWatcher {
     }
     
     nonisolated private func cleanup() {
-        // Since we're nonisolated, we need to use DispatchQueue.main
-        DispatchQueue.main.async { [windowChooser, menuShowTask] in
+        DispatchQueue.main.async { [weak self] in
             // Cancel any pending tasks
-            menuShowTask?.cancel()
+            self?.menuShowTask?.cancel()
             
-            // Clean up window chooser
-            windowChooser?.close()
+            // Clean up all window choosers
+            self?.chooserControllers.values.forEach { $0.close() }
+            self?.chooserControllers.removeAll()
+            
+            self?.windowChooser?.close()
+            self?.windowChooser = nil
         }
     }
     
@@ -1717,13 +1745,10 @@ class DockWatcher {
     }
     
     private func displayWindowSelector(for app: NSRunningApplication, at point: CGPoint, windows: [WindowInfo]) {
-        // Close any existing window chooser immediately
-        if let existingChooser = windowChooser {
-            existingChooser.close()
-            windowChooser = nil
-        }
+        // Close any existing window chooser for this app
+        chooserControllers[app]?.close()
         
-        // Create and show new chooser immediately
+        // Create and show new chooser
         let chooser = WindowChooserController(
             at: point,
             windows: windows,
@@ -1739,6 +1764,8 @@ class DockWatcher {
             }
         )
         
+        // Store strong reference
+        chooserControllers[app] = chooser
         self.windowChooser = chooser
         chooser.window?.makeKeyAndOrderFront(nil)
     }
@@ -1752,28 +1779,6 @@ class DockWatcher {
         lastMouseMoveTime = currentTime
         
         // Check if mouse is over any dock item
-        let isOverDock = DockService.shared.findAppUnderCursor(at: point) != nil
-        
-        // Reset context menu state if mouse moves away from dock area
-        if !isOverDock && isContextMenuActive {
-            isContextMenuActive = false
-            NotificationCenter.default.removeObserver(
-                self,
-                name: NSMenu.didEndTrackingNotification,
-                object: nil
-            )
-        }
-        
-        // Skip if context menu is still active
-        guard !isContextMenuActive else {
-            return
-        }
-        
-        // Cancel any pending task immediately
-        menuShowTask?.cancel()
-        menuShowTask = nil
-        
-        // Check if mouse is over a dock item
         if let (app, _, iconCenter) = DockService.shared.findAppUnderCursor(at: point) {
             // Don't show menu if we're in the middle of a click
             if clickedApp == nil && app != lastHoveredApp {
@@ -1782,9 +1787,9 @@ class DockWatcher {
                     
                     Task {
                         let windows = AccessibilityService.shared.listApplicationWindows(for: app)
+                        
                         if !windows.isEmpty {
                             await MainActor.run {
-                                // Use the icon center position instead of mouse position
                                 self.displayWindowSelector(for: app, at: iconCenter, windows: windows)
                                 self.lastHoveredApp = app
                             }
