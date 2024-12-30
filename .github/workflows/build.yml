@@ -143,7 +143,16 @@ jobs:
         cp -r DockAppToggler.app dmg_root/
         ln -s /Applications dmg_root/Applications
         
-        # Re-sign the app in the DMG folder
+        # First sign the Sparkle framework in the DMG copy
+        codesign --force \
+          --options runtime \
+          --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" \
+          --timestamp \
+          --deep \
+          --verbose \
+          dmg_root/DockAppToggler.app/Contents/Frameworks/Sparkle.framework
+        
+        # Then sign the app in the DMG folder
         codesign --force \
           --options runtime \
           --entitlements Sources/DockAppToggler/DockAppToggler.entitlements \
@@ -152,6 +161,7 @@ jobs:
           --deep \
           --strict \
           --verbose \
+          --preserve-metadata=identifier,entitlements,flags,runtime \
           dmg_root/DockAppToggler.app
         
         # Create DMG with custom settings
