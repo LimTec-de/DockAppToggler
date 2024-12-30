@@ -72,35 +72,38 @@ jobs:
         # Copy Sparkle framework maintaining symlinks
         ditto --rsrc "$SPARKLE_PATH" DockAppToggler.app/Contents/Frameworks/Sparkle.framework
         
-        # Verify framework structure
-        echo "🔍 Verifying Sparkle framework structure..."
-        ls -la DockAppToggler.app/Contents/Frameworks/Sparkle.framework/
+        # After copying Sparkle.framework, verify its structure
+        echo "🔍 Verifying Sparkle framework before signing..."
+        ls -la DockAppToggler.app/Contents/Frameworks/Sparkle.framework/Versions/B/
+        ls -la DockAppToggler.app/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/
         
-        # Update install name
-        install_name_tool -change "@rpath/Sparkle.framework/Versions/B/Sparkle" "@executable_path/../Frameworks/Sparkle.framework/Versions/B/Sparkle" DockAppToggler.app/Contents/MacOS/DockAppToggler
+        # Sign components in order from innermost to outermost
+        SPARKLE_VERSION="B"
         
-        # Sign Sparkle framework components in the correct order
-        SPARKLE_VERSION="B"  # Sparkle typically uses version B
-        
-        # Remove all existing signatures first
-        codesign --remove-signature DockAppToggler.app
-        
-        # Sign the Sparkle framework as a bundle
+        # First, sign the XPC services
         codesign --force --options runtime \
           --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" \
           --timestamp \
-          --entitlements Sources/DockAppToggler/Resources/sparkle.entitlements \
-          --deep \
+          DockAppToggler.app/Contents/Frameworks/Sparkle.framework/Versions/$SPARKLE_VERSION/XPCServices/*.xpc
+        
+        # Sign the Sparkle framework binary
+        codesign --force --options runtime \
+          --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" \
+          --timestamp \
+          DockAppToggler.app/Contents/Frameworks/Sparkle.framework/Versions/$SPARKLE_VERSION/Sparkle
+        
+        # Sign the framework bundle
+        codesign --force --options runtime \
+          --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" \
+          --timestamp \
           DockAppToggler.app/Contents/Frameworks/Sparkle.framework
         
-        # Sign the main app
+        # Finally sign the main app
         codesign --force --options runtime \
           --entitlements Sources/DockAppToggler/DockAppToggler.entitlements \
-          --deep \
           --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" \
           --timestamp \
           --verbose \
-          --requirements "=designated => anchor apple generic and identifier \"com.limtec.dockapptoggler\" and (certificate leaf[field.1.2.840.113635.100.6.1.9] /* exists */ or certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = \"${{ secrets.TEAM_ID }}\")" \
           DockAppToggler.app
         
         # Verify the app bundle with deep verification
