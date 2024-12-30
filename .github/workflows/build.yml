@@ -139,20 +139,24 @@ jobs:
         
         # Create DMG
         echo "📦 Creating DMG..."
-        mkdir -p dmg_root
-        cp -r DockAppToggler.app dmg_root/
-        ln -s /Applications dmg_root/Applications
+        mkdir -p dmg_root/DockAppToggler.app/Contents/{MacOS,Resources,Frameworks}
         
-        # First sign the Sparkle framework in the DMG copy
-        codesign --force \
-          --options runtime \
-          --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" \
-          --timestamp \
-          --deep \
-          --verbose \
+        # Copy app contents except framework
+        cp -r DockAppToggler.app/Contents/MacOS dmg_root/DockAppToggler.app/Contents/
+        cp -r DockAppToggler.app/Contents/Resources dmg_root/DockAppToggler.app/Contents/
+        cp DockAppToggler.app/Contents/Info.plist dmg_root/DockAppToggler.app/Contents/
+        cp DockAppToggler.app/Contents/PkgInfo dmg_root/DockAppToggler.app/Contents/
+        
+        # Copy and sign Sparkle framework
+        ditto --rsrc DockAppToggler.app/Contents/Frameworks/Sparkle.framework \
           dmg_root/DockAppToggler.app/Contents/Frameworks/Sparkle.framework
         
-        # Then sign the app in the DMG folder
+        # Update install name in DMG copy
+        install_name_tool -change "@rpath/Sparkle.framework/Versions/B/Sparkle" \
+          "@executable_path/../Frameworks/Sparkle.framework/Versions/B/Sparkle" \
+          dmg_root/DockAppToggler.app/Contents/MacOS/DockAppToggler
+        
+        # Sign the app in DMG
         codesign --force \
           --options runtime \
           --entitlements Sources/DockAppToggler/DockAppToggler.entitlements \
@@ -161,10 +165,12 @@ jobs:
           --deep \
           --strict \
           --verbose \
-          --preserve-metadata=identifier,entitlements,flags,runtime \
           dmg_root/DockAppToggler.app
         
-        # Create DMG with custom settings
+        # Add Applications symlink
+        ln -s /Applications dmg_root/Applications
+        
+        # Create DMG
         hdiutil create -volname "DockAppToggler" \
           -srcfolder dmg_root \
           -ov \
