@@ -143,6 +143,17 @@ jobs:
         cp -r DockAppToggler.app dmg_root/
         ln -s /Applications dmg_root/Applications
         
+        # Re-sign the app in the DMG folder
+        codesign --force \
+          --options runtime \
+          --entitlements Sources/DockAppToggler/DockAppToggler.entitlements \
+          --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" \
+          --timestamp \
+          --deep \
+          --strict \
+          --verbose \
+          dmg_root/DockAppToggler.app
+        
         # Create DMG with custom settings
         hdiutil create -volname "DockAppToggler" \
           -srcfolder dmg_root \
@@ -150,6 +161,13 @@ jobs:
           -format UDZO \
           -fs HFS+ \
           -imagekey zlib-level=9 \
+          DockAppToggler_final.dmg
+        
+        # Sign the DMG itself
+        codesign --force \
+          --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" \
+          --timestamp \
+          --verbose \
           DockAppToggler_final.dmg
         
         # Clean up
