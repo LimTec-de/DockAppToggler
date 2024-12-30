@@ -62,7 +62,7 @@ jobs:
         # Set executable permissions
         chmod +x DockAppToggler.app/Contents/MacOS/DockAppToggler
         
-        # Copy and setup Sparkle framework
+        # Copy Sparkle framework
         SPARKLE_PATH=$(find .build -name "Sparkle.framework" -type d | head -n 1)
         if [ -z "$SPARKLE_PATH" ]; then
           echo "❌ Error: Sparkle framework not found"
@@ -72,41 +72,20 @@ jobs:
         # Copy Sparkle framework maintaining symlinks
         ditto --rsrc "$SPARKLE_PATH" DockAppToggler.app/Contents/Frameworks/Sparkle.framework
         
-        # After copying Sparkle.framework, verify its structure
-        echo "🔍 Verifying Sparkle framework before signing..."
-        ls -la DockAppToggler.app/Contents/Frameworks/Sparkle.framework/Versions/B/
-        ls -la DockAppToggler.app/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/
+        # Update install name
+        install_name_tool -change "@rpath/Sparkle.framework/Versions/B/Sparkle" "@executable_path/../Frameworks/Sparkle.framework/Versions/B/Sparkle" DockAppToggler.app/Contents/MacOS/DockAppToggler
         
-        # Sign components in order from innermost to outermost
-        SPARKLE_VERSION="B"
-        
-        # First, sign the XPC services
-        codesign --force --options runtime \
-          --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" \
-          --timestamp \
-          DockAppToggler.app/Contents/Frameworks/Sparkle.framework/Versions/$SPARKLE_VERSION/XPCServices/*.xpc
-        
-        # Sign the Sparkle framework binary
-        codesign --force --options runtime \
-          --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" \
-          --timestamp \
-          DockAppToggler.app/Contents/Frameworks/Sparkle.framework/Versions/$SPARKLE_VERSION/Sparkle
-        
-        # Sign the framework bundle
-        codesign --force --options runtime \
-          --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" \
-          --timestamp \
-          DockAppToggler.app/Contents/Frameworks/Sparkle.framework
-        
-        # Finally sign the main app
-        codesign --force --options runtime \
+        # Sign the main app with hardened runtime
+        codesign --force \
+          --options runtime \
           --entitlements Sources/DockAppToggler/DockAppToggler.entitlements \
           --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" \
           --timestamp \
+          --deep \
           --verbose \
           DockAppToggler.app
         
-        # Verify the app bundle with deep verification
+        # Verify the app bundle
         echo "🔍 Verifying app bundle..."
         codesign -vvv --deep --strict DockAppToggler.app
         otool -L DockAppToggler.app/Contents/MacOS/DockAppToggler
@@ -114,11 +93,7 @@ jobs:
         # Create DMG
         mkdir -p dmg_root
         cp -r DockAppToggler.app dmg_root/
-        
-        # Create symlink to Applications folder
         ln -s /Applications dmg_root/Applications
-        
-        # Create DMG
         hdiutil create -volname "DockAppToggler" -srcfolder dmg_root -ov -format UDZO DockAppToggler.dmg
         
         # Create zip for Sparkle updates
