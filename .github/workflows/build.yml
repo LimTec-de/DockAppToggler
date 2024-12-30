@@ -104,13 +104,15 @@ jobs:
         # Sign the main app with hardened runtime and additional entitlements
         codesign --force --options runtime \
           --entitlements Sources/DockAppToggler/DockAppToggler.entitlements \
+          --deep \
           --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" \
           --timestamp \
+          --verbose \
           DockAppToggler.app
         
-        # Verify the app bundle (NO --deep here either)
+        # Verify the app bundle with deep verification
         echo "🔍 Verifying app bundle..."
-        codesign -vv --strict DockAppToggler.app
+        codesign -vvv --deep --strict DockAppToggler.app
         otool -L DockAppToggler.app/Contents/MacOS/DockAppToggler
         
         # Create DMG
@@ -134,7 +136,11 @@ jobs:
       run: |
         echo "$ASC_KEY_CONTENT" > AuthKey.p8
         
-        # Notarize app
+        # Add this before notarization
+        echo "🔍 Checking entitlements..."
+        codesign -d --entitlements :- DockAppToggler.app
+        
+        # Then proceed with notarization
         xcrun notarytool submit DockAppToggler.zip \
           --key AuthKey.p8 \
           --key-id "$ASC_KEY_ID" \
