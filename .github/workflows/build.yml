@@ -123,32 +123,68 @@ jobs:
         
         # Create DMG with properly signed app
         mkdir -p dmg_root
-        cp -r DockAppToggler.app dmg_root/
+        cp -R DockAppToggler.app dmg_root/
         ln -s /Applications dmg_root/Applications
         
-        # Create and sign DMG
+        # Create DMG with specific requirements for notarization
         hdiutil create -volname "DockAppToggler" \
           -srcfolder dmg_root \
           -ov \
           -format UDZO \
           -fs HFS+ \
+          -imagekey zlib-level=9 \
           DockAppToggler_final.dmg
         
+        # Sign DMG with specific requirements
         codesign --force \
           --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" \
+          --options runtime \
           --timestamp \
+          --verbose \
           DockAppToggler_final.dmg
         
-        # Notarize DMG
-        xcrun notarytool submit DockAppToggler_final.dmg \
+        # Notarize DMG with enhanced error reporting
+        echo "🔍 Submitting DMG for notarization..."
+        NOTARIZATION_OUTPUT=$(xcrun notarytool submit DockAppToggler_final.dmg \
           --key AuthKey.p8 \
           --key-id "$ASC_KEY_ID" \
           --issuer "$ASC_ISSUER_ID" \
           --wait \
-          --timeout 30m
+          --timeout 30m)
         
-        # Staple DMG
-        xcrun stapler staple DockAppToggler_final.dmg
+        echo "Notarization output: $NOTARIZATION_OUTPUT"
+        
+        # Extract submission ID
+        SUBMISSION_ID=$(echo "$NOTARIZATION_OUTPUT" | grep -o "id: [a-f0-9-]\+" | head -n1 | cut -d' ' -f2)
+        if [ -z "$SUBMISSION_ID" ]; then
+          echo "❌ Error: Could not extract submission ID"
+          exit 1
+        fi
+        
+        # Check notarization status and get detailed log
+        echo "🔍 Getting detailed notarization log..."
+        xcrun notarytool log \
+          --key AuthKey.p8 \
+          --key-id "$ASC_KEY_ID" \
+          --issuer "$ASC_ISSUER_ID" \
+          "$SUBMISSION_ID"
+        
+        # Staple DMG only if notarization succeeded
+        echo "🔍 Stapling DMG..."
+        if ! xcrun stapler staple DockAppToggler_final.dmg; then
+          echo "❌ Error: Failed to staple DMG"
+          exit 1
+        fi
+        
+        # Verify stapling
+        echo "🔍 Verifying DMG stapling..."
+        if ! xcrun stapler validate DockAppToggler_final.dmg; then
+          echo "❌ Error: DMG stapling validation failed"
+          exit 1
+        fi
+        
+        # Final verification
+        spctl --assess -vv --type install DockAppToggler_final.dmg
 
     - name: Generate Appcast
       env:
