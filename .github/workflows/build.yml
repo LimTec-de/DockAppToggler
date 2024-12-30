@@ -143,11 +143,6 @@ jobs:
         cp -r DockAppToggler.app dmg_root/
         ln -s /Applications dmg_root/Applications
         
-        # Create background directory and copy resources
-        mkdir -p dmg_root/.background
-        # Optional: Add background image if you have one
-        # cp Sources/DockAppToggler/Resources/dmg-background.png dmg_root/.background/
-        
         # Create DMG with custom settings
         hdiutil create -volname "DockAppToggler" \
           -srcfolder dmg_root \
@@ -159,6 +154,43 @@ jobs:
         
         # Clean up
         rm -rf dmg_root
+        
+        # Notarize the DMG
+        echo "🔍 Submitting DMG for notarization..."
+        NOTARIZATION_OUTPUT=$(xcrun notarytool submit DockAppToggler_final.dmg \
+          --key AuthKey.p8 \
+          --key-id "$ASC_KEY_ID" \
+          --issuer "$ASC_ISSUER_ID" \
+          --wait \
+          --timeout 30m)
+        echo "DMG Notarization output: $NOTARIZATION_OUTPUT"
+        
+        # Extract submission ID for DMG
+        SUBMISSION_ID=$(echo "$NOTARIZATION_OUTPUT" | grep -o "id: [a-f0-9-]\+" | head -n1 | cut -d' ' -f2)
+        if [ -z "$SUBMISSION_ID" ]; then
+          echo "❌ Error: Could not extract submission ID from DMG notarization output"
+          exit 1
+        fi
+        echo "Extracted DMG Submission ID: $SUBMISSION_ID"
+
+        # Check DMG notarization status
+        echo "🔍 Checking DMG notarization status..."
+        if ! xcrun notarytool log \
+          --key AuthKey.p8 \
+          --key-id "$ASC_KEY_ID" \
+          --issuer "$ASC_ISSUER_ID" \
+          "$SUBMISSION_ID"; then
+          echo "❌ Error: Failed to get DMG notarization log"
+          exit 1
+        fi
+
+        # Staple the DMG
+        echo "🔍 Stapling DMG..."
+        xcrun stapler staple DockAppToggler_final.dmg
+        
+        # Verify DMG stapling
+        echo "🔍 Verifying DMG stapling..."
+        xcrun stapler validate DockAppToggler_final.dmg
 
     - name: Generate Appcast
       env:
