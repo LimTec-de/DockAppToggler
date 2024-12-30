@@ -1956,8 +1956,36 @@ class StatusBarController {
 
 // MARK: - Application Entry Point
 
+// Add near the start of the application entry point
 Logger.info("Starting Dock App Toggler...")
+
+// Check accessibility permissions
+func checkAccessibilityPermissions() {
+    let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
+    let accessibilityEnabled = AXIsProcessTrustedWithOptions(options as CFDictionary)
+    
+    Logger.info("Accessibility permissions status: \(accessibilityEnabled)")
+    
+    if !accessibilityEnabled {
+        Logger.warning("Accessibility permissions not granted. Prompting user...")
+        // Show a notification or alert to the user
+        let alert = NSAlert()
+        alert.messageText = "Accessibility Permissions Required"
+        alert.informativeText = "DockAppToggler needs accessibility permissions to function. Please grant access in System Preferences > Security & Privacy > Privacy > Accessibility."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Open System Preferences")
+        alert.addButton(withTitle: "Later")
+        
+        if alert.runModal() == .alertFirstButtonReturn {
+            NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Library/PreferencePanes/Security.prefPane"))
+        }
+    }
+}
+
+// Initialize app components
 let app = NSApplication.shared
+checkAccessibilityPermissions()
+
 // Store references to prevent deallocation
 let appController = (
     watcher: DockWatcher(),
