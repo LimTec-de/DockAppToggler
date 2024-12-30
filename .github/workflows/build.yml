@@ -82,59 +82,37 @@ jobs:
           --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" \
           --timestamp \
           --deep \
-          --preserve-metadata=identifier,entitlements,flags,runtime \
           --strict \
           --verbose \
           DockAppToggler.app
 
-        # Verify signing
-        echo "🔍 Verifying code signing..."
-        codesign -dvv DockAppToggler.app
-        codesign -vvv --deep --strict DockAppToggler.app
-        spctl --assess --verbose=4 DockAppToggler.app
-        
-        # Verify the app bundle
-        echo "🔍 Verifying app bundle..."
-        codesign -vvv --deep --strict DockAppToggler.app
-        otool -L DockAppToggler.app/Contents/MacOS/DockAppToggler
-        
-        # Create DMG
-        mkdir -p dmg_root
-        cp -r DockAppToggler.app dmg_root/
-        ln -s /Applications dmg_root/Applications
-        hdiutil create -volname "DockAppToggler" -srcfolder dmg_root -ov -format UDZO DockAppToggler.dmg
-        
-        # Create zip for Sparkle updates
+        # Create zip for notarization
         ditto -c -k --keepParent DockAppToggler.app DockAppToggler.zip
 
-    - name: Notarize App and Installer
-      env:
-        ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
-        ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
-        ASC_KEY_CONTENT: ${{ secrets.ASC_KEY_CONTENT }}
-      run: |
-        echo "$ASC_KEY_CONTENT" > AuthKey.p8
-        
-        # Add this before notarization
-        echo "🔍 Checking entitlements..."
-        codesign -d --entitlements :- DockAppToggler.app
-        
-        # Then proceed with notarization
+        # Notarize the app
+        echo "🔍 Submitting for notarization..."
         xcrun notarytool submit DockAppToggler.zip \
           --key AuthKey.p8 \
           --key-id "$ASC_KEY_ID" \
           --issuer "$ASC_ISSUER_ID" \
-          --wait
-        
-        # Staple app and create final zip
+          --wait \
+          --timeout 30m
+
+        # Wait for notarization to complete and get status
+        echo "🔍 Checking notarization status..."
+        xcrun notarytool log --key AuthKey.p8 --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" $(cat notarization-id.txt)
+
+        # Staple the app
+        echo "🔍 Stapling app..."
         xcrun stapler staple DockAppToggler.app
-        ditto -c -k --keepParent DockAppToggler.app DockAppToggler_final.zip
         
-        # Create final DMG with notarized app
-        mkdir -p dmg_root_final
-        cp -r DockAppToggler.app dmg_root_final/
-        ln -s /Applications dmg_root_final/Applications
-        hdiutil create -volname "DockAppToggler" -srcfolder dmg_root_final -ov -format UDZO DockAppToggler_final.dmg
+        # Verify stapling
+        echo "🔍 Verifying stapling..."
+        xcrun stapler validate DockAppToggler.app
+        spctl --assess -vv --type exec DockAppToggler.app
+
+        # Create final distributions
+        ditto -c -k --keepParent DockAppToggler.app DockAppToggler_final.zip
 
     - name: Generate Appcast
       env:
