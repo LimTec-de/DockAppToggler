@@ -104,18 +104,26 @@ jobs:
           --issuer "$ASC_ISSUER_ID" \
           --wait \
           --timeout 30m)
+        echo "Notarization output: $NOTARIZATION_OUTPUT"
         
-        # Extract submission ID from output
-        SUBMISSION_ID=$(echo "$NOTARIZATION_OUTPUT" | grep "id:" | cut -d' ' -f3)
-        echo "Submission ID: $SUBMISSION_ID"
+        # Extract submission ID using a more robust method
+        SUBMISSION_ID=$(echo "$NOTARIZATION_OUTPUT" | grep -o "id: [a-f0-9-]\+" | head -n1 | cut -d' ' -f2)
+        if [ -z "$SUBMISSION_ID" ]; then
+          echo "❌ Error: Could not extract submission ID from output"
+          exit 1
+        fi
+        echo "Extracted Submission ID: $SUBMISSION_ID"
 
         # Wait for notarization to complete and get status
         echo "🔍 Checking notarization status..."
-        xcrun notarytool log \
+        if ! xcrun notarytool log \
           --key AuthKey.p8 \
           --key-id "$ASC_KEY_ID" \
           --issuer "$ASC_ISSUER_ID" \
-          "$SUBMISSION_ID"
+          "$SUBMISSION_ID"; then
+          echo "❌ Error: Failed to get notarization log"
+          exit 1
+        fi
 
         # Staple the app
         echo "🔍 Stapling app..."
