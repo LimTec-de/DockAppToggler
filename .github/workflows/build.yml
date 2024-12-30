@@ -72,15 +72,6 @@ jobs:
         # Copy Sparkle framework maintaining symlinks
         ditto --rsrc "$SPARKLE_PATH" DockAppToggler.app/Contents/Frameworks/Sparkle.framework
         
-        # Sign Sparkle framework first
-        codesign --force \
-          --options runtime \
-          --entitlements Sources/DockAppToggler/Resources/sparkle.entitlements \
-          --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" \
-          --timestamp \
-          --deep \
-          DockAppToggler.app/Contents/Frameworks/Sparkle.framework
-        
         # Update install name
         install_name_tool -change "@rpath/Sparkle.framework/Versions/B/Sparkle" "@executable_path/../Frameworks/Sparkle.framework/Versions/B/Sparkle" DockAppToggler.app/Contents/MacOS/DockAppToggler
         
@@ -91,9 +82,9 @@ jobs:
           --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" \
           --timestamp \
           --deep \
+          --preserve-metadata=identifier,entitlements,flags,runtime \
           --strict \
           --verbose \
-          --requirements "=designated => anchor apple generic and identifier \"com.limtec.dockapptoggler\" and ((cert leaf[field.1.2.840.113635.100.6.1.9] /* exists */ or certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */) and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = \"${{ secrets.TEAM_ID }}\")" \
           DockAppToggler.app
 
         # Verify signing
