@@ -136,6 +136,29 @@ jobs:
 
         # Create final distributions
         ditto -c -k --keepParent DockAppToggler.app DockAppToggler_final.zip
+        
+        # Create DMG
+        echo "📦 Creating DMG..."
+        mkdir -p dmg_root
+        cp -r DockAppToggler.app dmg_root/
+        ln -s /Applications dmg_root/Applications
+        
+        # Create background directory and copy resources
+        mkdir -p dmg_root/.background
+        # Optional: Add background image if you have one
+        # cp Sources/DockAppToggler/Resources/dmg-background.png dmg_root/.background/
+        
+        # Create DMG with custom settings
+        hdiutil create -volname "DockAppToggler" \
+          -srcfolder dmg_root \
+          -ov \
+          -format UDZO \
+          -fs HFS+ \
+          -imagekey zlib-level=9 \
+          DockAppToggler_final.dmg
+        
+        # Clean up
+        rm -rf dmg_root
 
     - name: Generate Appcast
       env:
@@ -166,4 +189,5 @@ jobs:
           --title "DockAppToggler v${{ env.VERSION }}" \
           --draft \
           DockAppToggler_final.zip \
+          DockAppToggler_final.dmg \
           release/appcast.xml
