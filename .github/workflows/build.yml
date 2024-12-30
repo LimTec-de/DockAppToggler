@@ -82,8 +82,16 @@ jobs:
           --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" \
           --timestamp \
           --deep \
+          --strict \
           --verbose \
+          --requirements "=designated => anchor apple generic and identifier \"com.limtec.dockapptoggler\" and ((cert leaf[field.1.2.840.113635.100.6.1.9] /* exists */ or certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */) and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = \"${{ secrets.TEAM_ID }}\")" \
           DockAppToggler.app
+
+        # Verify signing
+        echo "🔍 Verifying code signing..."
+        codesign -dvv DockAppToggler.app
+        codesign -vvv --deep --strict DockAppToggler.app
+        spctl --assess --verbose=4 DockAppToggler.app
         
         # Verify the app bundle
         echo "🔍 Verifying app bundle..."
