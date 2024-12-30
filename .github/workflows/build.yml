@@ -101,8 +101,10 @@ jobs:
           --preserve-metadata=identifier,entitlements,flags,runtime \
           DockAppToggler.app/Contents/Frameworks/Sparkle.framework
         
-        # Sign the main app with hardened runtime (NO --deep)
-        codesign --force --options runtime --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" \
+        # Sign the main app with hardened runtime and additional entitlements
+        codesign --force --options runtime \
+          --entitlements Sources/DockAppToggler/DockAppToggler.entitlements \
+          --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" \
           --timestamp \
           DockAppToggler.app
         
