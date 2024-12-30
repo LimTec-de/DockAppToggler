@@ -46,23 +46,26 @@ jobs:
         # Clean any previous build
         rm -rf DockAppToggler.app
         
+        # Create app bundle structure
+        mkdir -p DockAppToggler.app/Contents/{MacOS,Resources,Frameworks}
+        
         # Resolve dependencies and build
         swift package resolve
         swift build -c release
         
-        # Create app bundle
-        mkdir -p DockAppToggler.app/Contents/{MacOS,Resources,Frameworks}
+        # Copy binary
         cp .build/release/DockAppToggler DockAppToggler.app/Contents/MacOS/
-        cp Sources/DockAppToggler/Info.plist DockAppToggler.app/Contents/
-        cp Sources/DockAppToggler/Resources/icon.icns DockAppToggler.app/Contents/Resources/
-        
-        # Create PkgInfo file
-        echo "APPL????" > DockAppToggler.app/Contents/PkgInfo
-        
-        # Set executable permissions
         chmod +x DockAppToggler.app/Contents/MacOS/DockAppToggler
         
-        # Copy Sparkle framework using ditto to preserve symlinks
+        # Copy resources and Info.plist
+        cp Sources/DockAppToggler/Resources/icon.icns DockAppToggler.app/Contents/Resources/ || echo "⚠️ Warning: icon.icns not found"
+        cp Sources/DockAppToggler/Resources/icon.png DockAppToggler.app/Contents/Resources/ || echo "⚠️ Warning: icon.png not found"
+        cp Sources/DockAppToggler/Info.plist DockAppToggler.app/Contents/ || (echo "❌ Error: Info.plist not found" && exit 1)
+        
+        # Create PkgInfo
+        echo "APPL????" > DockAppToggler.app/Contents/PkgInfo
+        
+        # Copy and configure Sparkle framework
         SPARKLE_PATH=$(find .build -name "Sparkle.framework" -type d | head -n 1)
         if [ -z "$SPARKLE_PATH" ]; then
           echo "❌ Error: Sparkle framework not found"
@@ -71,9 +74,11 @@ jobs:
         ditto --rsrc "$SPARKLE_PATH" DockAppToggler.app/Contents/Frameworks/Sparkle.framework
         
         # Update install name
-        install_name_tool -change "@rpath/Sparkle.framework/Versions/B/Sparkle" "@executable_path/../Frameworks/Sparkle.framework/Versions/B/Sparkle" DockAppToggler.app/Contents/MacOS/DockAppToggler
+        install_name_tool -change "@rpath/Sparkle.framework/Versions/B/Sparkle" \
+          "@executable_path/../Frameworks/Sparkle.framework/Versions/B/Sparkle" \
+          DockAppToggler.app/Contents/MacOS/DockAppToggler
         
-        # Sign the Sparkle framework first
+        # Sign Sparkle framework
         codesign --force \
           --options runtime \
           --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" \
@@ -81,7 +86,7 @@ jobs:
           --deep \
           DockAppToggler.app/Contents/Frameworks/Sparkle.framework
         
-        # Sign the main app with hardened runtime and entitlements
+        # Sign the main app
         codesign --force \
           --options runtime \
           --entitlements Sources/DockAppToggler/DockAppToggler.entitlements \
@@ -121,12 +126,11 @@ jobs:
         # Create final distributions
         ditto -c -k --keepParent DockAppToggler.app DockAppToggler_final.zip
         
-        # Create DMG with properly signed app
+        # Create and notarize DMG
         mkdir -p dmg_root
         cp -R DockAppToggler.app dmg_root/
         ln -s /Applications dmg_root/Applications
         
-        # Create DMG with specific requirements for notarization
         hdiutil create -volname "DockAppToggler" \
           -srcfolder dmg_root \
           -ov \
@@ -135,7 +139,6 @@ jobs:
           -imagekey zlib-level=9 \
           DockAppToggler_final.dmg
         
-        # Sign DMG with specific requirements
         codesign --force \
           --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" \
           --options runtime \
@@ -143,65 +146,31 @@ jobs:
           --verbose \
           DockAppToggler_final.dmg
         
-        # Notarize DMG with enhanced error reporting
-        echo "🔍 Submitting DMG for notarization..."
-        NOTARIZATION_OUTPUT=$(xcrun notarytool submit DockAppToggler_final.dmg \
+        xcrun notarytool submit DockAppToggler_final.dmg \
           --key AuthKey.p8 \
           --key-id "$ASC_KEY_ID" \
           --issuer "$ASC_ISSUER_ID" \
           --wait \
-          --timeout 30m)
+          --timeout 30m
         
-        echo "Notarization output: $NOTARIZATION_OUTPUT"
+        xcrun stapler staple DockAppToggler_final.dmg
         
-        # Extract submission ID
-        SUBMISSION_ID=$(echo "$NOTARIZATION_OUTPUT" | grep -o "id: [a-f0-9-]\+" | head -n1 | cut -d' ' -f2)
-        if [ -z "$SUBMISSION_ID" ]; then
-          echo "❌ Error: Could not extract submission ID"
-          exit 1
-        fi
-        
-        # Check notarization status and get detailed log
-        echo "🔍 Getting detailed notarization log..."
-        xcrun notarytool log \
-          --key AuthKey.p8 \
-          --key-id "$ASC_KEY_ID" \
-          --issuer "$ASC_ISSUER_ID" \
-          "$SUBMISSION_ID"
-        
-        # Staple DMG only if notarization succeeded
-        echo "🔍 Stapling DMG..."
-        if ! xcrun stapler staple DockAppToggler_final.dmg; then
-          echo "❌ Error: Failed to staple DMG"
-          exit 1
-        fi
-        
-        # Verify stapling
-        echo "🔍 Verifying DMG stapling..."
-        if ! xcrun stapler validate DockAppToggler_final.dmg; then
-          echo "❌ Error: DMG stapling validation failed"
-          exit 1
-        fi
-        
-        # Final verification
+        # Verify final DMG
         spctl --assess -vv --type install DockAppToggler_final.dmg
 
     - name: Generate Appcast
       env:
         SPARKLE_KEY: ${{ secrets.SPARKLE_KEY }}
       run: |
-        # Create release directory and copy only the zip file for updates
         mkdir -p release
         cp DockAppToggler_final.zip release/
         
-        # Find Sparkle tools
         SPARKLE_PATH=".build/artifacts/sparkle/Sparkle/bin"
         if [ ! -f "$SPARKLE_PATH/generate_appcast" ]; then
           echo "❌ Error: Sparkle tools not found in $SPARKLE_PATH"
           exit 1
         fi
         
-        # Use the key from stdin with the --ed-key-file option
         "$SPARKLE_PATH/generate_appcast" \
           --download-url-prefix "https://github.com/LimTec-de/DockAppToggler/releases/download/v${{ env.VERSION }}/" \
           --ed-key-file - \
@@ -217,12 +186,3 @@ jobs:
           DockAppToggler_final.zip \
           DockAppToggler_final.dmg \
           release/appcast.xml
-
-    - name: Update Info.plist with required keys
-      run: |
-        # Add usage descriptions if they don't exist
-        defaults write $(pwd)/Sources/DockAppToggler/Info.plist NSAppleEventsUsageDescription -string "DockAppToggler needs to control other applications to manage windows." 2>/dev/null || true
-        defaults write $(pwd)/Sources/DockAppToggler/Info.plist NSSystemAdministrationUsageDescription -string "DockAppToggler needs accessibility permissions to manage windows." 2>/dev/null || true
-        
-        # Copy the updated Info.plist to the app bundle again (in case it was modified)
-        cp Sources/DockAppToggler/Info.plist DockAppToggler.app/Contents/

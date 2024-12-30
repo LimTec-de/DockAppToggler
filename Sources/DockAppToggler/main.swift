@@ -1932,8 +1932,19 @@ class StatusBarController {
         updaterController = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
         
         if let button = statusItem.button {
-            if let iconPath = Bundle.main.path(forResource: "icon", ofType: "icns"),
-               let image = NSImage(contentsOfFile: iconPath) {
+            // Try multiple paths to find the icon
+            let iconImage: NSImage?
+            if let bundleIconPath = Bundle.main.path(forResource: "icon", ofType: "icns") {
+                // App bundle path
+                iconImage = NSImage(contentsOfFile: bundleIconPath)
+            } else {
+                // Development path
+                let devIconPath = "Sources/DockAppToggler/Resources/icon.icns"
+                iconImage = NSImage(contentsOfFile: devIconPath) ?? 
+                           NSImage(systemSymbolName: "square.grid.3x3", accessibilityDescription: "DockAppToggler")
+            }
+            
+            if let image = iconImage {
                 image.size = NSSize(width: 18, height: 18)
                 button.image = image
             }
