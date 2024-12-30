@@ -16,6 +16,8 @@
     <string>13.0</string>
     <key>LSUIElement</key>
     <true/>
+    <key>CFBundleIconFile</key>
+    <string>icon.icns</string>
     <key>NSAppleEventsUsageDescription</key>
     <string>DockAppToggler needs to control other applications to manage windows.</string>
     <key>NSSystemAdministrationUsageDescription</key>
