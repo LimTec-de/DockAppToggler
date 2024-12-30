@@ -82,19 +82,26 @@ jobs:
         # Sign Sparkle framework components in the correct order
         SPARKLE_VERSION="B"  # Sparkle typically uses version B
         
+        # Remove all existing signatures first
+        codesign --remove-signature DockAppToggler.app/Contents/Frameworks/Sparkle.framework/Versions/$SPARKLE_VERSION/XPCServices/Downloader.xpc
+        codesign --remove-signature DockAppToggler.app/Contents/Frameworks/Sparkle.framework/Versions/$SPARKLE_VERSION/XPCServices/Installer.xpc
+        codesign --remove-signature DockAppToggler.app/Contents/Frameworks/Sparkle.framework/Versions/$SPARKLE_VERSION/Autoupdate
+        codesign --remove-signature DockAppToggler.app/Contents/Frameworks/Sparkle.framework/Versions/$SPARKLE_VERSION/Updater.app
+        codesign --remove-signature DockAppToggler.app/Contents/Frameworks/Sparkle.framework/Versions/$SPARKLE_VERSION/Sparkle
+        codesign --remove-signature DockAppToggler.app/Contents/Frameworks/Sparkle.framework
+        codesign --remove-signature DockAppToggler.app
+        
         # 1. Sign XPC Services
         codesign --force --options runtime \
           --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" \
           --timestamp \
           --entitlements Sources/DockAppToggler/Resources/sparkle.entitlements \
-          --requirements "=designated => anchor apple generic and identifier \"org.sparkle-project.Sparkle.Downloader\" and (certificate leaf[field.1.2.840.113635.100.6.1.9] /* exists */ or certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = \"${{ secrets.TEAM_ID }}\")" \
           DockAppToggler.app/Contents/Frameworks/Sparkle.framework/Versions/$SPARKLE_VERSION/XPCServices/Downloader.xpc
 
         codesign --force --options runtime \
           --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" \
           --timestamp \
           --entitlements Sources/DockAppToggler/Resources/sparkle.entitlements \
-          --requirements "=designated => anchor apple generic and identifier \"org.sparkle-project.Sparkle.Installer\" and (certificate leaf[field.1.2.840.113635.100.6.1.9] /* exists */ or certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = \"${{ secrets.TEAM_ID }}\")" \
           DockAppToggler.app/Contents/Frameworks/Sparkle.framework/Versions/$SPARKLE_VERSION/XPCServices/Installer.xpc
         
         # 2. Sign the Autoupdate binary
@@ -102,7 +109,6 @@ jobs:
           --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" \
           --timestamp \
           --entitlements Sources/DockAppToggler/Resources/sparkle.entitlements \
-          --requirements "=designated => anchor apple generic and identifier \"org.sparkle-project.Sparkle.Autoupdate\" and (certificate leaf[field.1.2.840.113635.100.6.1.9] /* exists */ or certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = \"${{ secrets.TEAM_ID }}\")" \
           DockAppToggler.app/Contents/Frameworks/Sparkle.framework/Versions/$SPARKLE_VERSION/Autoupdate
         
         # 3. Sign the Updater app
@@ -110,14 +116,12 @@ jobs:
           --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" \
           --timestamp \
           --entitlements Sources/DockAppToggler/Resources/sparkle.entitlements \
-          --requirements "=designated => anchor apple generic and identifier \"org.sparkle-project.Sparkle.Updater\" and (certificate leaf[field.1.2.840.113635.100.6.1.9] /* exists */ or certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = \"${{ secrets.TEAM_ID }}\")" \
           DockAppToggler.app/Contents/Frameworks/Sparkle.framework/Versions/$SPARKLE_VERSION/Updater.app
         
         # 4. Sign the main Sparkle binary
         codesign --force --options runtime \
           --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" \
           --timestamp \
-          --requirements "=designated => anchor apple generic and identifier \"org.sparkle-project.Sparkle\" and (certificate leaf[field.1.2.840.113635.100.6.1.9] /* exists */ or certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = \"${{ secrets.TEAM_ID }}\")" \
           DockAppToggler.app/Contents/Frameworks/Sparkle.framework/Versions/$SPARKLE_VERSION/Sparkle
         
         # 5. Sign the Sparkle framework
@@ -125,7 +129,6 @@ jobs:
           --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" \
           --timestamp \
           --preserve-metadata=identifier,entitlements,flags,runtime \
-          --requirements "=designated => anchor apple generic and identifier \"org.sparkle-project.Sparkle\" and (certificate leaf[field.1.2.840.113635.100.6.1.9] /* exists */ or certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = \"${{ secrets.TEAM_ID }}\")" \
           DockAppToggler.app/Contents/Frameworks/Sparkle.framework
         
         # 6. Finally sign the main app
