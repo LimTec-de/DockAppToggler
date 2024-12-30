@@ -42,6 +42,10 @@ jobs:
         security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
 
     - name: Build and Package App
+      env:
+        ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+        ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        ASC_KEY_CONTENT: ${{ secrets.ASC_KEY_CONTENT }}
       run: |
         # Clean any previous build
         rm -rf DockAppToggler.app
@@ -89,18 +93,25 @@ jobs:
         # Create zip for notarization
         ditto -c -k --keepParent DockAppToggler.app DockAppToggler.zip
 
+        # Create authentication key file
+        echo "$ASC_KEY_CONTENT" > AuthKey.p8
+
         # Notarize the app
         echo "🔍 Submitting for notarization..."
-        xcrun notarytool submit DockAppToggler.zip \
+        REQUEST_UUID=$(xcrun notarytool submit DockAppToggler.zip \
           --key AuthKey.p8 \
           --key-id "$ASC_KEY_ID" \
           --issuer "$ASC_ISSUER_ID" \
           --wait \
-          --timeout 30m
+          --timeout 30m)
 
         # Wait for notarization to complete and get status
         echo "🔍 Checking notarization status..."
-        xcrun notarytool log --key AuthKey.p8 --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" $(cat notarization-id.txt)
+        xcrun notarytool log \
+          --key AuthKey.p8 \
+          --key-id "$ASC_KEY_ID" \
+          --issuer "$ASC_ISSUER_ID" \
+          "$REQUEST_UUID"
 
         # Staple the app
         echo "🔍 Stapling app..."
