@@ -30,6 +30,6 @@
     <key>CFBundleIconFile</key>
     <string>icon.icns</string>
     <key>NSAppleEventsUsageDescription</key>
-    <string>DockAppToggler needs to control system events to manage windows.</string>
+	<string>DockAppToggler needs to control other applications to manage windows.</string>
 </dict>
 </plist> 

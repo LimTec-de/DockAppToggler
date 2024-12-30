@@ -10,7 +10,6 @@
 @preconcurrency import Foundation
 import AppKit
 import Carbon
-import Sparkle
 import Cocoa
 import ApplicationServices
 import UserNotifications
@@ -61,35 +60,35 @@ enum Constants {
         enum Theme {
             // Base colors that adapt to the theme
             static let backgroundColor = NSColor(name: nil) { appearance in
-                appearance.isDarkMode ? 
+                appearance.name == .darkAqua ? 
                     NSColor(calibratedWhite: 0.2, alpha: 0.95) : 
                     NSColor(calibratedWhite: 0.95, alpha: 0.95)
             }
             
             static let primaryTextColor = NSColor(name: nil) { appearance in
-                appearance.isDarkMode ? .white : .black
+                appearance.name == .darkAqua ? .white : .black
             }
             
             static let secondaryTextColor = NSColor(name: nil) { appearance in
-                appearance.isDarkMode ? 
+                appearance.name == .darkAqua ? 
                     NSColor(calibratedWhite: 0.6, alpha: 1.0) : 
                     NSColor(calibratedWhite: 0.4, alpha: 1.0)
             }
             
             static let iconTintColor = NSColor(name: nil) { appearance in
-                appearance.isDarkMode ? .white : NSColor(white: 0.2, alpha: 1.0)  // Lighter black in light mode
+                appearance.name == .darkAqua ? .white : NSColor(white: 0.2, alpha: 1.0)
             }
             
             static let iconSecondaryTintColor = NSColor(name: nil) { appearance in
-                appearance.isDarkMode ? 
+                appearance.name == .darkAqua ? 
                     NSColor(calibratedWhite: 0.6, alpha: 1.0) : 
-                    NSColor(calibratedWhite: 0.6, alpha: 1.0)  // Consistent gray in both modes
+                    NSColor(calibratedWhite: 0.6, alpha: 1.0)
             }
             
             static let hoverBackgroundColor = NSColor(name: nil) { appearance in
-                appearance.isDarkMode ? 
-                    NSColor(white: 1.0, alpha: 0.05) :   // Subtle in dark mode
-                    NSColor(white: 0.0, alpha: 0.001)    // Very subtle in light mode
+                appearance.name == .darkAqua ? 
+                    NSColor(white: 1.0, alpha: 0.05) : 
+                    NSColor(white: 0.0, alpha: 0.001)
             }
             
             // Alias for semantic usage
@@ -1030,14 +1029,12 @@ class WindowChooserController: NSWindowController {
         containerView.wantsLayer = true
         containerView.layer?.masksToBounds = false
         containerView.layer?.shadowColor = NSColor.black.cgColor
-        containerView.layer?.shadowOpacity = 0.15  // Adjusted shadow opacity
-        containerView.layer?.shadowRadius = 3.0    // Adjusted shadow radius
-        containerView.layer?.shadowOffset = .zero   // Center shadow
+        containerView.layer?.shadowOpacity = 0.15
+        containerView.layer?.shadowRadius = 3.0
+        containerView.layer?.shadowOffset = .zero
         
         // Create and configure the visual effect view with bubble arrow
         let visualEffect = BubbleVisualEffectView(frame: containerView.bounds)
-        visualEffect.material = .menu
-        visualEffect.state = .active
         visualEffect.wantsLayer = true
         visualEffect.layer?.masksToBounds = true
         
@@ -1921,15 +1918,11 @@ class StatusBarController {
     private var statusBar: NSStatusBar
     private var statusItem: NSStatusItem
     private var menu: NSMenu
-    private let updaterController: SPUStandardUpdaterController
     
     init() {
         statusBar = NSStatusBar.system
         statusItem = statusBar.statusItem(withLength: NSStatusItem.squareLength)
         menu = NSMenu()
-        
-        // Initialize the updater controller
-        updaterController = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
         
         if let button = statusItem.button {
             if let iconPath = Bundle.main.path(forResource: "icon", ofType: "icns"),
@@ -1943,10 +1936,6 @@ class StatusBarController {
     }
     
     private func setupMenu() {
-        let updateItem = NSMenuItem(title: "Check for Updates...", action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)), keyEquivalent: "")
-        updateItem.target = updaterController
-        menu.addItem(updateItem)
-        menu.addItem(NSMenuItem.separator())
         let quitItem = NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quitItem.target = NSApp
         menu.addItem(quitItem)
@@ -1965,184 +1954,24 @@ let appController = (
 )
 app.run()
 
-// Add this new class for handling updates
-@MainActor
-class UpdateController: NSObject, SPUStandardUserDriverDelegate, SPUUpdaterDelegate {
-    private var updater: SPUUpdater?
-    private var driver: SPUStandardUserDriver?
-    private var statusItem: NSStatusItem?
-    
-    override init() {
-        super.init()
-        
-        // Get the main bundle
-        let bundle = Bundle.main
-        Logger.info("Initializing Sparkle with bundle path: \(bundle.bundlePath)")
-        
-        // Initialize Sparkle components with delegates
-        driver = SPUStandardUserDriver(hostBundle: bundle, delegate: self)
-        
-        if let driver = driver {
-            do {
-                let updater = SPUUpdater(hostBundle: bundle, applicationBundle: bundle, userDriver: driver, delegate: self)
-                try updater.start()
-                self.updater = updater
-                
-                // Log bundle identifier and appcast URL for debugging
-                if let bundleId = bundle.bundleIdentifier {
-                    Logger.info("Sparkle initialized with bundle identifier: \(bundleId)")
-                } else {
-                    Logger.warning("No bundle identifier found")
-                }
-                
-                if let appcastURL = bundle.infoDictionary?["SUFeedURL"] as? String {
-                    Logger.info("Appcast URL configured: \(appcastURL)")
-                } else {
-                    Logger.warning("No SUFeedURL found in Info.plist")
-                }
-            } catch {
-                Logger.error("Failed to initialize Sparkle: \(error)")
-            }
-        } else {
-            Logger.error("Failed to initialize Sparkle driver")
-        }
-    }
-    
-    func checkForUpdates() {
-        if let updater = updater {
-            Logger.info("Checking for updates...")
-            updater.checkForUpdates()
-        } else {
-            Logger.error("Cannot check for updates - Sparkle updater not initialized")
-        }
-    }
-    
-    // MARK: - SPUStandardUserDriverDelegate
-    
-    nonisolated var supportsGentleScheduledUpdateReminders: Bool {
-        return true
-    }
-    
-    nonisolated func standardUserDriverWillHandleShowingUpdate(_ handleShowingUpdate: Bool, forUpdate update: SUAppcastItem, state: SPUUserUpdateState) {
-        // Create an immutable copy of the version string
-        let updateInfo = (version: String(update.displayVersionString), userInitiated: state.userInitiated)
-        
-        Task { @MainActor in
-            // When an update alert will be presented, place the app in the foreground
-            NSApp.setActivationPolicy(.regular)
-            
-            if !updateInfo.userInitiated {
-                // Add a badge to the app's dock icon indicating one alert occurred
-                NSApp.dockTile.badgeLabel = "1"
-                
-                // Post a user notification
-                let content = UNMutableNotificationContent()
-                content.title = "A new update is available"
-                content.body = "Version \(updateInfo.version) is now available"
-                
-                let request = UNNotificationRequest(identifier: "UpdateCheck", content: content, trigger: nil)
-                
-                do {
-                    try await UNUserNotificationCenter.current().add(request)
-                } catch {
-                    Logger.error("Failed to add notification: \(error)")
-                }
-            }
-        }
-    }
-    
-    nonisolated func standardUserDriverDidReceiveUserAttention(forUpdate update: SUAppcastItem) {
-        Task { @MainActor in
-            // Clear the dock badge indicator for the update
-            NSApp.dockTile.badgeLabel = ""
-            
-            // Dismiss active update notifications
-            UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ["UpdateCheck"])
-        }
-    }
-    
-    nonisolated func standardUserDriverWillFinishUpdateSession() {
-        Task { @MainActor in
-            // Put app back in background when the user session for the update finished
-            NSApp.setActivationPolicy(.accessory)
-        }
-    }
-    
-    // MARK: - SPUUpdaterDelegate
-    
-    nonisolated func updater(_ updater: SPUUpdater, willScheduleUpdateCheckAfterDelay delay: TimeInterval) {
-        Task { @MainActor in
-            // Request notification permissions when Sparkle schedules an update check
-            do {
-                let granted = try await UNUserNotificationCenter.current().requestAuthorization(options: [.badge, .alert, .sound])
-                Logger.info("Notification authorization granted: \(granted)")
-            } catch {
-                Logger.error("Failed to request notification authorization: \(error)")
-            }
-        }
-    }
-}
+// Add this class before the WindowChooserView class
 
-// Add this extension near the top of the file
-extension Array {
-    subscript(safe index: Index) -> Element? {
-        return indices.contains(index) ? self[index] : nil
-    }
-}
+// MARK: - Custom Views
 
-// Add extension to check dark mode
-extension NSAppearance {
-    var isDarkMode: Bool {
-        self.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-    }
-}
-
-// Update the NSBezierPath extension
-extension NSBezierPath {
-    var cgPath: CGPath {
-        let path = CGMutablePath()
-        var points = [CGPoint](repeating: .zero, count: 3)
-        
-        for i in 0..<self.elementCount {
-            let type = self.element(at: i, associatedPoints: &points)
-            
-            switch type {
-            case .moveTo:
-                path.move(to: points[0])
-            case .lineTo:
-                path.addLine(to: points[0])
-            case .curveTo, .cubicCurveTo:
-                path.addCurve(to: points[2], control1: points[0], control2: points[1])
-            case .quadraticCurveTo:
-                // Convert quadratic curve to cubic curve
-                let startPoint = path.currentPoint
-                let controlPoint = points[0]
-                let endPoint = points[1]
-                
-                // Calculate cubic control points from quadratic control point
-                let cp1 = CGPoint(
-                    x: startPoint.x + ((controlPoint.x - startPoint.x) * 2/3),
-                    y: startPoint.y + ((controlPoint.y - startPoint.y) * 2/3)
-                )
-                let cp2 = CGPoint(
-                    x: endPoint.x + ((controlPoint.x - endPoint.x) * 2/3),
-                    y: endPoint.y + ((controlPoint.y - endPoint.y) * 2/3)
-                )
-                
-                path.addCurve(to: endPoint, control1: cp1, control2: cp2)
-            case .closePath:
-                path.closeSubpath()
-            @unknown default:
-                break
-            }
-        }
-        
-        return path
-    }
-}
-
-// Update BubbleVisualEffectView class
+/// A custom visual effect view that creates a bubble shape with an arrow
 class BubbleVisualEffectView: NSVisualEffectView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        self.material = .menu
+        self.state = .active
+        self.blendingMode = .behindWindow
+        self.wantsLayer = true
+    }
+    
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+    
     override func updateLayer() {
         super.updateLayer()
         
@@ -2198,5 +2027,49 @@ class BubbleVisualEffectView: NSVisualEffectView {
         if let borderLayer = self.layer?.sublayers?.first(where: { $0.name == "borderLayer" }) as? CAShapeLayer {
             borderLayer.strokeColor = NSColor(white: 1.0, alpha: 0.3).cgColor
         }
+    }
+}
+
+// Add this extension for NSBezierPath before the BubbleVisualEffectView class
+extension NSBezierPath {
+    var cgPath: CGPath {
+        let path = CGMutablePath()
+        var points = [CGPoint](repeating: .zero, count: 3)
+        
+        for i in 0..<self.elementCount {
+            let type = self.element(at: i, associatedPoints: &points)
+            
+            switch type {
+            case .moveTo:
+                path.move(to: points[0])
+            case .lineTo:
+                path.addLine(to: points[0])
+            case .curveTo, .cubicCurveTo:
+                path.addCurve(to: points[2], control1: points[0], control2: points[1])
+            case .quadraticCurveTo:
+                // Convert quadratic curve to cubic curve
+                let startPoint = path.currentPoint
+                let controlPoint = points[0]
+                let endPoint = points[1]
+                
+                // Calculate cubic control points from quadratic control point
+                let cp1 = CGPoint(
+                    x: startPoint.x + ((controlPoint.x - startPoint.x) * 2/3),
+                    y: startPoint.y + ((controlPoint.y - startPoint.y) * 2/3)
+                )
+                let cp2 = CGPoint(
+                    x: endPoint.x + ((controlPoint.x - endPoint.x) * 2/3),
+                    y: endPoint.y + ((controlPoint.y - endPoint.y) * 2/3)
+                )
+                
+                path.addCurve(to: endPoint, control1: cp1, control2: cp2)
+            case .closePath:
+                path.closeSubpath()
+            @unknown default:
+                break
+            }
+        }
+        
+        return path
     }
 }
