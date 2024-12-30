@@ -24,5 +24,15 @@
     <string>DockAppToggler needs accessibility permissions to manage windows.</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>SUFeedURL</key>
+    <string>https://github.com/LimTec-de/DockAppToggler/releases/latest/download/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>IAdDZbbjN2C8vfN0U+YM0RQ8G6EC7Ah7ndlfmTWIKjg=</string>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
+    <key>SUAutomaticallyUpdate</key>
+    <true/>
+    <key>SUScheduledCheckInterval</key>
+    <integer>86400</integer>
 </dict>
 </plist> 
