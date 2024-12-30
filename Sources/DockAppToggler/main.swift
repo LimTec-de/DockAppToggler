@@ -277,10 +277,10 @@ class WindowChooserView: NSView {
         }
         
         // Create minimize image with proper styling
-        let config = NSImage.SymbolConfiguration(pointSize: 11, weight: .regular)
+            let config = NSImage.SymbolConfiguration(pointSize: 11, weight: .regular)
         let image = NSImage(systemSymbolName: "minus.circle.fill", accessibilityDescription: "Minimize")?
             .withSymbolConfiguration(config)
-        button.image = image
+                button.image = image
         button.imagePosition = .imageOnly
         
         // Configure button appearance
@@ -546,7 +546,7 @@ class WindowChooserView: NSView {
         
         let image = NSImage(systemSymbolName: imageName, accessibilityDescription: accessibilityDescription)?
             .withSymbolConfiguration(config)
-        button.image = image
+                button.image = image
         button.imagePosition = .imageOnly
         
         // Configure button appearance
