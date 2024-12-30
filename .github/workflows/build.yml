@@ -166,5 +166,4 @@ jobs:
           --title "DockAppToggler v${{ env.VERSION }}" \
           --draft \
           DockAppToggler_final.zip \
-          DockAppToggler_final.dmg \
           release/appcast.xml
