@@ -42,10 +42,6 @@ jobs:
         security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
 
     - name: Build and Package App
-      env:
-        ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
-        ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
-        ASC_KEY_CONTENT: ${{ secrets.ASC_KEY_CONTENT }}
       run: |
         # Clean any previous build
         rm -rf DockAppToggler.app
@@ -66,20 +62,26 @@ jobs:
         # Set executable permissions
         chmod +x DockAppToggler.app/Contents/MacOS/DockAppToggler
         
-        # Copy Sparkle framework
+        # Copy Sparkle framework using ditto to preserve symlinks
         SPARKLE_PATH=$(find .build -name "Sparkle.framework" -type d | head -n 1)
         if [ -z "$SPARKLE_PATH" ]; then
           echo "❌ Error: Sparkle framework not found"
           exit 1
         fi
-        
-        # Copy Sparkle framework maintaining symlinks
         ditto --rsrc "$SPARKLE_PATH" DockAppToggler.app/Contents/Frameworks/Sparkle.framework
         
         # Update install name
         install_name_tool -change "@rpath/Sparkle.framework/Versions/B/Sparkle" "@executable_path/../Frameworks/Sparkle.framework/Versions/B/Sparkle" DockAppToggler.app/Contents/MacOS/DockAppToggler
         
-        # Sign the main app with hardened runtime
+        # Sign the Sparkle framework first
+        codesign --force \
+          --options runtime \
+          --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" \
+          --timestamp \
+          --deep \
+          DockAppToggler.app/Contents/Frameworks/Sparkle.framework
+        
+        # Sign the main app with hardened runtime and entitlements
         codesign --force \
           --options runtime \
           --entitlements Sources/DockAppToggler/DockAppToggler.entitlements \
@@ -89,142 +91,64 @@ jobs:
           --strict \
           --verbose \
           DockAppToggler.app
-
-        # Create zip for notarization
+        
+        # Verify signing
+        codesign -vv --deep --strict DockAppToggler.app
+        
+        # Create initial zip for notarization
         ditto -c -k --keepParent DockAppToggler.app DockAppToggler.zip
 
+    - name: Notarize App
+      env:
+        ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+        ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        ASC_KEY_CONTENT: ${{ secrets.ASC_KEY_CONTENT }}
+      run: |
         # Create authentication key file
         echo "$ASC_KEY_CONTENT" > AuthKey.p8
-
-        # Notarize the app
-        echo "🔍 Submitting for notarization..."
-        NOTARIZATION_OUTPUT=$(xcrun notarytool submit DockAppToggler.zip \
+        
+        # Submit for notarization and wait
+        xcrun notarytool submit DockAppToggler.zip \
           --key AuthKey.p8 \
           --key-id "$ASC_KEY_ID" \
           --issuer "$ASC_ISSUER_ID" \
           --wait \
-          --timeout 30m)
-        echo "Notarization output: $NOTARIZATION_OUTPUT"
+          --timeout 30m
         
-        # Extract submission ID using a more robust method
-        SUBMISSION_ID=$(echo "$NOTARIZATION_OUTPUT" | grep -o "id: [a-f0-9-]\+" | head -n1 | cut -d' ' -f2)
-        if [ -z "$SUBMISSION_ID" ]; then
-          echo "❌ Error: Could not extract submission ID from output"
-          exit 1
-        fi
-        echo "Extracted Submission ID: $SUBMISSION_ID"
-
-        # Wait for notarization to complete and get status
-        echo "🔍 Checking notarization status..."
-        if ! xcrun notarytool log \
-          --key AuthKey.p8 \
-          --key-id "$ASC_KEY_ID" \
-          --issuer "$ASC_ISSUER_ID" \
-          "$SUBMISSION_ID"; then
-          echo "❌ Error: Failed to get notarization log"
-          exit 1
-        fi
-
         # Staple the app
-        echo "🔍 Stapling app..."
         xcrun stapler staple DockAppToggler.app
         
-        # Verify stapling
-        echo "🔍 Verifying stapling..."
-        xcrun stapler validate DockAppToggler.app
-        spctl --assess -vv --type exec DockAppToggler.app
-
         # Create final distributions
         ditto -c -k --keepParent DockAppToggler.app DockAppToggler_final.zip
         
-        # Create DMG
-        echo "📦 Creating DMG..."
-        mkdir -p dmg_root/DockAppToggler.app/Contents/{MacOS,Resources,Frameworks}
-        
-        # Copy app contents except framework
-        cp -r DockAppToggler.app/Contents/MacOS dmg_root/DockAppToggler.app/Contents/
-        cp -r DockAppToggler.app/Contents/Resources dmg_root/DockAppToggler.app/Contents/
-        cp DockAppToggler.app/Contents/Info.plist dmg_root/DockAppToggler.app/Contents/
-        cp DockAppToggler.app/Contents/PkgInfo dmg_root/DockAppToggler.app/Contents/
-        
-        # Copy and sign Sparkle framework
-        ditto --rsrc DockAppToggler.app/Contents/Frameworks/Sparkle.framework \
-          dmg_root/DockAppToggler.app/Contents/Frameworks/Sparkle.framework
-        
-        # Update install name in DMG copy
-        install_name_tool -change "@rpath/Sparkle.framework/Versions/B/Sparkle" \
-          "@executable_path/../Frameworks/Sparkle.framework/Versions/B/Sparkle" \
-          dmg_root/DockAppToggler.app/Contents/MacOS/DockAppToggler
-        
-        # Sign the app in DMG
-        codesign --force \
-          --options runtime \
-          --entitlements Sources/DockAppToggler/DockAppToggler.entitlements \
-          --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" \
-          --timestamp \
-          --deep \
-          --strict \
-          --verbose \
-          dmg_root/DockAppToggler.app
-        
-        # Add Applications symlink
+        # Create DMG with properly signed app
+        mkdir -p dmg_root
+        cp -r DockAppToggler.app dmg_root/
         ln -s /Applications dmg_root/Applications
         
-        # Create DMG
+        # Create and sign DMG
         hdiutil create -volname "DockAppToggler" \
           -srcfolder dmg_root \
           -ov \
           -format UDZO \
           -fs HFS+ \
-          -imagekey zlib-level=9 \
           DockAppToggler_final.dmg
         
-        # Sign the DMG itself
         codesign --force \
           --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" \
           --timestamp \
-          --verbose \
           DockAppToggler_final.dmg
         
-        # Clean up
-        rm -rf dmg_root
-        
-        # Notarize the DMG
-        echo "🔍 Submitting DMG for notarization..."
-        NOTARIZATION_OUTPUT=$(xcrun notarytool submit DockAppToggler_final.dmg \
+        # Notarize DMG
+        xcrun notarytool submit DockAppToggler_final.dmg \
           --key AuthKey.p8 \
           --key-id "$ASC_KEY_ID" \
           --issuer "$ASC_ISSUER_ID" \
           --wait \
-          --timeout 30m)
-        echo "DMG Notarization output: $NOTARIZATION_OUTPUT"
+          --timeout 30m
         
-        # Extract submission ID for DMG
-        SUBMISSION_ID=$(echo "$NOTARIZATION_OUTPUT" | grep -o "id: [a-f0-9-]\+" | head -n1 | cut -d' ' -f2)
-        if [ -z "$SUBMISSION_ID" ]; then
-          echo "❌ Error: Could not extract submission ID from DMG notarization output"
-          exit 1
-        fi
-        echo "Extracted DMG Submission ID: $SUBMISSION_ID"
-
-        # Check DMG notarization status
-        echo "🔍 Checking DMG notarization status..."
-        if ! xcrun notarytool log \
-          --key AuthKey.p8 \
-          --key-id "$ASC_KEY_ID" \
-          --issuer "$ASC_ISSUER_ID" \
-          "$SUBMISSION_ID"; then
-          echo "❌ Error: Failed to get DMG notarization log"
-          exit 1
-        fi
-
-        # Staple the DMG
-        echo "🔍 Stapling DMG..."
+        # Staple DMG
         xcrun stapler staple DockAppToggler_final.dmg
-        
-        # Verify DMG stapling
-        echo "🔍 Verifying DMG stapling..."
-        xcrun stapler validate DockAppToggler_final.dmg
 
     - name: Generate Appcast
       env:
