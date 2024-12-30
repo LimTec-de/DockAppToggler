@@ -83,55 +83,17 @@ jobs:
         SPARKLE_VERSION="B"  # Sparkle typically uses version B
         
         # Remove all existing signatures first
-        codesign --remove-signature DockAppToggler.app/Contents/Frameworks/Sparkle.framework/Versions/$SPARKLE_VERSION/XPCServices/Downloader.xpc
-        codesign --remove-signature DockAppToggler.app/Contents/Frameworks/Sparkle.framework/Versions/$SPARKLE_VERSION/XPCServices/Installer.xpc
-        codesign --remove-signature DockAppToggler.app/Contents/Frameworks/Sparkle.framework/Versions/$SPARKLE_VERSION/Autoupdate
-        codesign --remove-signature DockAppToggler.app/Contents/Frameworks/Sparkle.framework/Versions/$SPARKLE_VERSION/Updater.app
-        codesign --remove-signature DockAppToggler.app/Contents/Frameworks/Sparkle.framework/Versions/$SPARKLE_VERSION/Sparkle
-        codesign --remove-signature DockAppToggler.app/Contents/Frameworks/Sparkle.framework
         codesign --remove-signature DockAppToggler.app
         
-        # 1. Sign XPC Services
+        # Sign the Sparkle framework as a bundle
         codesign --force --options runtime \
           --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" \
           --timestamp \
           --entitlements Sources/DockAppToggler/Resources/sparkle.entitlements \
-          DockAppToggler.app/Contents/Frameworks/Sparkle.framework/Versions/$SPARKLE_VERSION/XPCServices/Downloader.xpc
-
-        codesign --force --options runtime \
-          --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" \
-          --timestamp \
-          --entitlements Sources/DockAppToggler/Resources/sparkle.entitlements \
-          DockAppToggler.app/Contents/Frameworks/Sparkle.framework/Versions/$SPARKLE_VERSION/XPCServices/Installer.xpc
-        
-        # 2. Sign the Autoupdate binary
-        codesign --force --options runtime \
-          --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" \
-          --timestamp \
-          --entitlements Sources/DockAppToggler/Resources/sparkle.entitlements \
-          DockAppToggler.app/Contents/Frameworks/Sparkle.framework/Versions/$SPARKLE_VERSION/Autoupdate
-        
-        # 3. Sign the Updater app
-        codesign --force --options runtime \
-          --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" \
-          --timestamp \
-          --entitlements Sources/DockAppToggler/Resources/sparkle.entitlements \
-          DockAppToggler.app/Contents/Frameworks/Sparkle.framework/Versions/$SPARKLE_VERSION/Updater.app
-        
-        # 4. Sign the main Sparkle binary
-        codesign --force --options runtime \
-          --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" \
-          --timestamp \
-          DockAppToggler.app/Contents/Frameworks/Sparkle.framework/Versions/$SPARKLE_VERSION/Sparkle
-        
-        # 5. Sign the Sparkle framework
-        codesign --force --options runtime \
-          --sign "Developer ID Application: LimTec GmbH (${{ secrets.TEAM_ID }})" \
-          --timestamp \
-          --preserve-metadata=identifier,entitlements,flags,runtime \
+          --deep \
           DockAppToggler.app/Contents/Frameworks/Sparkle.framework
         
-        # 6. Finally sign the main app
+        # Sign the main app
         codesign --force --options runtime \
           --entitlements Sources/DockAppToggler/DockAppToggler.entitlements \
           --deep \
