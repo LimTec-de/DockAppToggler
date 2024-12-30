@@ -1959,11 +1959,33 @@ class StatusBarController {
 // Add near the start of the application entry point
 Logger.info("Starting Dock App Toggler...")
 
-// Check accessibility permissions
-func checkAccessibilityPermissions() {
-    let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
-    let accessibilityEnabled = AXIsProcessTrustedWithOptions(options as CFDictionary)
+// Create a dedicated service for accessibility checks
+@MainActor
+final class AccessibilityPermissionService: @unchecked Sendable {
+    static let shared = AccessibilityPermissionService()
     
+    // Create a static constant for the prompt key
+    private static let promptKey = "AXTrustedCheckOptionPrompt"
+    
+    private init() {}
+    
+    func checkAccessibility() -> Bool {
+        // Use the hardcoded key instead of the global variable
+        let options = [Self.promptKey: true] as CFDictionary
+        return AXIsProcessTrustedWithOptions(options)
+    }
+}
+
+// Update the getAccessibilityStatus function to use the service
+@MainActor
+func getAccessibilityStatus() async -> Bool {
+    return AccessibilityPermissionService.shared.checkAccessibility()
+}
+
+// Update the handleAccessibilityPermissions function
+@MainActor
+func handleAccessibilityPermissions() async {
+    let accessibilityEnabled = await getAccessibilityStatus()
     Logger.info("Accessibility permissions status: \(accessibilityEnabled)")
     
     if !accessibilityEnabled {
@@ -1984,7 +2006,11 @@ func checkAccessibilityPermissions() {
 
 // Initialize app components
 let app = NSApplication.shared
-checkAccessibilityPermissions()
+
+// Run the accessibility check on the main actor
+Task { @MainActor in
+    await handleAccessibilityPermissions()
+}
 
 // Store references to prevent deallocation
 let appController = (
