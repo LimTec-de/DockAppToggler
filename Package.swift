@@ -25,7 +25,10 @@ let package = Package(
             ],
             exclude: ["Info.plist"],
             resources: [
-                .process("Resources")
+                .process("Resources/icon.icns"),
+                .process("Resources/icon.png"),
+                .process("Resources/sparkle.entitlements"),
+                .process("DockAppToggler.entitlements")
             ],
             swiftSettings: [
                 .unsafeFlags(["-enable-bare-slash-regex"])

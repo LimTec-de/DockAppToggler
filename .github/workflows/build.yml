@@ -98,12 +98,16 @@ jobs:
 
         # Notarize the app
         echo "🔍 Submitting for notarization..."
-        REQUEST_UUID=$(xcrun notarytool submit DockAppToggler.zip \
+        NOTARIZATION_OUTPUT=$(xcrun notarytool submit DockAppToggler.zip \
           --key AuthKey.p8 \
           --key-id "$ASC_KEY_ID" \
           --issuer "$ASC_ISSUER_ID" \
           --wait \
           --timeout 30m)
+        
+        # Extract submission ID from output
+        SUBMISSION_ID=$(echo "$NOTARIZATION_OUTPUT" | grep "id:" | cut -d' ' -f3)
+        echo "Submission ID: $SUBMISSION_ID"
 
         # Wait for notarization to complete and get status
         echo "🔍 Checking notarization status..."
@@ -111,7 +115,7 @@ jobs:
           --key AuthKey.p8 \
           --key-id "$ASC_KEY_ID" \
           --issuer "$ASC_ISSUER_ID" \
-          "$REQUEST_UUID"
+          "$SUBMISSION_ID"
 
         # Staple the app
         echo "🔍 Stapling app..."
