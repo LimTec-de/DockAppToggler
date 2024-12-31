@@ -54,6 +54,7 @@ enum Constants {
         static let screenEdgeMargin: CGFloat = 8.0
         static let windowHeightMargin: CGFloat = 40.0  // Margin for window height
         static let dockHeight: CGFloat = 70.0  // Approximate Dock height
+        static let minimizeButtonRightMargin: CGFloat = 8  // Add this new constant
         
         // Add constants for centered window size
         static let centeredWindowWidth: CGFloat = 1024
@@ -192,7 +193,13 @@ private class CloseButton: NSButton {
         // Add circle background with theme-aware colors
         self.wantsLayer = true
         self.layer?.cornerRadius = size / 2
-        updateBackgroundColor(isHovered: false)
+        
+        // Set initial background color
+        let isDark = self.effectiveAppearance.isDarkMode
+        let initialColor = isDark ?
+            Constants.UI.Theme.iconTintColor.withAlphaComponent(0.2) :
+            Constants.UI.Theme.iconSecondaryTintColor.withAlphaComponent(0.2)
+        self.layer?.backgroundColor = initialColor.cgColor
         
         // Update initial appearance
         updateAppearance(isHovered: false)
@@ -214,10 +221,10 @@ private class CloseButton: NSButton {
     private func updateBackgroundColor(isHovered: Bool) {
         let isDark = self.effectiveAppearance.isDarkMode
         
-        // Use more contrasting colors for both themes
+        // Use more opaque background colors
         let color = isDark ?
-            (isHovered ? NSColor(white: 1.0, alpha: 0.2) : NSColor(white: 1.0, alpha: 0.15)) :
-            (isHovered ? NSColor(white: 0.0, alpha: 0.15) : NSColor(white: 0.0, alpha: 0.1))
+            (isHovered ? NSColor(white: 0.3, alpha: 0.5) : NSColor(white: 0.3, alpha: 0.35)) :
+            (isHovered ? NSColor(white: 0.85, alpha: 0.5) : NSColor(white: 0.85, alpha: 0.35))
         
         self.layer?.backgroundColor = color.cgColor
     }
@@ -243,6 +250,7 @@ private class CloseButton: NSButton {
 // Update MinimizeButton class
 private class MinimizeButton: NSButton {
     private var isWindowMinimized: Bool = false
+    private var isHovered: Bool = false
     
     init(frame: NSRect, tag: Int, target: AnyObject?, action: Selector) {
         super.init(frame: frame)
@@ -266,7 +274,13 @@ private class MinimizeButton: NSButton {
         // Add circle background
         self.wantsLayer = true
         self.layer?.cornerRadius = size / 2
-        self.layer?.backgroundColor = NSColor(deviceWhite: 0.3, alpha: 0.2).cgColor
+        
+        // Set initial background color
+        let isDark = self.effectiveAppearance.isDarkMode
+        let initialColor = isDark ?
+            Constants.UI.Theme.iconTintColor.withAlphaComponent(0.2) :
+            Constants.UI.Theme.iconSecondaryTintColor.withAlphaComponent(0.2)
+        self.layer?.backgroundColor = initialColor.cgColor
         
         // Configure the minus symbol with adjusted size
         let config = NSImage.SymbolConfiguration(pointSize: 9, weight: .semibold)
@@ -306,40 +320,50 @@ private class MinimizeButton: NSButton {
         self.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: minimized ? "Restore" : "Minimize")?
             .withSymbolConfiguration(config)
         
-        updateBackgroundColor(isHovered: false)
+        // Update colors based on current hover state
+        if isHovered {
+            self.contentTintColor = minimized ? .systemBlue : .systemOrange
+        } else {
+            self.contentTintColor = minimized ? NSColor.tertiaryLabelColor : .systemGray
+        }
+        
+        updateBackgroundColor()
     }
     
     override func mouseEntered(with event: NSEvent) {
+        isHovered = true
         if isWindowMinimized {
             self.contentTintColor = .systemBlue
         } else {
             self.contentTintColor = .systemOrange
         }
-        updateBackgroundColor(isHovered: true)
+        updateBackgroundColor()
     }
     
     override func mouseExited(with event: NSEvent) {
+        isHovered = false
         if isWindowMinimized {
             self.contentTintColor = NSColor.tertiaryLabelColor
         } else {
             self.contentTintColor = .systemGray
         }
-        updateBackgroundColor(isHovered: false)
+        updateBackgroundColor()
     }
     
-    private func updateBackgroundColor(isHovered: Bool) {
+    private func updateBackgroundColor() {
         let isDark = self.effectiveAppearance.isDarkMode
         
         if isWindowMinimized {
             let color = isDark ?
-                (isHovered ? NSColor(white: 1.0, alpha: 0.15) : NSColor(white: 1.0, alpha: 0.1)) :
-                (isHovered ? NSColor(white: 0.0, alpha: 0.1) : NSColor(white: 0.0, alpha: 0.07))
+                (isHovered ? NSColor(white: 0.3, alpha: 0.3) : NSColor(white: 0.3, alpha: 0.2)) :
+                (isHovered ? NSColor(white: 0.85, alpha: 0.3) : NSColor(white: 0.85, alpha: 0.2))
             self.layer?.backgroundColor = color.cgColor
             self.alphaValue = 0.5
         } else {
+            // Use more opaque background colors
             let color = isDark ?
-                (isHovered ? NSColor(white: 1.0, alpha: 0.2) : NSColor(white: 1.0, alpha: 0.15)) :
-                (isHovered ? NSColor(white: 0.0, alpha: 0.15) : NSColor(white: 0.0, alpha: 0.1))
+                (isHovered ? NSColor(white: 0.3, alpha: 0.5) : NSColor(white: 0.3, alpha: 0.35)) :
+                (isHovered ? NSColor(white: 0.85, alpha: 0.5) : NSColor(white: 0.85, alpha: 0.35))
             self.layer?.backgroundColor = color.cgColor
             self.alphaValue = isHovered ? 1.0 : 0.8
         }
@@ -928,16 +952,27 @@ class WindowChooserView: NSView {
         let window = options[sender.tag].window
         
         if isDoubleClick && NSScreen.screens.count > 1 {
-            // Double-click behavior remains the same - move to secondary display
+            // Double-click behavior - move to secondary display
             positionWindow(window, maximize: true, useSecondaryDisplay: true)
         } else {
-            // Single click now toggles between maximized and centered
+            // Single click behavior
             if isWindowMaximized(window) {
-                // If maximized, center the window with standard dimensions
                 centerWindow(window)
             } else {
-                // If not maximized, maximize the window
                 positionWindow(window, maximize: true, useSecondaryDisplay: false)
+                
+                // Update maximize button icon
+                if let button = self.subviews.compactMap({ $0 as? NSButton })
+                    .first(where: { $0.tag == sender.tag && $0.action == #selector(maximizeWindow(_:)) }) {
+                    
+                    let config = NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
+                    let image = NSImage(systemSymbolName: "square.fill", 
+                                      accessibilityDescription: "Toggle Window Size")?
+                        .withSymbolConfiguration(config)
+                    
+                    button.image = image
+                    button.contentTintColor = Constants.UI.Theme.iconTintColor
+                }
             }
         }
     }
@@ -998,7 +1033,22 @@ class WindowChooserView: NSView {
             
             // Update all buttons after maximizing
             if let index = options.firstIndex(where: { $0.window == window }) {
-                refreshButtons(for: window, at: index)  // Use refreshButtons instead of updateButtonColors
+                // Update maximize button image based on screen position
+                if let button = self.subviews.compactMap({ $0 as? NSButton })
+                    .first(where: { $0.tag == index && $0.action == #selector(maximizeWindow(_:)) }) {
+                    
+                    let isOnSecondary = isWindowOnSecondaryDisplay(window)
+                    let config = NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
+                    let symbolName = isOnSecondary ? "2.square.fill" : "square.fill"
+                    let image = NSImage(systemSymbolName: symbolName, 
+                                      accessibilityDescription: isOnSecondary ? "Move to Primary" : "Toggle Window Size")?
+                        .withSymbolConfiguration(config)
+                    
+                    button.image = image
+                    button.contentTintColor = Constants.UI.Theme.iconTintColor
+                }
+                
+                refreshButtons(for: window, at: index)
             }
         } else {
             let margin = Constants.UI.screenEdgeMargin
@@ -1045,26 +1095,14 @@ class WindowChooserView: NSView {
         let buttons = self.subviews.compactMap { $0 as? NSButton }
         for button in buttons {
             if button.tag == index {
-                if button.action == #selector(hideButtonClicked(_:)) {
-                    // Update minimize button state
+                if let minimizeButton = button as? MinimizeButton {
+                    // Preserve minimize button state and colors
                     var minimizedValue: AnyObject?
                     if AXUIElementCopyAttributeValue(window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success,
                        let isMinimized = minimizedValue as? Bool {
-                        // Update icon
-                        let config = NSImage.SymbolConfiguration(pointSize: 9, weight: .semibold)
-                        let symbolName = isMinimized ? "plus" : "minus"
-                        let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: isMinimized ? "Restore" : "Minimize")?
-                            .withSymbolConfiguration(config)
-                        button.image = image
-                        
-                        // Update colors
-                        button.contentTintColor = isMinimized ? 
-                            Constants.UI.Theme.iconSecondaryTintColor : 
-                            Constants.UI.Theme.iconTintColor
-                        button.alphaValue = isMinimized ? 0.5 : 1.0
+                        minimizeButton.updateMinimizedState(isMinimized)
                     }
                 } else if button.action == #selector(maximizeWindow(_:)) {
-                    // Existing maximize button logic...
                     button.contentTintColor = isWindowMaximized(window) ? 
                         Constants.UI.Theme.iconTintColor : 
                         Constants.UI.Theme.iconSecondaryTintColor
@@ -1076,7 +1114,7 @@ class WindowChooserView: NSView {
                     button.contentTintColor = isWindowInPosition(window, onLeft: false) ? 
                         Constants.UI.Theme.iconTintColor : 
                         Constants.UI.Theme.iconSecondaryTintColor
-                } else {
+                } else if button.action == #selector(buttonClicked(_:)) {
                     // Window title button
                     button.contentTintColor = window == topmostWindow ? 
                         Constants.UI.Theme.buttonHighlightColor : 
@@ -1283,7 +1321,22 @@ class WindowChooserView: NSView {
             AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, positionValue)
         }
         
-        // Update button state
+        // Update button state and icon
+        if let index = options.firstIndex(where: { $0.window == window }),
+           let button = self.subviews.compactMap({ $0 as? NSButton })
+            .first(where: { $0.tag == index && $0.action == #selector(maximizeWindow(_:)) }) {
+            
+            // Update to regular square icon
+            let config = NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
+            let image = NSImage(systemSymbolName: "square.fill", 
+                              accessibilityDescription: "Toggle Window Size")?
+                .withSymbolConfiguration(config)
+            
+            button.image = image
+            button.contentTintColor = Constants.UI.Theme.iconSecondaryTintColor
+        }
+        
+        // Update other buttons
         if let index = options.firstIndex(where: { $0.window == window }) {
             refreshButtons(for: window, at: index)
         }
@@ -1790,7 +1843,7 @@ class AccessibilityService {
     }
     
     func restoreAllWindows(for app: NSRunningApplication) {
-        Logger.debug("restoreAllWindows called for: \(app.localizedName ?? "Unknown")")  // Add this line
+        Logger.debug("restoreAllWindows called for: \(app.localizedName ?? "Unknown")")
         let pid = app.processIdentifier
         
         Task<Void, Never> { @MainActor in
@@ -1802,53 +1855,31 @@ class AccessibilityService {
             Logger.info("Restoring windows for app: \(app.localizedName ?? "Unknown")")
             Logger.info("Total window states: \(states.count)")
             
-            // Log details of each window state
-            for (index, state) in states.enumerated() {
-                Logger.debug("Window \(index): wasVisible=\(state.wasVisible), order=\(state.order), stackOrder=\(state.stackOrder)")
+            // First pass: restore only previously visible windows
+            for state in states where state.wasVisible {
+                let _ = AXUIElementSetAttributeValue(state.window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
+                let _ = AXUIElementSetAttributeValue(state.window, kAXHiddenAttribute as CFString, false as CFTypeRef)
                 
-                // Check current window state
+                // Small delay between operations
+                try? await Task.sleep(nanoseconds: UInt64(Constants.Performance.windowRefreshDelay * 1_000_000_000))
+                
+                // Raise only if it was visible
+                let _ = AXUIElementPerformAction(state.window, kAXRaiseAction as CFString)
+            }
+            
+            // Second pass: ensure minimized windows stay minimized
+            for state in states where !state.wasVisible {
                 var minimizedValue: AnyObject?
-                var hiddenValue: AnyObject?
                 if AXUIElementCopyAttributeValue(state.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success,
-                   AXUIElementCopyAttributeValue(state.window, kAXHiddenAttribute as CFString, &hiddenValue) == .success {
-                    Logger.debug("  Current state: minimized=\(minimizedValue as? Bool ?? false), hidden=\(hiddenValue as? Bool ?? false)")
+                   let isMinimized = minimizedValue as? Bool,
+                   !isMinimized {
+                    // If the window was not visible and is now not minimized, minimize it
+                    let _ = AXUIElementSetAttributeValue(state.window, kAXMinimizedAttribute as CFString, true as CFTypeRef)
                 }
             }
             
-            // Special handling for single window case
-            if states.count == 1, let singleState = states.first {
-                Logger.info("Single window case detected")
-                if singleState.wasVisible {
-                    Logger.info("Attempting to raise single window")
-                    AccessibilityService.shared.raiseWindow(window: singleState.window, for: app)
-                } else {
-                    Logger.info("Single window was not previously visible, skipping")
-                }
-            } else {
-                Logger.info("Multiple windows case: \(states.count) windows")
-                // Original logic for multiple windows
-                // First pass: restore all windows in their original order (back to front)
-                for state in states {
-                    if state.wasVisible {
-                        let _ = AXUIElementSetAttributeValue(state.window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
-                        let _ = AXUIElementSetAttributeValue(state.window, kAXHiddenAttribute as CFString, false as CFTypeRef)
-                    }
-                }
-                
-                // Small delay to allow windows to be restored
-                try? await Task.sleep(nanoseconds: UInt64(Constants.Performance.windowRefreshDelay * 1_000_000_000))
-                
-                // Second pass: raise windows in reverse order to maintain z-order (front to back)
-                for state in states.reversed() {
-                    if state.wasVisible {
-                        let _ = AXUIElementPerformAction(state.window, kAXRaiseAction as CFString)
-                        try? await Task.sleep(nanoseconds: UInt64(Constants.Performance.windowRefreshDelay * 1_000_000_000))
-                    }
-                }
-                
-                // Activate the app after all windows are restored
-                app.activate(options: [.activateIgnoringOtherApps])
-            }
+            // Activate the app after all windows are handled
+            app.activate(options: [.activateIgnoringOtherApps])
             
             windowStates.removeValue(forKey: pid)
             Logger.info("Window restoration completed")
@@ -1906,7 +1937,6 @@ class AccessibilityService {
         
         // Initialize states for all windows
         for (index, window) in windows.enumerated() {
-            // Consider minimized windows as "visible" since we want to restore them
             var minimizedValue: AnyObject?
             var hiddenValue: AnyObject?
             
@@ -1915,11 +1945,8 @@ class AccessibilityService {
             let isHidden = AXUIElementCopyAttributeValue(window, kAXHiddenAttribute as CFString, &hiddenValue) == .success &&
                           (hiddenValue as? Bool == true)
             
-            // A window should be considered "visible" if it exists and isn't hidden
-            // (minimized windows should be considered visible since we want to restore them)
-            let isVisible = !isHidden
-            
-            Logger.debug("Window state check - minimized: \(isMinimized), hidden: \(isHidden), considering visible: \(isVisible)")
+            // A window is considered "not visible" if it's either minimized or hidden
+            let isNotVisible = isMinimized || isHidden
             
             // Get window ID for stack order
             var windowIDRef: CFTypeRef?
@@ -1933,9 +1960,11 @@ class AccessibilityService {
             }
             
             states.append((window: window,
-                          wasVisible: isVisible,
+                          wasVisible: !isNotVisible,  // Store the inverse of isNotVisible
                           order: index,
                           stackOrder: windowStackOrder))
+            
+            Logger.debug("Window \(index) initial state - minimized: \(isMinimized), hidden: \(isHidden), visible: \(!isNotVisible)")
         }
         
         // Store states sorted by stack order
