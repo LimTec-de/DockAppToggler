@@ -60,6 +60,7 @@ jobs:
         # Copy resources and Info.plist
         cp Sources/DockAppToggler/Resources/icon.icns DockAppToggler.app/Contents/Resources/ || echo "⚠️ Warning: icon.icns not found"
         cp Sources/DockAppToggler/Resources/icon.png DockAppToggler.app/Contents/Resources/ || echo "⚠️ Warning: icon.png not found"
+        cp Sources/DockAppToggler/Resources/trayicon.png DockAppToggler.app/Contents/Resources/ || echo "⚠️ Warning: trayicon.png not found"
         cp Sources/DockAppToggler/Info.plist DockAppToggler.app/Contents/ || (echo "❌ Error: Info.plist not found" && exit 1)
         
         # Create PkgInfo

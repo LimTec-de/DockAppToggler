@@ -432,24 +432,18 @@ class WindowChooserView: NSView {
     private func setupButtons() {
         for (index, windowInfo) in options.enumerated() {
             let button = createButton(for: windowInfo, at: index)
-            let hideButton = createHideButton(for: windowInfo, at: index)
             let closeButton = createCloseButton(for: windowInfo, at: index)
             
             addSubview(button)
-            addSubview(hideButton)
             addSubview(closeButton)
-            
             buttons.append(button)
-            hideButtons.append(hideButton)
             closeButtons.append(closeButton)
             
-            // Check initial minimize state for the window
-            if let minimizeButton = hideButton as? MinimizeButton {
-                var minimizedValue: AnyObject?
-                if AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success,
-                   let isMinimized = minimizedValue as? Bool {
-                    minimizeButton.updateMinimizedState(isMinimized)
-                }
+            // Only add minimize and window control buttons for actual windows
+            if !windowInfo.isAppElement {
+                let hideButton = createHideButton(for: windowInfo, at: index)
+                addSubview(hideButton)
+                hideButtons.append(hideButton)
             }
         }
     }
@@ -1344,20 +1338,32 @@ class WindowChooserView: NSView {
     
     // Add new method to handle close button clicks
     @objc private func closeWindowButtonClicked(_ sender: NSButton) {
-        let window = options[sender.tag].window
+        let windowInfo = options[sender.tag]
         
-        // Try to find and press the close button
-        var closeButtonRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(window, kAXCloseButtonAttribute as CFString, &closeButtonRef) == .success,
-           CFGetTypeID(closeButtonRef!) == AXUIElementGetTypeID() {
-            let closeButton = closeButtonRef as! AXUIElement
-            AXUIElementPerformAction(closeButton, kAXPressAction as CFString)
+        if windowInfo.isAppElement {
+            // For app elements, terminate the app
+            targetApp.terminate()
             
-            // Add a small delay to ensure the window has closed
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-                // Refresh the menu
-                if let windowController = self?.window?.windowController as? WindowChooserController {
-                    windowController.refreshMenu()
+            // Close the window chooser
+            if let windowController = self.window?.windowController as? WindowChooserController {
+                windowController.close()
+            }
+        } else {
+            // Existing window close logic
+            let window = windowInfo.window
+            
+            var closeButtonRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(window, kAXCloseButtonAttribute as CFString, &closeButtonRef) == .success,
+               CFGetTypeID(closeButtonRef!) == AXUIElementGetTypeID() {
+                let closeButton = closeButtonRef as! AXUIElement
+                AXUIElementPerformAction(closeButton, kAXPressAction as CFString)
+                
+                // Add a small delay to ensure the window has closed
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                    // Refresh the menu
+                    if let windowController = self?.window?.windowController as? WindowChooserController {
+                        windowController.refreshMenu()
+                    }
                 }
             }
         }
@@ -2655,19 +2661,25 @@ class StatusBarController {
         if let button = statusItem.button {
             // Try multiple paths to find the icon
             let iconImage: NSImage?
-            if let bundleIconPath = Bundle.main.path(forResource: "icon", ofType: "icns") {
+            if let bundleIconPath = Bundle.main.path(forResource: "trayicon", ofType: "png") {
                 // App bundle path
                 iconImage = NSImage(contentsOfFile: bundleIconPath)
             } else {
                 // Development path
-                let devIconPath = "Sources/DockAppToggler/Resources/icon.icns"
-                iconImage = NSImage(contentsOfFile: devIconPath) ?? 
-                           NSImage(systemSymbolName: "square.grid.3x3", accessibilityDescription: "DockAppToggler")
+                let devIconPath = "Sources/DockAppToggler/Resources/trayicon.png"
+                iconImage = NSImage(contentsOfFile: devIconPath)
             }
             
             if let image = iconImage {
-                image.size = NSSize(width: 18, height: 18)
-                button.image = image
+                // Create a copy of the image at the desired size
+                let resizedImage = NSImage(size: NSSize(width: 18, height: 18))
+                resizedImage.lockFocus()
+                image.draw(in: NSRect(origin: .zero, size: NSSize(width: 18, height: 18)))
+                resizedImage.unlockFocus()
+                
+                // Set as template
+                resizedImage.isTemplate = true
+                button.image = resizedImage
             }
         }
         

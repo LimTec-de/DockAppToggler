@@ -81,6 +81,7 @@ cp "$BINARY_PATH" "$MACOS_DIR/"
 print_status "Copying resources and Info.plist..."
 cp "Sources/$APP_NAME/Resources/icon.icns" "$RESOURCES_DIR/" 2>/dev/null || print_warning "icon.icns not found"
 cp "Sources/$APP_NAME/Resources/icon.png" "$RESOURCES_DIR/" 2>/dev/null || print_warning "icon.png not found"
+cp "Sources/$APP_NAME/Resources/trayicon.png" "$RESOURCES_DIR/" 2>/dev/null || print_warning "trayicon.png not found"
 if ! cp "Sources/$APP_NAME/Info.plist" "$CONTENTS_DIR/"; then
     print_error "Info.plist not found"
     exit 1
