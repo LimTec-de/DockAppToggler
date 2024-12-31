@@ -2520,6 +2520,38 @@ class DockWatcher: NSObject, NSMenuDelegate {
 
         Logger.debug("Processing click for app: \(app.localizedName ?? "Unknown")")
         
+        // Special handling for Finder
+        if app.bundleIdentifier == "com.apple.finder" {
+            // Get the currently active window level
+            let windowList = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+            let finderWindows = windowList.filter { window in
+                guard let ownerPID = window[kCGWindowOwnerPID as String] as? pid_t,
+                      ownerPID == app.processIdentifier,
+                      let layer = window[kCGWindowLayer as String] as? Int32,
+                      layer == kCGNormalWindowLevel else {
+                    return false
+                }
+                return true
+            }
+            
+            let isFinderActive = finderWindows.contains { window in
+                guard let windowLevel = window[kCGWindowLayer as String] as? Int32 else {
+                    return false
+                }
+                return windowLevel == kCGNormalWindowLevel
+            }
+            
+            if isFinderActive && app.isActive {
+                Logger.debug("Finder is active, hiding")
+                return app.hide()
+            } else {
+                Logger.debug("Finder is not active, showing")
+                app.unhide()
+                app.activate(options: [.activateIgnoringOtherApps])
+                return true
+            }
+        }
+        
         // Initialize window states before checking app status
         AccessibilityService.shared.initializeWindowStates(for: app)
         
@@ -2995,5 +3027,48 @@ class BubbleVisualEffectView: NSVisualEffectView {
         if let borderLayer = self.layer?.sublayers?.first(where: { $0.name == "borderLayer" }) as? CAShapeLayer {
             borderLayer.strokeColor = NSColor(white: 1.0, alpha: 0.3).cgColor
         }
+    }
+}
+
+func toggleApp(_ bundleIdentifier: String) {
+    let workspace = NSWorkspace.shared
+    let runningApps = workspace.runningApplications
+    
+    guard let app = runningApps.first(where: { app in
+        app.bundleIdentifier == bundleIdentifier
+    }) else {
+        print("App not found")
+        return
+    }
+    
+    // Special handling for Finder - check if frontmost
+    if bundleIdentifier == "com.apple.finder" {
+        if let frontmostApp = NSWorkspace.shared.frontmostApplication,
+           frontmostApp == app {
+            app.hide()
+        } else {
+            app.unhide()
+            app.activate(options: [.activateIgnoringOtherApps])
+        }
+        return
+    }
+    
+    // Regular handling for other apps
+    let appWindows = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] ?? []
+    let visibleWindows = appWindows.filter { window in
+        guard let ownerName = window[kCGWindowOwnerName as String] as? String,
+              let app = runningApps.first(where: { app in
+                  app.localizedName == ownerName
+              }),
+              app.bundleIdentifier == bundleIdentifier else {
+            return false
+        }
+        return true
+    }
+    
+    if visibleWindows.isEmpty {
+        app.unhide()
+    } else {
+        app.hide()
     }
 }
