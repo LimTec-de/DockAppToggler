@@ -1855,32 +1855,28 @@ class AccessibilityService {
             Logger.info("Restoring windows for app: \(app.localizedName ?? "Unknown")")
             Logger.info("Total window states: \(states.count)")
             
-            // First pass: restore only previously visible windows
+            // First pass: unminimize and unhide all windows that were visible
             for state in states where state.wasVisible {
-                let _ = AXUIElementSetAttributeValue(state.window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
-                let _ = AXUIElementSetAttributeValue(state.window, kAXHiddenAttribute as CFString, false as CFTypeRef)
+                AXUIElementSetAttributeValue(state.window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
+                AXUIElementSetAttributeValue(state.window, kAXHiddenAttribute as CFString, false as CFTypeRef)
                 
                 // Small delay between operations
-                try? await Task.sleep(nanoseconds: UInt64(Constants.Performance.windowRefreshDelay * 1_000_000_000))
-                
-                // Raise only if it was visible
-                let _ = AXUIElementPerformAction(state.window, kAXRaiseAction as CFString)
+                try? await Task.sleep(nanoseconds: UInt64(0.05 * 1_000_000_000))
             }
             
-            // Second pass: ensure minimized windows stay minimized
-            for state in states where !state.wasVisible {
-                var minimizedValue: AnyObject?
-                if AXUIElementCopyAttributeValue(state.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success,
-                   let isMinimized = minimizedValue as? Bool,
-                   !isMinimized {
-                    // If the window was not visible and is now not minimized, minimize it
-                    let _ = AXUIElementSetAttributeValue(state.window, kAXMinimizedAttribute as CFString, true as CFTypeRef)
-                }
+            // Give windows time to restore
+            try? await Task.sleep(nanoseconds: UInt64(0.1 * 1_000_000_000))
+            
+            // Second pass: raise windows in correct order
+            for state in states.reversed() where state.wasVisible {
+                AXUIElementPerformAction(state.window, kAXRaiseAction as CFString)
+                try? await Task.sleep(nanoseconds: UInt64(0.05 * 1_000_000_000))
             }
             
-            // Activate the app after all windows are handled
+            // Final activation of the app
             app.activate(options: [.activateIgnoringOtherApps])
             
+            // Clear the stored states
             windowStates.removeValue(forKey: pid)
             Logger.info("Window restoration completed")
         }
