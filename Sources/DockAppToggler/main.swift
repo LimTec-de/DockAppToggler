@@ -2499,22 +2499,48 @@ class DockWatcher: NSObject, NSMenuDelegate {
         
         // Special handling for Finder
         if app.bundleIdentifier == "com.apple.finder" {
-            if app.isActive {
-                Logger.debug("Finder is active, hiding")
+            // Get all windows and check for visible, non-desktop windows
+            let windows = AccessibilityService.shared.listApplicationWindows(for: app)
+            let hasVisibleTopmostWindow = windows.contains { windowInfo in
+                // Skip desktop window and app elements
+                guard !windowInfo.isAppElement else { return false }
+                
+                // Check if window is visible and not minimized
+                var minimizedValue: AnyObject?
+                var hiddenValue: AnyObject?
+                let isMinimized = AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success &&
+                                 (minimizedValue as? Bool == true)
+                let isHidden = AXUIElementCopyAttributeValue(windowInfo.window, kAXHiddenAttribute as CFString, &hiddenValue) == .success &&
+                              (hiddenValue as? Bool == true)
+                
+                // Check if window is a regular window
+                var roleValue: AnyObject?
+                let isRegularWindow = AXUIElementCopyAttributeValue(windowInfo.window, kAXRoleAttribute as CFString, &roleValue) == .success &&
+                                     (roleValue as? String == "AXWindow")
+                
+                // Only check if Finder is active, don't rely on window focus
+                let isAppActive = app.isActive
+                
+                // Log window state for debugging
+                Logger.debug("Window '\(windowInfo.name)' - minimized: \(isMinimized), hidden: \(isHidden), app active: \(isAppActive), regular window: \(isRegularWindow)")
+                
+                // Consider window visible if it's not minimized/hidden, is a regular window, and Finder is active
+                return !isMinimized && !isHidden && isRegularWindow && isAppActive
+            }
+            
+            if hasVisibleTopmostWindow {
+                Logger.debug("Finder has visible topmost windows, hiding")
                 AccessibilityService.shared.hideAllWindows(for: app)
                 return app.hide()
             } else {
-                Logger.debug("Finder is not active, showing")
+                Logger.debug("Finder has no visible topmost windows, showing")
                 app.unhide()
                 app.activate(options: [.activateIgnoringOtherApps])
                 
-                // Check if there are any visible Finder windows
-                let windows = AccessibilityService.shared.listApplicationWindows(for: app)
-                let hasVisibleWindows = windows.contains { windowInfo in
-                    !windowInfo.isAppElement && AccessibilityService.shared.checkWindowVisibility(windowInfo.window)
-                }
+                // Check if there are any Finder windows at all
+                let hasAnyWindows = windows.contains { !$0.isAppElement }
                 
-                if !hasVisibleWindows {
+                if !hasAnyWindows {
                     // Open home directory in a new Finder window
                     let homeURL = FileManager.default.homeDirectoryForCurrentUser
                     NSWorkspace.shared.open(homeURL)
