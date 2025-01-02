@@ -14,6 +14,7 @@ import Sparkle
 import Cocoa
 import ApplicationServices
 import UserNotifications
+import ServiceManagement
 
 // MARK: - Type Aliases and Constants
 
@@ -2696,6 +2697,7 @@ class StatusBarController {
     private var statusItem: NSStatusItem
     private var menu: NSMenu
     private let updaterController: SPUStandardUpdaterController
+    private let autostartMenuItem: NSMenuItem
     
     init() {
         statusBar = NSStatusBar.system
@@ -2704,6 +2706,13 @@ class StatusBarController {
         
         // Initialize the updater controller
         updaterController = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+        
+        // Create autostart menu item
+        autostartMenuItem = NSMenuItem(
+            title: "Start at Login",
+            action: #selector(toggleAutostart),
+            keyEquivalent: ""
+        )
         
         if let button = statusItem.button {
             // Try multiple paths to find the icon
@@ -2731,17 +2740,79 @@ class StatusBarController {
         }
         
         setupMenu()
+        updateAutostartState()
     }
     
     private func setupMenu() {
-        let updateItem = NSMenuItem(title: "Check for Updates...", action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)), keyEquivalent: "")
+        // Add autostart toggle
+        autostartMenuItem.target = self
+        menu.addItem(autostartMenuItem)
+        
+        // Add separator
+        menu.addItem(NSMenuItem.separator())
+        
+        // Existing menu items
+        let updateItem = NSMenuItem(title: "Check for Updates...", 
+                                  action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)), 
+                                  keyEquivalent: "")
         updateItem.target = updaterController
         menu.addItem(updateItem)
+        
         menu.addItem(NSMenuItem.separator())
-        let quitItem = NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        
+        let quitItem = NSMenuItem(title: "Quit", 
+                                action: #selector(NSApplication.terminate(_:)), 
+                                keyEquivalent: "q")
         quitItem.target = NSApp
         menu.addItem(quitItem)
+        
         statusItem.menu = menu
+    }
+    
+    @objc private func toggleAutostart() {
+        let isEnabled = !LoginItemManager.shared.isLoginItemEnabled
+        LoginItemManager.shared.setLoginItemEnabled(isEnabled)
+        updateAutostartState()
+    }
+    
+    private func updateAutostartState() {
+        autostartMenuItem.state = LoginItemManager.shared.isLoginItemEnabled ? .on : .off
+    }
+}
+
+// Update LoginItemManager class
+@MainActor
+class LoginItemManager {
+    static let shared = LoginItemManager()
+    
+    private let bundleIdentifier = Bundle.main.bundleIdentifier ?? "com.dockapptoggler"
+    
+    var isLoginItemEnabled: Bool {
+        if #available(macOS 13.0, *) {
+            return SMAppService.mainApp.status == .enabled
+        } else {
+            // Fallback for older macOS versions
+            return false
+        }
+    }
+    
+    func setLoginItemEnabled(_ enabled: Bool) {
+        if #available(macOS 13.0, *) {
+            do {
+                if enabled {
+                    if SMAppService.mainApp.status == .enabled {
+                        try SMAppService.mainApp.unregister()
+                    }
+                    try SMAppService.mainApp.register()
+                } else {
+                    try SMAppService.mainApp.unregister()
+                }
+            } catch {
+                Logger.error("Failed to \(enabled ? "enable" : "disable") login item: \(error)")
+            }
+        } else {
+            Logger.warning("Auto-start not supported on this macOS version")
+        }
     }
 }
 

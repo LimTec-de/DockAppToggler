@@ -15,5 +15,7 @@
     <true/>
     <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
     <true/>
+    <key>com.apple.security.temporary-exception.shared-preference.read-write</key>
+    <true/>
 </dict>
 </plist> 
