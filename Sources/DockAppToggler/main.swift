@@ -1725,6 +1725,13 @@ class AccessibilityService {
         // Store CGWindow information for debugging and matching
         var cgWindows: [(id: CGWindowID, name: String?, bounds: CGRect)] = []
         
+        // Get the AXUIElement for the application
+        let axElement = AXUIElementCreateApplication(pid)
+        var value: AnyObject?
+        let axSupported = AXUIElementCopyAttributeValue(axElement, kAXRoleAttribute as CFString, &value) == .success
+
+        
+            
         // Create a set of window IDs belonging to this app
         let cgWindowIDs = Set(windowList.compactMap { window -> CGWindowID? in
             // Check multiple identifiers to ensure we catch all windows
@@ -1732,12 +1739,26 @@ class AccessibilityService {
             let ownerNameMatches = (window[kCGWindowOwnerName as String] as? String) == app.localizedName
             let bundleIDMatches = window["kCGWindowOwnerBundleID" as String] as? String == app.bundleIdentifier
             
-            // Only include windows with names
+            // Get window properties
             let windowName = window[kCGWindowName as String] as? String
+            let windowLayer = window[kCGWindowLayer as String] as? Int32
+            let windowAlpha = window[kCGWindowAlpha as String] as? Float
+            let windowSharingState = window[kCGWindowSharingState as String] as? Int32
+            
+            // Filter conditions for regular windows:
+            // 1. Must belong to the app
+            // 2. Must have a valid window ID and non-empty name
+            // 3. Must be on the normal window layer (0)
+            // 4. Must have normal alpha (1.0)
+            // 5. Must not be a system window
             guard (ownerPIDMatches || ownerNameMatches || bundleIDMatches),
                   let windowID = window[kCGWindowNumber as String] as? CGWindowID,
-                  let name = windowName,  // Require window name
-                  !name.isEmpty else {    // Ensure name is not empty
+                  let name = windowName,
+                  !name.isEmpty,
+                  windowLayer == 0,  // Normal window layer
+                  windowAlpha == nil || windowAlpha! > 0.9,  // Normal opacity
+                  windowSharingState != 1  // Not a system window
+            else {
                 return nil
             }
             
@@ -1747,9 +1768,17 @@ class AccessibilityService {
                                 y: bounds["Y"] ?? 0,
                                 width: bounds["Width"] ?? 0,
                                 height: bounds["Height"] ?? 0)
+                
+                // Additional size check to filter out tiny windows (likely toolbars/panels)
+                guard rect.width >= 200 && rect.height >= 100 else {
+                    Logger.debug("Skipping small window '\(name)' (\(rect.width) x \(rect.height))")
+                    return nil
+                }
+                
+                Logger.debug("Adding window '\(name)' (\(rect.width) x \(rect.height))")
                 cgWindows.append((
                     id: windowID,
-                    name: name,  // Use the non-optional name
+                    name: name,
                     bounds: rect
                 ))
             }
@@ -1761,6 +1790,7 @@ class AccessibilityService {
         for window in cgWindows {
             Logger.debug("  - ID: \(window.id), Name: \(window.name ?? "unnamed"), Bounds: \(window.bounds)")
         }
+        
         
         // Get windows using Accessibility API
         var windowsRef: CFTypeRef?
