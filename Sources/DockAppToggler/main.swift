@@ -1432,13 +1432,21 @@ class WindowChooserView: NSView {
 
 /// A custom window controller that manages the window chooser interface
 class WindowChooserController: NSWindowController {
+    // Change chooserView access level to internal (default)
+    var chooserView: WindowChooserView?
+    
+    // Keep other properties private
     private let app: NSRunningApplication
     private let iconCenter: CGPoint
     private var visualEffectView: NSVisualEffectView?
-    private var chooserView: WindowChooserView?
     private var trackingArea: NSTrackingArea?
     private var isClosing: Bool = false
     private let callback: (AXUIElement, Bool) -> Void
+
+    // Alternative: Add a public method to get the topmost window
+    var topmostWindow: AXUIElement? {
+        return chooserView?.topmostWindow
+    }
     
     init(at point: CGPoint, windows: [WindowInfo], app: NSRunningApplication, callback: @escaping (AXUIElement, Bool) -> Void) {
         self.app = app
@@ -1855,8 +1863,10 @@ class AccessibilityService {
                                     isMinimized || // Or is minimized
                                     role == "AXWindow" || // Or is a standard window
                                     role == "AXDialog" || // Or is a dialog
-                                    subrole == "AXStandardWindow") && (subrole != "AXDialog") // Or has standard window subrole
+                                    subrole == "AXStandardWindow") // Or has standard window subrole
                 
+                
+
                 if !isHidden && isValidWindow {
                     // Get window position and size
                     var positionValue: CFTypeRef?
@@ -3064,7 +3074,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
         if app.bundleIdentifier == "com.apple.finder" {
             // Get all windows and check for visible, non-desktop windows
             let windows = AccessibilityService.shared.listApplicationWindows(for: app)
-            let hasVisibleTopmostWindow = windows.contains { windowInfo in
+            let hasVisibleTopmostWindow = app.isActive && windows.contains { windowInfo in
                 // Skip desktop window and app elements
                 guard !windowInfo.isAppElement else { return false }
                 
@@ -3081,15 +3091,13 @@ class DockWatcher: NSObject, NSMenuDelegate {
                 let isRegularWindow = AXUIElementCopyAttributeValue(windowInfo.window, kAXRoleAttribute as CFString, &roleValue) == .success &&
                                      (roleValue as? String == "AXWindow")
                 
-                // Only check if Finder is active, don't rely on window focus
-                let isAppActive = app.isActive
+                Logger.debug("Window '\(windowInfo.name)' - minimized: \(isMinimized), hidden: \(isHidden), regular window: \(isRegularWindow)")
                 
-                // Log window state for debugging
-                Logger.debug("Window '\(windowInfo.name)' - minimized: \(isMinimized), hidden: \(isHidden), app active: \(isAppActive), regular window: \(isRegularWindow)")
-                
-                // Consider window visible if it's not minimized/hidden, is a regular window, and Finder is active
-                return !isMinimized && !isHidden && isRegularWindow && isAppActive
+                // Consider window visible if it's not minimized/hidden and is a regular window
+                return !isMinimized && !isHidden && isRegularWindow
             }
+            
+            Logger.debug("Finder active: \(app.isActive), has visible windows: \(hasVisibleTopmostWindow)")
             
             if hasVisibleTopmostWindow {
                 Logger.debug("Finder has visible topmost windows, hiding")
@@ -3100,16 +3108,39 @@ class DockWatcher: NSObject, NSMenuDelegate {
                 app.unhide()
                 app.activate(options: [.activateIgnoringOtherApps])
                 
-                // Check if there are any Finder windows at all
-                let hasAnyWindows = windows.contains { !$0.isAppElement }
+                // Only restore non-minimized windows
+                let nonMinimizedWindows = windows.filter { windowInfo in
+                    guard !windowInfo.isAppElement else { return false }
+                    var minimizedValue: AnyObject?
+                    return !(AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success &&
+                            (minimizedValue as? Bool == true))
+                }
                 
-                if !hasAnyWindows {
-                    // Open home directory in a new Finder window
+                if nonMinimizedWindows.isEmpty {
+                    // Open home directory in a new Finder window if no non-minimized windows
                     let homeURL = FileManager.default.homeDirectoryForCurrentUser
                     NSWorkspace.shared.open(homeURL)
                 } else {
-                    // Restore existing windows
-                    AccessibilityService.shared.restoreAllWindows(for: app)
+                    // Find the highlighted window from the window chooser if it exists
+                    let highlightedWindow = windowChooser?.chooserView?.topmostWindow
+                    
+                    // Split windows into highlighted and others
+                    let (highlighted, others) = nonMinimizedWindows.partition { windowInfo in
+                        windowInfo.window == highlightedWindow
+                    }
+                    
+                    // First restore all other windows
+                    for windowInfo in others {
+                        AccessibilityService.shared.raiseWindow(windowInfo: windowInfo, for: app)
+                    }
+                    
+                    // Then restore the highlighted window last to make it frontmost
+                    if let lastWindow = highlighted.first {
+                        // Add a small delay to ensure other windows are restored
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                            AccessibilityService.shared.raiseWindow(windowInfo: lastWindow, for: app)
+                        }
+                    }
                 }
                 return true
             }
@@ -3179,9 +3210,42 @@ class DockWatcher: NSObject, NSMenuDelegate {
             Logger.debug("App has no visible windows, restoring last active window")
             app.unhide()
             app.activate(options: [.activateIgnoringOtherApps])
-            // Only initialize and restore if there are no visible windows
-            AccessibilityService.shared.initializeWindowStates(for: app)
-            AccessibilityService.shared.restoreAllWindows(for: app)
+            
+            // Get the highlighted window from the window chooser if it exists
+            let highlightedWindow = windowChooser?.chooserView?.topmostWindow
+            
+            // Split windows into highlighted and others
+            let (highlighted, others) = windows.partition { windowInfo in
+                windowInfo.window == highlightedWindow
+            }
+            
+            // First restore all other windows
+            for windowInfo in others {
+                // Unminimize if needed
+                var minimizedValue: AnyObject?
+                if AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success,
+                   let isMinimized = minimizedValue as? Bool,
+                   isMinimized {
+                    AXUIElementSetAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
+                }
+                AccessibilityService.shared.raiseWindow(windowInfo: windowInfo, for: app)
+            }
+            
+            // Then restore the highlighted window last to make it frontmost
+            if let lastWindow = highlighted.first {
+                // Unminimize if needed
+                var minimizedValue: AnyObject?
+                if AXUIElementCopyAttributeValue(lastWindow.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success,
+                   let isMinimized = minimizedValue as? Bool,
+                   isMinimized {
+                    AXUIElementSetAttributeValue(lastWindow.window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
+                }
+                
+                // Add a small delay to ensure other windows are restored
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    AccessibilityService.shared.raiseWindow(windowInfo: lastWindow, for: app)
+                }
+            }
             return true
         } else {
             // Just activate the app if it has visible windows but isn't active
@@ -3774,5 +3838,23 @@ func toggleApp(_ bundleIdentifier: String) {
         }
     } else {
         app.hide()
+    }
+}
+
+// Add near the top of the file with other extensions
+extension Array {
+    func partition(by predicate: (Element) -> Bool) -> ([Element], [Element]) {
+        var matching: [Element] = []
+        var nonMatching: [Element] = []
+        
+        forEach { element in
+            if predicate(element) {
+                matching.append(element)
+            } else {
+                nonMatching.append(element)
+            }
+        }
+        
+        return (matching, nonMatching)
     }
 }
