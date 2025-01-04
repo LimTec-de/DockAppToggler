@@ -1855,7 +1855,7 @@ class AccessibilityService {
                                     isMinimized || // Or is minimized
                                     role == "AXWindow" || // Or is a standard window
                                     role == "AXDialog" || // Or is a dialog
-                                    subrole == "AXStandardWindow") // Or has standard window subrole
+                                    subrole == "AXStandardWindow") && (subrole != "AXDialog") // Or has standard window subrole
                 
                 if !isHidden && isValidWindow {
                     // Get window position and size
@@ -2582,27 +2582,40 @@ class DockService {
             if url.path.lowercased().hasSuffix(".exe") {
                 let baseExeName = url.deletingPathExtension().lastPathComponent.lowercased()
                 
-                // First try to find Wine processes directly (faster)
-                if let wineApp = workspace.runningApplications.first(where: { app in
-                    guard let processName = app.localizedName?.lowercased() else { return false }
+                // Create a filtered list of potential Wine apps first
+                let potentialWineApps = workspace.runningApplications.filter { app in
+                    // Only check apps that are:
+                    // 1. Active or regular activation policy
+                    // 2. Have a name that matches our target or contains "wine"
+                    guard let processName = app.localizedName?.lowercased(),
+                        app.activationPolicy == .regular else {
+                        return false
+                    }
                     return processName.contains(baseExeName) || processName.contains("wine")
+                }
+                
+                // First try exact name matches (most likely to be correct)
+                if let exactMatch = potentialWineApps.first(where: { app in
+                    app.localizedName?.lowercased() == baseExeName
                 }) {
-                    // Quick validation of the match
-                    let windows = AccessibilityService.shared.listApplicationWindows(for: wineApp)
+                    // Quick validation with a single window check
+                    let windows = AccessibilityService.shared.listApplicationWindows(for: exactMatch)
                     if !windows.isEmpty {
-                        return (app: wineApp, url: url, iconCenter: iconCenter)
+                        return (app: exactMatch, url: url, iconCenter: iconCenter)
                     }
                 }
                 
-                // Fallback: Check only active apps with windows
-                let activeApps = workspace.runningApplications.filter { $0.isActive || $0.activationPolicy == .regular }
-                if let wineApp = activeApps.first(where: { app in
-                    let windows = AccessibilityService.shared.listApplicationWindows(for: app)
-                    return windows.contains { window in
+                // Then try partial matches
+                for wineApp in potentialWineApps {
+                    // Cache window list to avoid multiple calls
+                    let windows = AccessibilityService.shared.listApplicationWindows(for: wineApp)
+                    
+                    // Check if any window contains our target name
+                    if windows.contains(where: { window in
                         window.name.lowercased().contains(baseExeName)
+                    }) {
+                        return (app: wineApp, url: url, iconCenter: iconCenter)
                     }
-                }) {
-                    return (app: wineApp, url: url, iconCenter: iconCenter)
                 }
             }
             
