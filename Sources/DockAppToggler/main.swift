@@ -551,7 +551,26 @@ class WindowChooserView: NSView {
     }
     
     private func configureButton(_ button: NSButton, title: String, tag: Int) {
-        button.title = title
+        // Truncate title if too long
+        let maxTitleLength = 60
+        let truncatedTitle = title.count > maxTitleLength ? 
+            title.prefix(maxTitleLength) + "..." : 
+            title
+        
+        let windowInfo = options[tag]
+        
+        // Different alignment and padding based on window type
+        if windowInfo.isAppElement || windowInfo.cgWindowID != nil {
+            // Center align for app elements and CGWindows
+            button.alignment = .center
+            button.title = String(truncatedTitle)
+        } else {
+            // Left align for normal windows with padding for minimize button
+            button.alignment = .left
+            let leftPadding = "      "  // 6 spaces for padding
+            button.title = leftPadding + String(truncatedTitle)
+        }
+        
         button.bezelStyle = .inline
         button.tag = tag
         button.target = self
@@ -560,10 +579,12 @@ class WindowChooserView: NSView {
         
         button.isBordered = false
         button.font = .systemFont(ofSize: 13.5)
-        button.alignment = .center
+        
+        // Prevent line wrapping
+        button.lineBreakMode = .byTruncatingTail
+        button.cell?.wraps = false
         
         // Check if window is minimized
-        let windowInfo = options[tag]
         var minimizedValue: AnyObject?
         let isMinimized = AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success &&
                           (minimizedValue as? Bool == true)
@@ -1725,12 +1746,6 @@ class AccessibilityService {
         // Store CGWindow information for debugging and matching
         var cgWindows: [(id: CGWindowID, name: String?, bounds: CGRect)] = []
         
-        // Get the AXUIElement for the application
-        let axElement = AXUIElementCreateApplication(pid)
-        var value: AnyObject?
-        let axSupported = AXUIElementCopyAttributeValue(axElement, kAXRoleAttribute as CFString, &value) == .success
-
-        
             
         // Create a set of window IDs belonging to this app
         let cgWindowIDs = Set(windowList.compactMap { window -> CGWindowID? in
@@ -1745,19 +1760,24 @@ class AccessibilityService {
             let windowAlpha = window[kCGWindowAlpha as String] as? Float
             let windowSharingState = window[kCGWindowSharingState as String] as? Int32
             
+            // Check if the app name starts with any of the allowed prefixes
+            let allowedPrefixes = ["NoMachine", "Parallels"]
+            let appName = app.localizedName ?? ""
+            let allowNonZeroSharingState = allowedPrefixes.contains { appName.starts(with: $0) }
+            
             // Filter conditions for regular windows:
             // 1. Must belong to the app
             // 2. Must have a valid window ID and non-empty name
             // 3. Must be on the normal window layer (0)
             // 4. Must have normal alpha (1.0)
-            // 5. Must not be a system window
+            // 5. Must have normal sharing state (0) unless it's an allowed app
             guard (ownerPIDMatches || ownerNameMatches || bundleIDMatches),
-                  let windowID = window[kCGWindowNumber as String] as? CGWindowID,
-                  let name = windowName,
-                  !name.isEmpty,
-                  windowLayer == 0,  // Normal window layer
-                  windowAlpha == nil || windowAlpha! > 0.9,  // Normal opacity
-                  windowSharingState != 1  // Not a system window
+                let windowID = window[kCGWindowNumber as String] as? CGWindowID,
+                let name = windowName,
+                !name.isEmpty,
+                windowLayer == 0,  // Normal window layer
+                windowAlpha == nil || windowAlpha! > 0.9,  // Normal opacity
+                allowNonZeroSharingState || windowSharingState == 0  // Modified sharing state check
             else {
                 return nil
             }
@@ -1831,13 +1851,11 @@ class AccessibilityService {
                                 (minimizedValue as? Bool == true)
                 
                 // More permissive window inclusion logic
-                let isValidWindow = (!title.isEmpty) && // Must have a title
-                                   (cgWindowIDs.contains(windowID ?? 0) || // Either exists in CGWindow list
+                let isValidWindow = (cgWindowIDs.contains(windowID ?? 0) || // Either exists in CGWindow list
                                     isMinimized || // Or is minimized
                                     role == "AXWindow" || // Or is a standard window
                                     role == "AXDialog" || // Or is a dialog
-                                    subrole == "AXStandardWindow" || // Or has standard window subrole
-                                    subrole == "AXDialog") // Or has dialog subrole
+                                    subrole == "AXStandardWindow") // Or has standard window subrole
                 
                 if !isHidden && isValidWindow {
                     // Get window position and size
@@ -2551,22 +2569,49 @@ class DockService {
             return nil
         }
         
+        // Get URL attribute
         var urlUntyped: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, Constants.Accessibility.urlKey, &urlUntyped) == .success,
-              let urlRef = urlUntyped as? NSURL,
-              let url = urlRef as URL?,
-              let bundle = Bundle(url: url),
-              let bundleId = bundle.bundleIdentifier,
-              let app = workspace.runningApplications.first(where: { $0.bundleIdentifier == bundleId }) else {
-            return nil
-        }
+        let urlResult = AXUIElementCopyAttributeValue(element, Constants.Accessibility.urlKey, &urlUntyped)
         
-        // Get all windows for the app
-        let windows = AccessibilityService.shared.listApplicationWindows(for: app)
-        
-        // Only return the app if it has actual windows
-        if !windows.isEmpty {
-            return (app: app, url: url, iconCenter: iconCenter)
+        // Try standard URL method first
+        if urlResult == .success,
+           let urlRef = urlUntyped as? NSURL,
+           let url = urlRef as URL? {
+            
+            // Check if it's a Wine application (.exe)
+            if url.path.lowercased().hasSuffix(".exe") {
+                let baseExeName = url.deletingPathExtension().lastPathComponent.lowercased()
+                
+                // First try to find Wine processes directly (faster)
+                if let wineApp = workspace.runningApplications.first(where: { app in
+                    guard let processName = app.localizedName?.lowercased() else { return false }
+                    return processName.contains(baseExeName) || processName.contains("wine")
+                }) {
+                    // Quick validation of the match
+                    let windows = AccessibilityService.shared.listApplicationWindows(for: wineApp)
+                    if !windows.isEmpty {
+                        return (app: wineApp, url: url, iconCenter: iconCenter)
+                    }
+                }
+                
+                // Fallback: Check only active apps with windows
+                let activeApps = workspace.runningApplications.filter { $0.isActive || $0.activationPolicy == .regular }
+                if let wineApp = activeApps.first(where: { app in
+                    let windows = AccessibilityService.shared.listApplicationWindows(for: app)
+                    return windows.contains { window in
+                        window.name.lowercased().contains(baseExeName)
+                    }
+                }) {
+                    return (app: wineApp, url: url, iconCenter: iconCenter)
+                }
+            }
+            
+            // Standard bundle ID matching
+            if let bundle = Bundle(url: url),
+               let bundleId = bundle.bundleIdentifier,
+               let app = workspace.runningApplications.first(where: { $0.bundleIdentifier == bundleId }) {
+                return (app: app, url: url, iconCenter: iconCenter)
+            }
         }
         
         return nil
