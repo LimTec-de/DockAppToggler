@@ -3042,7 +3042,24 @@ class DockWatcher: NSObject, NSMenuDelegate {
         }
 
         Logger.debug("Processing click for app: \(app.localizedName ?? "Unknown")")
+
+        // Store the current mouse location and icon center before closing
+        let mouseLocation = NSEvent.mouseLocation
+        let iconCenter = DockService.shared.findAppUnderCursor(at: mouseLocation)?.iconCenter
+
+        // Process the click
+        let result = handleDockIconClick(app: app)
         
+        // Don't reopen the window chooser - let the hover behavior handle it
+        windowChooser?.close()
+        windowChooser = nil
+        lastHoveredApp = nil
+        
+        return result
+    }
+
+    // Add new helper method to handle the actual click logic
+    private func handleDockIconClick(app: NSRunningApplication) -> Bool {
         // Special handling for Finder
         if app.bundleIdentifier == "com.apple.finder" {
             // Get all windows and check for visible, non-desktop windows
@@ -3113,21 +3130,10 @@ class DockWatcher: NSObject, NSMenuDelegate {
                     configuration: configuration,
                     completionHandler: nil
                 )
-                
-                // Schedule menu refresh after app launch
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-                    guard let self = self else { return }
-                    if let (_, _, iconCenter) = DockService.shared.findAppUnderCursor(at: NSEvent.mouseLocation) {
-                        let updatedWindows = AccessibilityService.shared.listApplicationWindows(for: app)
-                        if !updatedWindows.isEmpty {
-                            self.displayWindowSelector(for: app, at: iconCenter, windows: updatedWindows)
-                        }
-                    }
-                }
             }
             return true
         }
-        
+
         // Check if there's exactly one window and if it's minimized
         if windows.count == 1 && !windows[0].isAppElement {
             let window = windows[0].window
