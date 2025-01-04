@@ -1044,38 +1044,6 @@ class WindowChooserView: NSView {
                 x: visibleFrame.minX,
                 y: screen == NSScreen.main ? 0 : visibleFrame.minY  // Set Y to 0 for primary screen only
             )
-            
-            // Set position first
-            if let positionValue = AXValueCreate(.cgPoint, &position) {
-                AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, positionValue)
-            }
-            usleep(1000)
-            
-            // Then set size
-            if let sizeValue = AXValueCreate(.cgSize, &newSize) {
-                AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, sizeValue)
-            }
-            usleep(1000)
-            
-            // Update all buttons after maximizing
-            if let index = options.firstIndex(where: { $0.window == window }) {
-                // Update maximize button image based on screen position
-                if let button = self.subviews.compactMap({ $0 as? NSButton })
-                    .first(where: { $0.tag == index && $0.action == #selector(maximizeWindow(_:)) }) {
-                    
-                    let isOnSecondary = isWindowOnSecondaryDisplay(window)
-                    let config = NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
-                    let symbolName = isOnSecondary ? "2.square.fill" : "square.fill"
-                    let image = NSImage(systemSymbolName: symbolName, 
-                                      accessibilityDescription: isOnSecondary ? "Move to Primary" : "Toggle Window Size")?
-                        .withSymbolConfiguration(config)
-                    
-                    button.image = image
-                    button.contentTintColor = Constants.UI.Theme.iconTintColor
-                }
-                
-                refreshButtons(for: window, at: index)
-            }
         } else {
             let margin = Constants.UI.screenEdgeMargin
             let usableWidth = (visibleFrame.width - (margin * 3)) / 2
@@ -1086,32 +1054,37 @@ class WindowChooserView: NSView {
             )
         }
         
-        // Set size and position in a single batch
+        // Set size and position in a single batch with proper error handling
         if let sizeValue = AXValueCreate(.cgSize, &newSize),
            let positionValue = AXValueCreate(.cgPoint, &position) {
-            // Set size first
-            AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, sizeValue)
+            
+            // Set position first
+            let posResult = AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, positionValue)
             usleep(1000)
             
-            // Set position
-            AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, positionValue)
+            // Then set size
+            let sizeResult = AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, sizeValue)
             usleep(1000)
+            
+            // Log results for debugging
+            Logger.debug("Position set result: \(posResult == .success ? "success" : "failed")")
+            Logger.debug("Size set result: \(sizeResult == .success ? "success" : "failed")")
+            
+            // Force window refresh to ensure it's frontmost
+            usleep(5000)
+            var refreshPos = CGPoint(x: position.x + 1, y: position.y)
+            if let refreshValue = AXValueCreate(.cgPoint, &refreshPos) {
+                AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, refreshValue)
+                usleep(1000)
+                
+                if let originalValue = AXValueCreate(.cgPoint, &position) {
+                    AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, originalValue)
+                }
+            }
             
             // Update all buttons after positioning
             if let index = options.firstIndex(where: { $0.window == window }) {
-                refreshButtons(for: window, at: index)  // Use refreshButtons instead of updateButtonColors
-            }
-        }
-        
-        // Force window refresh to ensure it's frontmost
-        usleep(5000)
-        var refreshPos = CGPoint(x: position.x + 1, y: position.y)
-        if let refreshValue = AXValueCreate(.cgPoint, &refreshPos) {
-            AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, refreshValue)
-            usleep(1000)
-            
-            if let originalValue = AXValueCreate(.cgPoint, &position) {
-                AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, originalValue)
+                refreshButtons(for: window, at: index)
             }
         }
     }
@@ -1209,9 +1182,11 @@ class WindowChooserView: NSView {
             let leftPosition = visibleFrame.minX + margin
             let rightPosition = visibleFrame.maxX - expectedWidth - margin
             
-            // Allow for some tolerance in position and size
-            let tolerance: CGFloat = 5.0
-            let isExpectedWidth = abs(size.width - expectedWidth) < tolerance
+            // Increase tolerance for position and size checks
+            let tolerance: CGFloat = 10.0  // Increased from 5.0
+            let widthTolerance: CGFloat = 20.0  // Separate tolerance for width
+            
+            let isExpectedWidth = abs(size.width - expectedWidth) < widthTolerance
             
             if onLeft {
                 return abs(position.x - leftPosition) < tolerance && isExpectedWidth
@@ -3070,6 +3045,8 @@ class DockWatcher: NSObject, NSMenuDelegate {
 
     // Add new helper method to handle the actual click logic
     private func handleDockIconClick(app: NSRunningApplication) -> Bool {
+        Logger.debug("Processing click for app: \(app.localizedName ?? "Unknown")")
+
         // Special handling for Finder
         if app.bundleIdentifier == "com.apple.finder" {
             // Get all windows and check for visible, non-desktop windows
@@ -3077,6 +3054,15 @@ class DockWatcher: NSObject, NSMenuDelegate {
             let hasVisibleTopmostWindow = app.isActive && windows.contains { windowInfo in
                 // Skip desktop window and app elements
                 guard !windowInfo.isAppElement else { return false }
+                
+                // Get window role and subrole
+                var roleValue: AnyObject?
+                var subroleValue: AnyObject?
+                let roleResult = AXUIElementCopyAttributeValue(windowInfo.window, kAXRoleAttribute as CFString, &roleValue)
+                let subroleResult = AXUIElementCopyAttributeValue(windowInfo.window, kAXSubroleAttribute as CFString, &subroleValue)
+                
+                let role = (roleValue as? String) ?? ""
+                let subrole = (subroleValue as? String) ?? ""
                 
                 // Check if window is visible and not minimized
                 var minimizedValue: AnyObject?
@@ -3086,15 +3072,17 @@ class DockWatcher: NSObject, NSMenuDelegate {
                 let isHidden = AXUIElementCopyAttributeValue(windowInfo.window, kAXHiddenAttribute as CFString, &hiddenValue) == .success &&
                               (hiddenValue as? Bool == true)
                 
-                // Check if window is a regular window
-                var roleValue: AnyObject?
-                let isRegularWindow = AXUIElementCopyAttributeValue(windowInfo.window, kAXRoleAttribute as CFString, &roleValue) == .success &&
-                                     (roleValue as? String == "AXWindow")
+                // Log window details for debugging
+                Logger.debug("Window '\(windowInfo.name)' - role: \(role) subrole: \(subrole) minimized: \(isMinimized) hidden: \(isHidden)")
                 
-                Logger.debug("Window '\(windowInfo.name)' - minimized: \(isMinimized), hidden: \(isHidden), regular window: \(isRegularWindow)")
+                // Consider window visible if:
+                // 1. It's a regular window (AXWindow) with standard dialog subrole
+                // 2. Not minimized or hidden
+                // 3. Not the desktop window
+                let isRegularWindow = role == "AXWindow" && subrole == "AXStandardWindow"
+                let isVisible = !isMinimized && !isHidden && isRegularWindow
                 
-                // Consider window visible if it's not minimized/hidden and is a regular window
-                return !isMinimized && !isHidden && isRegularWindow
+                return isVisible
             }
             
             Logger.debug("Finder active: \(app.isActive), has visible windows: \(hasVisibleTopmostWindow)")
