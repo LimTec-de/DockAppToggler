@@ -2097,38 +2097,37 @@ class AccessibilityService {
         Logger.debug("=== RAISING WINDOW ===")
         Logger.debug("Raising window - Name: \(windowInfo.name), ID: \(windowInfo.cgWindowID ?? 0)")
         
-        // First unminimize if needed
-        var minimizedValue: AnyObject?
-        if AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success,
-           let isMinimized = minimizedValue as? Bool,
-           isMinimized {
-            AXUIElementSetAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
-            usleep(10000)
-        }
+        // Get the window's owner PID
+        var pid: pid_t = 0
+        AXUIElementGetPid(windowInfo.window, &pid)
         
-        // Always activate the app first
-        app.activate(options: [.activateIgnoringOtherApps])
-        usleep(5000)
-        
-        // Use CGWindow APIs if we have a window ID
-        if let cgWindowID = windowInfo.cgWindowID {
-            Logger.debug("Using CGWindow APIs to raise window \(cgWindowID)")
-            raiseWindowWithCGWindow(windowID: cgWindowID)
+        // First try using CGWindow APIs if we have a window ID
+        if let windowID = windowInfo.cgWindowID {
+            Logger.debug("Using CGWindow APIs with ID: \(windowID)")
+            raiseCGWindow(windowID: windowID, ownerPID: pid)
         } else {
             Logger.debug("No CGWindowID available, using AX APIs")
+            // Unminimize first if needed
+            AXUIElementSetAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
+            
+            // Then raise the window
             AXUIElementPerformAction(windowInfo.window, kAXRaiseAction as CFString)
         }
         
-        // Final activation to ensure window is frontmost
-        usleep(5000)
+        // Activate the app
         app.activate(options: [.activateIgnoringOtherApps])
         
         Logger.debug("Completed raising window")
         Logger.debug("=== RAISING COMPLETE ===")
+        
+        // Important: Signal completion
+        Task { @MainActor in
+            NotificationCenter.default.post(name: NSNotification.Name("WindowRaiseComplete"), object: nil)
+        }
     }
 
     // Move raiseWindowWithCGWindow inside AccessibilityService as a private method
-    private func raiseWindowWithCGWindow(windowID: CGWindowID) {
+    private func raiseCGWindow(windowID: CGWindowID, ownerPID: pid_t) {
         // Get current window list
         let windowList = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] ?? []
         
@@ -2257,11 +2256,10 @@ class AccessibilityService {
             // Give windows time to restore
             try? await Task.sleep(nanoseconds: UInt64(0.1 * 1_000_000_000))
             
-            // Second pass: raise windows in correct order
-            for state in states.reversed() {
-                let windowInfo = WindowInfo(window: state.window, name: "")  // Name not needed for raising
+            // Second pass: only raise the last window
+            if let lastState = states.last {
+                let windowInfo = WindowInfo(window: lastState.window, name: "")  // Name not needed for raising
                 raiseWindow(windowInfo: windowInfo, for: app)
-                try? await Task.sleep(nanoseconds: UInt64(0.05 * 1_000_000_000))
             }
             
             // Final activation of the app
@@ -3314,32 +3312,34 @@ class DockWatcher: NSObject, NSMenuDelegate {
                 windowInfo.window == highlightedWindow
             }
             
-            // First restore all other windows
-            for windowInfo in others {
-                // Unminimize if needed
-                var minimizedValue: AnyObject?
-                if AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success,
-                   let isMinimized = minimizedValue as? Bool,
-                   isMinimized {
-                    AXUIElementSetAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
-                }
-                AccessibilityService.shared.raiseWindow(windowInfo: windowInfo, for: app)
-            }
-            
-            // Then restore the highlighted window last to make it frontmost
-            if let lastWindow = highlighted.first {
-                // Unminimize if needed
-                var minimizedValue: AnyObject?
-                if AXUIElementCopyAttributeValue(lastWindow.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success,
-                   let isMinimized = minimizedValue as? Bool,
-                   isMinimized {
-                    AXUIElementSetAttributeValue(lastWindow.window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
+            Task { @MainActor in
+                // First unminimize all windows without raising them
+                for windowInfo in windows {
+                    var minimizedValue: AnyObject?
+                    if AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success,
+                       let isMinimized = minimizedValue as? Bool,
+                       isMinimized {
+                        AXUIElementSetAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
+                        try? await Task.sleep(nanoseconds: 50_000_000) // 50ms delay
+                    }
                 }
                 
-                // Add a small delay to ensure other windows are restored
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                // Add delay before raising windows
+                try? await Task.sleep(nanoseconds: 200_000_000) // 200ms delay
+                
+                // Then raise only the highlighted window if it exists
+                if let lastWindow = highlighted.first {
                     AccessibilityService.shared.raiseWindow(windowInfo: lastWindow, for: app)
+                } else if let firstWindow = windows.first {
+                    // If no highlighted window, just raise the first one
+                    AccessibilityService.shared.raiseWindow(windowInfo: firstWindow, for: app)
                 }
+                
+                // Close the window chooser after window restoration is complete
+                try? await Task.sleep(nanoseconds: 100_000_000) // 100ms delay
+                windowChooser?.close()
+                windowChooser = nil
+                lastHoveredApp = nil
             }
             return true
         } else {
