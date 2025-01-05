@@ -92,8 +92,8 @@ struct Constants {
             
             static let minimizedTextColor = NSColor(name: nil) { appearance in
                 appearance.isDarkMode ? 
-                    NSColor(calibratedWhite: 0.3, alpha: 1.0) : 
-                    NSColor(calibratedWhite: 0.6, alpha: 1.0)
+                    NSColor(calibratedWhite: 0.6, alpha: 0.4) : 
+                    NSColor(calibratedWhite: 0.6, alpha: 0.4)
             }
             
             // Alias for semantic usage
@@ -840,7 +840,20 @@ class WindowChooserView: NSView {
     
     @objc private func hideButtonClicked(_ sender: NSButton) {
         let windowInfo = options[sender.tag]
-        AccessibilityService.shared.minimizeWindow(windowInfo: windowInfo, for: targetApp)
+        
+        // Check current minimized state
+        var minimizedValue: AnyObject?
+        let isMinimized = AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success &&
+                          (minimizedValue as? Bool == true)
+        
+        if isMinimized {
+            // Unminimize and raise the window
+            AXUIElementSetAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
+            AccessibilityService.shared.raiseWindow(windowInfo: windowInfo, for: targetApp)
+        } else {
+            // Minimize the window
+            AccessibilityService.shared.minimizeWindow(windowInfo: windowInfo, for: targetApp)
+        }
         
         // Add a small delay to ensure window state has updated
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
@@ -861,6 +874,39 @@ class WindowChooserView: NSView {
                 }
             }
         }
+    }
+
+    private func createCustomBadgeIcon(baseSymbol: String, badgeNumber: String, config: NSImage.SymbolConfiguration) -> NSImage? {
+        // Create the base symbol image with theme-aware color
+        let isDark = self.effectiveAppearance.isDarkMode
+        let symbolConfig = config.applying(.init(paletteColors: [
+            isDark ? .white : NSColor(white: 0.2, alpha: 1.0)
+        ]))
+        
+        guard let baseImage = NSImage(systemSymbolName: baseSymbol, accessibilityDescription: "Base icon")?
+                .withSymbolConfiguration(symbolConfig) else {
+            return nil
+        }
+        
+        let size = NSSize(width: 15, height: 13) // Custom size for the icon with a badge
+        let image = NSImage(size: size)
+        
+        image.lockFocus()
+        baseImage.draw(in: NSRect(origin: .zero, size: size))
+        
+        // Draw the badge text ("2") at the top-right corner with theme-aware color
+        let badgeText = badgeNumber as NSString
+        let textAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 8, weight: .bold),
+            .foregroundColor: Constants.UI.Theme.iconSecondaryTintColor
+        ]
+        
+        let badgeSize = badgeText.size(withAttributes: textAttributes)
+        let badgeOrigin = NSPoint(x: size.width - badgeSize.width - 5, y: size.height - badgeSize.height - 2)
+        badgeText.draw(at: badgeOrigin, withAttributes: textAttributes)
+        
+        image.unlockFocus()
+        return image
     }
     
     // Add new method to create side buttons
@@ -887,25 +933,53 @@ class WindowChooserView: NSView {
         ))
         
         // Create button image with larger size
-        let config = NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold)  // Back to original size of 11
-        
+        let config = NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold)  // Keep original size of 11
+
         let imageName: String
         let accessibilityDescription: String
-        
+
         if isCenter {
             let isOnSecondary = isWindowOnSecondaryDisplay(windowInfo.window)
-            imageName = isOnSecondary ? "2.square.fill" : "square.fill"
+            let isMaximized = isWindowMaximized(windowInfo.window)  // Add this line
+            let config = NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
+                .applying(.init(paletteColors: [isMaximized ? Constants.UI.Theme.iconTintColor : Constants.UI.Theme.iconSecondaryTintColor]))  // Update this line
+
+            button.title = "" // Ensure no fallback text appears
+
+            if isOnSecondary {
+                // Create custom icon with "2" badge
+                if let badgeIcon = createCustomBadgeIcon(baseSymbol: "square.fill", badgeNumber: "2", config: config) {
+                    button.image = badgeIcon
+                } else {
+                    print("Error: Failed to create custom badge icon")
+                    button.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: "Error icon")
+                }
+            } else {
+                // Use the plain "square.fill" icon with correct tint
+                if let image = NSImage(systemSymbolName: "square.fill", accessibilityDescription: "Toggle Window Size")?.withSymbolConfiguration(config) {
+                    button.image = image
+                } else {
+                    print("Error: square.fill not supported on this system")
+                    button.image = NSImage(systemSymbolName: "questionmark.circle.fill", accessibilityDescription: "Fallback icon")
+                }
+            }
+            
+            // Set initial color based on maximized state
+            button.contentTintColor = isMaximized ? Constants.UI.Theme.iconTintColor : Constants.UI.Theme.iconSecondaryTintColor
             accessibilityDescription = isOnSecondary ? "Move to Primary" : "Toggle Window Size"
         } else {
-            // Use filled chevron icons for left/right
-            imageName = isLeft ? "chevron.left.circle.fill" : "chevron.right.circle.fill"
-            accessibilityDescription = isLeft ? "Move Left" : "Move Right"
+            // Use rectangle.lefthalf/righthalf.filled icons instead of chevrons
+            imageName = isLeft ? "rectangle.lefthalf.filled" : "rectangle.righthalf.filled"
+            accessibilityDescription = isLeft ? "Snap Left" : "Snap Right"
+            let image = NSImage(systemSymbolName: imageName, accessibilityDescription: accessibilityDescription)?
+                .withSymbolConfiguration(config)
+            button.image = image
         }
-        
-        let image = NSImage(systemSymbolName: imageName, accessibilityDescription: accessibilityDescription)?
-            .withSymbolConfiguration(config)
-        button.image = image
-        button.imagePosition = .imageOnly
+
+        // Remove the original image setting code since we're handling it in the conditions above
+        // let image = NSImage(systemSymbolName: imageName, accessibilityDescription: accessibilityDescription)?
+        //     .withSymbolConfiguration(config)
+        // button.image = image
         
         // Configure button appearance
         button.bezelStyle = .inline
@@ -980,6 +1054,15 @@ class WindowChooserView: NSView {
         if isDoubleClick && NSScreen.screens.count > 1 {
             // Double-click behavior - move to secondary display
             positionWindow(window, maximize: true, useSecondaryDisplay: true)
+            
+            // Add refresh after a small delay to ensure window has moved
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                self?.refreshButtons(for: window, at: sender.tag)
+                // Also refresh the entire menu to update all states
+                if let windowController = self?.window?.windowController as? WindowChooserController {
+                    windowController.refreshMenu()
+                }
+            }
         } else {
             // Single click behavior
             if isWindowMaximized(window) {
@@ -1085,6 +1168,22 @@ class WindowChooserView: NSView {
             // Update all buttons after positioning
             if let index = options.firstIndex(where: { $0.window == window }) {
                 refreshButtons(for: window, at: index)
+                
+                // Also find and update the maximize button specifically
+                if let maximizeButton = self.subviews.compactMap({ $0 as? NSButton })
+                    .first(where: { $0.tag == index && $0.action == #selector(maximizeWindow(_:)) }) {
+                    
+                    // Update maximize button appearance for non-maximized state
+                    let config = NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
+                        .applying(.init(paletteColors: [Constants.UI.Theme.iconSecondaryTintColor]))
+                    
+                    if let image = NSImage(systemSymbolName: "square.fill", 
+                                          accessibilityDescription: "Toggle Window Size")?
+                        .withSymbolConfiguration(config) {
+                        maximizeButton.image = image
+                    }
+                    maximizeButton.contentTintColor = Constants.UI.Theme.iconSecondaryTintColor
+                }
             }
         }
     }
@@ -1200,11 +1299,19 @@ class WindowChooserView: NSView {
     @objc private func moveWindowLeft(_ sender: NSButton) {
         let window = options[sender.tag].window
         positionWindow(window, onLeft: true)
+        // Add small delay to ensure window has moved
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            self?.refreshButtons(for: window, at: sender.tag)
+        }
     }
     
     @objc private func moveWindowRight(_ sender: NSButton) {
         let window = options[sender.tag].window
         positionWindow(window, onLeft: false)
+        // Add small delay to ensure window has moved
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            self?.refreshButtons(for: window, at: sender.tag)
+        }
     }
     
     // Add method to check if window is on secondary display
