@@ -634,7 +634,17 @@ class WindowChooserView: NSView {
                     let hoverColor = isDark ? 
                         NSColor(white: 0.3, alpha: 0.4) :  // Darker background in dark mode
                         NSColor(white: 0.8, alpha: 0.4)    // Lighter background in light mode
-                    button.layer?.backgroundColor = hoverColor.cgColor
+                    
+                    // Create a background view that spans the full width
+                    let backgroundView = NSView(frame: NSRect(x: 0, y: button.frame.minY, width: self.bounds.width, height: button.frame.height))
+                    backgroundView.wantsLayer = true
+                    backgroundView.layer?.backgroundColor = hoverColor.cgColor
+                    // Use accessibility identifier instead of tag
+                    backgroundView.setAccessibilityIdentifier("hover-background-\(button.tag)")
+                    
+                    // Insert the background view below all other views
+                    self.addSubview(backgroundView, positioned: .below, relativeTo: nil)
+                    
                     // Brighten text
                     button.contentTintColor = Constants.UI.Theme.primaryTextColor
                     button.alphaValue = 1.0  // Full opacity on hover
@@ -650,8 +660,13 @@ class WindowChooserView: NSView {
                 
                 // Check if this is a menu button
                 if event.trackingArea?.userInfo?["isMenuButton"] as? Bool == true {
-                    // Clear hover background
-                    button.layer?.backgroundColor = .clear
+                    // Remove the background view
+                    self.subviews.forEach { view in
+                        if view.accessibilityIdentifier() == "hover-background-\(button.tag)" {
+                            view.removeFromSuperview()
+                        }
+                    }
+                    
                     // Restore original text color and opacity
                     if options[button.tag].window != topmostWindow {
                         button.contentTintColor = Constants.UI.Theme.secondaryTextColor
