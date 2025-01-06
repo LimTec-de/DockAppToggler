@@ -1,0 +1,2 @@
+ShowUpdate Window in front of all other windows
+Do not block the main thread if update window is shown
