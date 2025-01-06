@@ -498,6 +498,8 @@ class WindowChooserView: NSView {
     }
     
     private func createButton(for windowInfo: WindowInfo, at index: Int) -> NSButton {
+        let button = NSButton()
+        
         // Adjust button width and position based on whether it needs control buttons
         let buttonWidth: CGFloat
         let buttonX: CGFloat
@@ -512,17 +514,24 @@ class WindowChooserView: NSView {
                 (Constants.UI.leftSideButtonWidth + Constants.UI.centerButtonWidth + Constants.UI.rightSideButtonWidth + Constants.UI.sideButtonsSpacing * 2) - 8
             buttonX = 44  // Move right to make room for close button
         }
-
-        let button = NSButton(frame: NSRect(
+        
+        button.frame = NSRect(
             x: buttonX,
             y: frame.height - Constants.UI.titleHeight - CGFloat(index + 1) * Constants.UI.buttonSpacing - Constants.UI.verticalPadding,
             width: buttonWidth,
             height: Constants.UI.buttonHeight
-        ))
+        )
         
         configureButton(button, title: windowInfo.name, tag: index)
         
-        addHoverEffect(to: button)
+        // Add tracking area for hover effect
+        let trackingArea = NSTrackingArea(
+            rect: button.bounds,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: button,
+            userInfo: ["isMenuButton": true]  // Mark this as a menu button for line hover handling
+        )
+        button.addTrackingArea(trackingArea)
         
         return button
     }
@@ -546,6 +555,19 @@ class WindowChooserView: NSView {
            let isMinimized = minimizedValue as? Bool {
             button.updateMinimizedState(isMinimized)
         }
+        
+        button.wantsLayer = true
+        button.layer?.cornerRadius = 4
+        button.layer?.masksToBounds = true
+        
+        // Add tracking area for hover effect
+        let trackingArea = NSTrackingArea(
+            rect: button.bounds,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: button,
+            userInfo: ["isControlButton": true]  // Mark this as a control button
+        )
+        button.addTrackingArea(trackingArea)
         
         return button
     }
@@ -601,25 +623,6 @@ class WindowChooserView: NSView {
         // Add hover effect background
         button.layer?.cornerRadius = 4
         button.layer?.masksToBounds = true
-        
-        // Add tracking area for hover effect
-        let trackingArea = NSTrackingArea(
-            rect: button.bounds,
-            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],  // Changed from .activeInKeyWindow to .activeAlways
-            owner: button,
-            userInfo: ["isMenuButton": true]  // Mark this as a menu button for hover handling
-        )
-        button.addTrackingArea(trackingArea)
-    }
-    
-    private func addHoverEffect(to button: NSButton) {
-        let trackingArea = NSTrackingArea(
-            rect: button.bounds,
-            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],  // Changed from .activeInKeyWindow to .activeAlways
-            owner: button,
-            userInfo: nil
-        )
-        button.addTrackingArea(trackingArea)
     }
     
     override func mouseEntered(with event: NSEvent) {
@@ -627,28 +630,32 @@ class WindowChooserView: NSView {
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = 0.1  // Quick fade in
                 
-                // Check if this is a menu button
+                let isDark = self.effectiveAppearance.isDarkMode
+                
                 if event.trackingArea?.userInfo?["isMenuButton"] as? Bool == true {
-                    // Set hover background color with higher contrast
-                    let isDark = self.effectiveAppearance.isDarkMode
+                    // Full line highlight
                     let hoverColor = isDark ? 
                         NSColor(white: 0.3, alpha: 0.4) :  // Darker background in dark mode
                         NSColor(white: 0.8, alpha: 0.4)    // Lighter background in light mode
                     
-                    // Create a background view that spans the full width
                     let backgroundView = NSView(frame: NSRect(x: 0, y: button.frame.minY, width: self.bounds.width, height: button.frame.height))
                     backgroundView.wantsLayer = true
                     backgroundView.layer?.backgroundColor = hoverColor.cgColor
-                    // Use accessibility identifier instead of tag
                     backgroundView.setAccessibilityIdentifier("hover-background-\(button.tag)")
                     
-                    // Insert the background view below all other views
                     self.addSubview(backgroundView, positioned: .below, relativeTo: nil)
+                } else if event.trackingArea?.userInfo?["isControlButton"] as? Bool == true {
+                    // Control button highlight (minimize, close, etc.)
+                    let buttonHoverColor = isDark ? 
+                        NSColor(white: 0.4, alpha: 0.6) :  // Darker for control buttons
+                        NSColor(white: 0.7, alpha: 0.6)
                     
-                    // Brighten text
-                    button.contentTintColor = Constants.UI.Theme.primaryTextColor
-                    button.alphaValue = 1.0  // Full opacity on hover
+                    button.layer?.backgroundColor = buttonHoverColor.cgColor
                 }
+                
+                // Always brighten the button itself
+                button.contentTintColor = Constants.UI.Theme.primaryTextColor
+                button.alphaValue = 1.0
             }
         }
     }
@@ -658,20 +665,22 @@ class WindowChooserView: NSView {
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = 0.1  // Quick fade out
                 
-                // Check if this is a menu button
                 if event.trackingArea?.userInfo?["isMenuButton"] as? Bool == true {
-                    // Remove the background view
+                    // Remove the line highlight
                     self.subviews.forEach { view in
                         if view.accessibilityIdentifier() == "hover-background-\(button.tag)" {
                             view.removeFromSuperview()
                         }
                     }
-                    
-                    // Restore original text color and opacity
-                    if options[button.tag].window != topmostWindow {
-                        button.contentTintColor = Constants.UI.Theme.secondaryTextColor
-                        button.alphaValue = 0.8  // Slightly transparent when not hovered
-                    }
+                } else if event.trackingArea?.userInfo?["isControlButton"] as? Bool == true {
+                    // Remove control button highlight
+                    button.layer?.backgroundColor = .clear
+                }
+                
+                // Always restore original button state
+                if options[button.tag].window != topmostWindow {
+                    button.contentTintColor = Constants.UI.Theme.secondaryTextColor
+                    button.alphaValue = 0.8
                 }
             }
         }
@@ -1015,7 +1024,14 @@ class WindowChooserView: NSView {
             Constants.UI.Theme.iconTintColor : 
             Constants.UI.Theme.iconSecondaryTintColor
         
-        addHoverEffect(to: button)
+        // Add tracking area for hover effect
+        let trackingArea = NSTrackingArea(
+            rect: button.bounds,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: button,
+            userInfo: ["isControlButton": true]  // Mark this as a control button
+        )
+        button.addTrackingArea(trackingArea)
         
         if windowInfo.isAppElement {
             // Hide the button for app elements
