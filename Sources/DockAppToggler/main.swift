@@ -605,7 +605,7 @@ class WindowChooserView: NSView {
         // Add tracking area for hover effect
         let trackingArea = NSTrackingArea(
             rect: button.bounds,
-            options: [.mouseEnteredAndExited, .activeInKeyWindow],
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],  // Changed from .activeInKeyWindow to .activeAlways
             owner: button,
             userInfo: ["isMenuButton": true]  // Mark this as a menu button for hover handling
         )
@@ -615,7 +615,7 @@ class WindowChooserView: NSView {
     private func addHoverEffect(to button: NSButton) {
         let trackingArea = NSTrackingArea(
             rect: button.bounds,
-            options: [.mouseEnteredAndExited, .activeInKeyWindow],
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],  // Changed from .activeInKeyWindow to .activeAlways
             owner: button,
             userInfo: nil
         )
@@ -629,13 +629,15 @@ class WindowChooserView: NSView {
                 
                 // Check if this is a menu button
                 if event.trackingArea?.userInfo?["isMenuButton"] as? Bool == true {
-                    // Set hover background color
-                    button.layer?.backgroundColor = NSColor(white: 0.5, alpha: 0.2).cgColor
+                    // Set hover background color with higher contrast
+                    let isDark = self.effectiveAppearance.isDarkMode
+                    let hoverColor = isDark ? 
+                        NSColor(white: 0.3, alpha: 0.4) :  // Darker background in dark mode
+                        NSColor(white: 0.8, alpha: 0.4)    // Lighter background in light mode
+                    button.layer?.backgroundColor = hoverColor.cgColor
                     // Brighten text
                     button.contentTintColor = Constants.UI.Theme.primaryTextColor
-                } else {
-                    // Existing hover handling for other buttons
-                    // ... (keep existing code)
+                    button.alphaValue = 1.0  // Full opacity on hover
                 }
             }
         }
@@ -650,13 +652,11 @@ class WindowChooserView: NSView {
                 if event.trackingArea?.userInfo?["isMenuButton"] as? Bool == true {
                     // Clear hover background
                     button.layer?.backgroundColor = .clear
-                    // Restore original text color
+                    // Restore original text color and opacity
                     if options[button.tag].window != topmostWindow {
                         button.contentTintColor = Constants.UI.Theme.secondaryTextColor
+                        button.alphaValue = 0.8  // Slightly transparent when not hovered
                     }
-                } else {
-                    // Existing hover exit handling for other buttons
-                    // ... (keep existing code)
                 }
             }
         }
