@@ -27,6 +27,7 @@ let package = Package(
             resources: [
                 .process("Resources/icon.icns"),
                 .process("Resources/icon.png"),
+                .process("Resources/trayicon.png"),
                 .process("Resources/sparkle.entitlements"),
                 .process("DockAppToggler.entitlements")
             ],
