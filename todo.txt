@@ -1,2 +1,9 @@
 ShowUpdate Window in front of all other windows
 Do not block the main thread if update window is shown
+readme überarbeiten mit screenshot
+auf github webseite anlegen
+impressum, sponsoring etc angeben (patreon)
+tray icon tooltip
+thumbnail (später)
+beim ersten start frägt er nach zwei permissions (man muss danach neustarten)
+

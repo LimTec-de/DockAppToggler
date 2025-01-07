@@ -644,18 +644,18 @@ class WindowChooserView: NSView {
                     backgroundView.setAccessibilityIdentifier("hover-background-\(button.tag)")
                     
                     self.addSubview(backgroundView, positioned: .below, relativeTo: nil)
-                } else if event.trackingArea?.userInfo?["isControlButton"] as? Bool == true {
+                }/* else if event.trackingArea?.userInfo?["isControlButton"] as? Bool == true {
                     // Control button highlight (minimize, close, etc.)
                     let buttonHoverColor = isDark ? 
                         NSColor(white: 0.4, alpha: 0.6) :  // Darker for control buttons
                         NSColor(white: 0.7, alpha: 0.6)
                     
                     button.layer?.backgroundColor = buttonHoverColor.cgColor
-                }
+                }*/
                 
                 // Always brighten the button itself
-                button.contentTintColor = Constants.UI.Theme.primaryTextColor
-                button.alphaValue = 1.0
+                //button.contentTintColor = Constants.UI.Theme.primaryTextColor
+                //button.alphaValue = 1.0
             }
         }
     }
@@ -672,10 +672,10 @@ class WindowChooserView: NSView {
                             view.removeFromSuperview()
                         }
                     }
-                } else if event.trackingArea?.userInfo?["isControlButton"] as? Bool == true {
+                } /* else if event.trackingArea?.userInfo?["isControlButton"] as? Bool == true {
                     // Remove control button highlight
                     button.layer?.backgroundColor = .clear
-                }
+                }*/
                 
                 // Always restore original button state
                 if options[button.tag].window != topmostWindow {
@@ -2770,67 +2770,134 @@ class DockService {
 // Update DockWatcher to use DockService
 @MainActor
 class DockWatcher: NSObject, NSMenuDelegate {
+    // Private backing storage
+    private var _heartbeatTimer: Timer?
+    private var _lastEventTime: TimeInterval = ProcessInfo.processInfo.systemUptime
+    private var _isEventTapActive: Bool = false
+    private var _chooserControllers: [NSRunningApplication: WindowChooserController] = [:]
+    private var _windowChooser: WindowChooserController?
+    private var _menuShowTask: DispatchWorkItem?
+    
+    // Public MainActor properties
+    @MainActor var heartbeatTimer: Timer? {
+        get { _heartbeatTimer }
+        set {
+            _heartbeatTimer?.invalidate()
+            _heartbeatTimer = newValue
+        }
+    }
+    
+    @MainActor var chooserControllers: [NSRunningApplication: WindowChooserController] {
+        get { _chooserControllers }
+        set { _chooserControllers = newValue }
+    }
+    
+    @MainActor var windowChooser: WindowChooserController? {
+        get { _windowChooser }
+        set { _windowChooser = newValue }
+    }
+    
+    @MainActor var menuShowTask: DispatchWorkItem? {
+        get { _menuShowTask }
+        set { _menuShowTask = newValue }
+    }
+    
+    // Other properties
     nonisolated(unsafe) private var eventTap: CFMachPort?
     nonisolated(unsafe) private var runLoopSource: CFRunLoopSource?
-    nonisolated(unsafe) private var windowChooser: WindowChooserController?
-    nonisolated(unsafe) private var menuShowTask: DispatchWorkItem?
     private var lastHoveredApp: NSRunningApplication?
     private var lastWindowOrder: [AXUIElement]?
     private let menuShowDelay: TimeInterval = 0.01
     private var lastClickTime: TimeInterval = 0
     private let clickDebounceInterval: TimeInterval = 0.3
     private var clickedApp: NSRunningApplication?
-    private let dismissalMargin: CGFloat = 20.0  // Add this line
+    private let dismissalMargin: CGFloat = 20.0
     private var lastMouseMoveTime: TimeInterval = 0
     private var isContextMenuActive: Bool = false
-    // Add strong reference to prevent deallocation
-    private var chooserControllers: [NSRunningApplication: WindowChooserController] = [:]
-    // In DockWatcher class, add a new property
     private var contextMenuMonitor: Any?
-    // In DockWatcher class, add NSMenuDelegate conformance and a new property
     private var dockMenu: NSMenu?
-    // Add a new property to DockWatcher class
     private var lastClickedDockIcon: NSRunningApplication?
-    // Add property to track the last right-clicked dock icon
     private var lastRightClickedDockIcon: NSRunningApplication?
-    // Add a property to track if we're showing the window chooser on click
     private var showingWindowChooserOnClick: Bool = false
-    // Add a new property to DockWatcher class
     private var skipNextClickProcessing: Bool = false
+    private let eventTimeoutInterval: TimeInterval = 5.0  // 5 seconds timeout
     
     override init() {
-        super.init()  // Add super.init() call
+        super.init()
         setupEventTap()
         setupNotifications()
-        setupDockMenuTracking()  // Add this line
+        setupDockMenuTracking()
+        startHeartbeat()  // Add heartbeat monitoring
         Logger.info("DockWatcher initialized")
     }
     
-    nonisolated private func cleanup() {
-        DispatchQueue.main.async { [weak self] in
-            // Cancel any pending tasks
-            self?.menuShowTask?.cancel()
+    private func startHeartbeat() {
+        // Stop existing timer if any
+        heartbeatTimer?.invalidate()
+        
+        // Create new timer
+        heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
             
-            // Clean up all window choosers
-            self?.chooserControllers.values.forEach { $0.close() }
-            self?.chooserControllers.removeAll()
-            
-            self?.windowChooser?.close()
-            self?.windowChooser = nil
+            Task { @MainActor in
+                let currentTime = ProcessInfo.processInfo.systemUptime
+                let timeSinceLastEvent = currentTime - self._lastEventTime
+                
+                if timeSinceLastEvent > self.eventTimeoutInterval {
+                    Logger.warning("Event tap appears inactive (no events for \(Int(timeSinceLastEvent)) seconds). Reinitializing...")
+                    self.reinitializeEventTap()
+                }
+            }
         }
     }
-    
-    deinit {
-        // Remove observer
-        NotificationCenter.default.removeObserver(self)
+
+    @MainActor private func reinitializeEventTap() {
+        Logger.info("Reinitializing event tap...")
         
-        // Clean up event tap
+        // Clean up existing event tap
         if let tap = eventTap {
             CGEvent.tapEnable(tap: tap, enable: false)
             CFMachPortInvalidate(tap)
         }
         
-        // Clean up run loop source
+        if let source = runLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .commonModes)
+        }
+        
+        // Reset properties
+        eventTap = nil
+        runLoopSource = nil
+        _isEventTapActive = false
+        
+        // Reinitialize
+        setupEventTap()
+        
+        // Verify the event tap was created successfully
+        if let tap = eventTap {
+            CGEvent.tapEnable(tap: tap, enable: true)
+            _isEventTapActive = true
+            Logger.success("Event tap reinitialized successfully")
+        } else {
+            Logger.error("Failed to reinitialize event tap")
+        }
+        
+        // Update last event time to prevent immediate retry
+        _lastEventTime = ProcessInfo.processInfo.systemUptime
+    }
+
+    @MainActor private func updateLastEventTime() {
+        _lastEventTime = ProcessInfo.processInfo.systemUptime
+        _isEventTapActive = true
+    }
+
+    nonisolated private func cleanup() {
+        // Clean up event tap synchronously
+        if let tap = eventTap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+            CFMachPortInvalidate(tap)
+        }
+        
+        // Clean up run loop source synchronously
         if let source = runLoopSource {
             CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .commonModes)
             CFRunLoopSourceInvalidate(source)
@@ -2840,12 +2907,51 @@ class DockWatcher: NSObject, NSMenuDelegate {
         eventTap = nil
         runLoopSource = nil
         
-        // Call cleanup synchronously before deinit completes
+        // Clean up timer and tasks on main thread
+        _ = DispatchQueue.main.sync {
+            Task { @MainActor in
+                _menuShowTask?.cancel()
+                _menuShowTask = nil
+                _heartbeatTimer?.invalidate()
+                _heartbeatTimer = nil
+            }
+        }
+    }
+
+    @MainActor private func cleanupWindows() {
+        // Hide windows immediately
+        for controller in _chooserControllers.values {
+            controller.window?.orderOut(nil)
+        }
+        _windowChooser?.window?.orderOut(nil)
+        
+        // Clear references
+        _chooserControllers.removeAll()
+        _windowChooser = nil
+    }
+
+    deinit {
+        // Remove observer
+        NotificationCenter.default.removeObserver(self)
+        
+        // Call cleanup
         cleanup()
+        
+        // Clean up UI components synchronously on main thread
+        DispatchQueue.main.sync {
+            // Hide windows immediately
+            chooserControllers.values.forEach { $0.window?.orderOut(nil) }
+            windowChooser?.window?.orderOut(nil)
+            
+            // Clear references
+            chooserControllers.removeAll()
+            windowChooser = nil
+        }
     }
     
     private func setupEventTap() {
         guard AccessibilityService.shared.requestAccessibilityPermissions() else {
+            Logger.error("Failed to get accessibility permissions")
             return
         }
         
@@ -2866,6 +2972,19 @@ class DockWatcher: NSObject, NSMenuDelegate {
             
             let watcher = Unmanaged<DockWatcher>.fromOpaque(refconUnwrapped).takeUnretainedValue()
             let location = event.location
+            
+            // Update last event time for heartbeat
+            Task { @MainActor in
+                watcher.updateLastEventTime()
+            }
+            
+            // Check if the event tap is enabled
+            if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+                Task { @MainActor in
+                    watcher.reinitializeEventTap()
+                }
+                return Unmanaged.passRetained(event)
+            }
             
             switch type {
             case .mouseMoved:
@@ -2958,7 +3077,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
             callback: callback,
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else {
-            Logger.warning("Failed to create event tap")
+            Logger.error("Failed to create event tap")
             return
         }
         
@@ -2969,6 +3088,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
         self.runLoopSource = runLoopSource
         
         CGEvent.tapEnable(tap: tap, enable: true)
+        _isEventTapActive = true
         
         Logger.success("Successfully started monitoring mouse movements")
     }
@@ -3274,7 +3394,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
         let windows = AccessibilityService.shared.listApplicationWindows(for: app)
         
         // If we only have the app entry (no real windows), handle launch
-        if windows.count == 1 && windows[0].isAppElement {
+        if windows.count == 0 || windows[0].isAppElement {
             Logger.debug("App has no windows, launching")
             app.activate(options: [.activateIgnoringOtherApps])
             if let bundleURL = app.bundleURL {
