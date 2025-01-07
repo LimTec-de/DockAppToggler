@@ -2,5 +2,4 @@ auf github webseite anlegen
 impressum, sponsoring etc angeben (patreon)
 tray icon tooltip
 thumbnail (später)
-beim ersten start frägt er nach zwei permissions (man muss danach neustarten)
-
+anwendungsumschalter (später)
