@@ -1818,6 +1818,12 @@ extension NSPoint {
 @MainActor
 class AccessibilityService {
     static let shared = AccessibilityService()
+    private var hasShownPermissionDialog = false
+    private var isCheckingPermissions = false
+    private var permissionCheckTimer: Timer?
+    
+    // Add static constant for the prompt key
+    private static let trustedCheckOptionPrompt = "AXTrustedCheckOptionPrompt"
     
     // Modify the window state struct to include order
     private var windowStates: [pid_t: [(window: AXUIElement, wasVisible: Bool, order: Int, stackOrder: Int)]] = [:]
@@ -1825,31 +1831,70 @@ class AccessibilityService {
     private init() {}
     
     func requestAccessibilityPermissions() -> Bool {
-        let trusted = AXIsProcessTrusted()
-        Logger.info("🔐 Accessibility \(trusted ? "granted" : "not granted - please grant in System Settings")")
+        // First check if we already have permissions
+        if AXIsProcessTrusted() {
+            return true
+        }
         
-        if !trusted {
-            Logger.warning("⚠️ Please grant accessibility permissions in System Settings > Privacy & Security > Accessibility")
+        // If not, and we haven't shown the dialog yet, request permissions
+        if !hasShownPermissionDialog {
+            hasShownPermissionDialog = true
             
-            // Create an alert to guide the user
-            let alert = NSAlert()
-            alert.messageText = "Accessibility Permissions Required"
-            alert.informativeText = "DockAppToggler requires accessibility permissions to function properly. Please grant these permissions in System Settings > Privacy & Security > Accessibility."
-            alert.alertStyle = .warning
-            alert.addButton(withTitle: "Open System Settings")
-            alert.addButton(withTitle: "Cancel")
+            // Request permissions with prompt using static string
+            let options = [Self.trustedCheckOptionPrompt: true] as CFDictionary
+            let result = AXIsProcessTrustedWithOptions(options)
             
-            // Show the alert and handle the response
-            let response = alert.runModal()
-            if response == .alertFirstButtonReturn {
-                // Open the Accessibility settings
-                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
-                    NSWorkspace.shared.open(url)
+            // Start checking for permission changes if we don't have them yet
+            if !result && !isCheckingPermissions {
+                isCheckingPermissions = true
+                startPermissionCheck()
+            }
+            
+            return result
+        }
+        
+        return false
+    }
+    
+    private func startPermissionCheck() {
+        // Invalidate existing timer if any
+        permissionCheckTimer?.invalidate()
+        
+        // Create new timer on the main thread
+        permissionCheckTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                
+                if AXIsProcessTrusted() {
+                    self.permissionCheckTimer?.invalidate()
+                    self.permissionCheckTimer = nil
+                    self.isCheckingPermissions = false
+                    await self.offerRestart()
                 }
             }
         }
+    }
+    
+    private func offerRestart() async {
+        let alert = NSAlert()
+        alert.messageText = "Accessibility Permissions Granted"
+        alert.informativeText = "DockAppToggler needs to restart to function properly. Would you like to restart now?"
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Restart Now")
+        alert.addButton(withTitle: "Later")
         
-        return trusted
+        if alert.runModal() == .alertFirstButtonReturn {
+            // Get the path to the current executable
+            if let executablePath = Bundle.main.executablePath {
+                // Launch a new instance of the app
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: executablePath)
+                try? process.run()
+                
+                // Terminate the current instance
+                NSApp.terminate(nil)
+            }
+        }
     }
     
     func listApplicationWindows(for app: NSRunningApplication) -> [WindowInfo] {
@@ -3690,58 +3735,11 @@ class LoginItemManager {
 // Add near the start of the application entry point
 Logger.info("Starting Dock App Toggler...")
 
-// Create a dedicated service for accessibility checks
-@MainActor
-final class AccessibilityPermissionService: @unchecked Sendable {
-    static let shared = AccessibilityPermissionService()
-    
-    // Create a static constant for the prompt key
-    private static let promptKey = "AXTrustedCheckOptionPrompt"
-    
-    private init() {}
-    
-    func checkAccessibility() -> Bool {
-        // Use the hardcoded key instead of the global variable
-        let options = [Self.promptKey: true] as CFDictionary
-        return AXIsProcessTrustedWithOptions(options)
-    }
-}
-
-// Update the getAccessibilityStatus function to use the service
-@MainActor
-func getAccessibilityStatus() async -> Bool {
-    return AccessibilityPermissionService.shared.checkAccessibility()
-}
-
-// Update the handleAccessibilityPermissions function
-@MainActor
-func handleAccessibilityPermissions() async {
-    let accessibilityEnabled = await getAccessibilityStatus()
-    Logger.info("Accessibility permissions status: \(accessibilityEnabled)")
-    
-    if !accessibilityEnabled {
-        Logger.warning("Accessibility permissions not granted. Prompting user...")
-        // Show a notification or alert to the user
-        let alert = NSAlert()
-        alert.messageText = "Accessibility Permissions Required"
-        alert.informativeText = "DockAppToggler needs accessibility permissions to function. Please grant access in System Preferences > Security & Privacy > Privacy > Accessibility."
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "Open System Preferences")
-        alert.addButton(withTitle: "Later")
-        
-        if alert.runModal() == .alertFirstButtonReturn {
-            NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Library/PreferencePanes/Security.prefPane"))
-        }
-    }
-}
-
 // Initialize app components
 let app = NSApplication.shared
 
-// Run the accessibility check on the main actor
-Task { @MainActor in
-    await handleAccessibilityPermissions()
-}
+// Run the accessibility check once at startup
+_ = AccessibilityService.shared.requestAccessibilityPermissions()
 
 // Create the shared updater controller first
 let sharedUpdater = SPUStandardUpdaterController(
