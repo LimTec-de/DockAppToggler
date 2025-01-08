@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DockAppToggler - Enhanced macOS Window Management</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-50">
+    <!-- Hero Section with Wave -->
+    <div class="relative bg-gradient-to-br from-emerald-700 to-green-900 text-white overflow-hidden" style="background: #3a8f38">
+        <!-- Wave SVG -->
+        <div class="absolute bottom-0 left-0 w-full">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 320" class="w-full h-auto">
+                <path fill="#3e993f" fill-opacity="1" d="M0,96L48,112C96,128,192,160,288,160C384,160,480,128,576,122.7C672,117,768,139,864,149.3C960,160,1056,160,1152,144C1248,128,1344,96,1392,80L1440,64L1440,320L1392,320C1344,320,1248,320,1152,320C1056,320,960,320,864,320C768,320,672,320,576,320C480,320,384,320,288,320C192,320,96,320,48,320L0,320Z"></path>
+            </svg>
+        </div>
+        
+        <!-- Content -->
+        <div class="container mx-auto px-4 pt-16 pb-32">
+            <!-- Navigation -->
+            <nav class="flex justify-between items-center mb-16">
+                <div class="flex items-center gap-3 text-2xl font-bold">
+        <img src="icon.png" alt="Icon" class="w-10 h-10"> <!-- Icon added here -->
+        DockAppToggler
+    </div>
+                <div class="flex gap-6 font-medium">
+                    <a href="#features" class="hover:text-green-200 transition-colors">Features</a>
+                    <a href="#download" class="hover:text-green-200 transition-colors">Download</a>
+                    <a href="https://github.com/LimTec-de/DockAppToggler" class="hover:text-green-200 transition-colors">GitHub</a>
+                </div>
+            </nav>
+
+            <div class="flex flex-col md:flex-row items-center justify-between relative z-10">
+                <div class="md:w-1/2 mb-8 md:mb-0">
+                    <h1 class="text-5xl md:text-6xl font-bold mb-6 leading-tight">
+                        Familiar Window Management for macOS
+                    </h1>
+                    <p class="text-xl mb-8 text-green-50 leading-relaxed">
+                        Transform your macOS Dock into a powerful window management hub. DockAppToggler enhances the native Dock with instant window previews, smart positioning controls, and intuitive multi-display support - all while maintaining the clean macOS experience you love.
+                    </p>
+                    <div class="flex flex-col sm:flex-row gap-4">
+                        <a href="https://github.com/LimTec-de/DockAppToggler/releases/latest/download/DockAppToggler_final.dmg" 
+                           class="bg-white text-green-800 px-8 py-4 rounded-xl font-semibold hover:bg-green-50 transition-colors text-center shadow-lg">
+                            Download Now
+                        </a>
+                        <a href="https://github.com/LimTec-de/DockAppToggler" 
+                           class="bg-green-800/20 backdrop-blur-sm border-2 border-white text-white px-8 py-4 rounded-xl font-semibold hover:bg-green-800/30 transition-colors text-center">
+                            View on GitHub
+                        </a>
+                    </div>
+                </div>
+                <div class="md:w-1/2 flex justify-center">
+                    <img src="DockAppToggler.png" alt="DockAppToggler Interface" class="rounded-2xl shadow-2xl transform hover:scale-105 transition-transform duration-300"/>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Download & Pricing Section -->
+    <div id="download" class="bg-white py-24" style="background: #e6e6e6">
+        <div class="container mx-auto px-4">
+            <div class="max-w-3xl mx-auto text-center">
+                <h2 class="text-4xl font-bold mb-6">Professional Window Management</h2>
+                <p class="text-xl mb-8 text-gray-600">
+                    Transform your macOS workflow with powerful window management features usually found only in premium window managers. Try it free for 60 days.
+                </p>
+                <div class="bg-gradient-to-b from-gray-50 to-white p-8 rounded-2xl shadow-xl mb-8 border border-gray-100">
+                    <div class="text-5xl font-bold text-green-600 mb-4">€2</div>
+                    <p class="text-xl mb-6">One-time purchase after 60-day free trial</p>
+                    <div class="space-y-6">
+                        <div class="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
+                            <h3 class="font-semibold mb-3 text-lg">Direct Download</h3>
+                            <a href="https://github.com/LimTec-de/DockAppToggler/releases/latest/download/DockAppToggler_final.dmg" 
+                               class="inline-block bg-green-600 text-white px-6 py-3 rounded-lg hover:bg-green-700 transition-colors">
+                               Download DMG
+                            </a>
+                        </div>
+                        <div class="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
+                            <h3 class="font-semibold mb-3 text-lg">Install via Homebrew</h3>
+                            <code class="bg-gray-50 px-6 py-3 rounded-lg text-gray-800 block font-mono">brew install DockAppToggler</code>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Features Section -->
+    <div id="features" class="container mx-auto px-4 py-24">
+        <h2 class="text-4xl font-bold text-center mb-16">Enhanced Dock Experience</h2>
+        <div class="grid md:grid-cols-3 gap-8">
+            <!-- Window Preview & Selection -->
+            <div class="bg-white p-8 rounded-xl shadow-lg hover:shadow-xl transition-shadow">
+                <div class="w-16 h-16 bg-green-100 rounded-2xl flex items-center justify-center mb-6">
+                    <svg class="w-8 h-8 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 17V7m0 10a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2h2a2 2 0 012 2m0 10a2 2 0 002 2h2a2 2 0 002-2M9 7a2 2 0 012-2h2a2 2 0 012 2m0 10V7"></path>
+                    </svg>
+                </div>
+                <h3 class="text-xl font-semibold mb-4">Smart Window Preview</h3>
+                <p class="text-gray-600 leading-relaxed">
+                    Instantly preview all windows when hovering over Dock icons. Direct window selection replaces macOS's cycle-through approach, with intelligent window state memory and restoration.
+                </p>
+            </div>
+
+            <!-- Window Controls -->
+            <div class="bg-white p-8 rounded-xl shadow-lg hover:shadow-xl transition-shadow">
+                <div class="w-16 h-16 bg-green-100 rounded-2xl flex items-center justify-center mb-6">
+                    <svg class="w-8 h-8 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path>
+                    </svg>
+                </div>
+                <h3 class="text-xl font-semibold mb-4">Advanced Window Controls</h3>
+                <p class="text-gray-600 leading-relaxed">
+                    One-click window snapping to left/right, maximize with multi-display support, and center positioning. Quick-hide active windows and terminate apps with double-click.
+                </p>
+            </div>
+
+            <!-- Multi-Display Support -->
+            <div class="bg-white p-8 rounded-xl shadow-lg hover:shadow-xl transition-shadow">
+                <div class="w-16 h-16 bg-green-100 rounded-2xl flex items-center justify-center mb-6">
+                    <svg class="w-8 h-8 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 17V7m0 10a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2h2a2 2 0 012 2m0 10a2 2 0 002 2h2a2 2 0 002-2M9 7a2 2 0 012-2h2a2 2 0 012 2m0 10V7"></path>
+                    </svg>
+                </div>
+                <h3 class="text-xl font-semibold mb-4">Multi-Display Magic</h3>
+                <p class="text-gray-600 leading-relaxed">
+                    Seamlessly move windows between displays with visual indicators. Smart window management across screens with instant position memory and restoration.
+                </p>
+            </div>
+
+            <!-- Modern UI -->
+            <div class="bg-white p-8 rounded-xl shadow-lg hover:shadow-xl transition-shadow">
+                <div class="w-16 h-16 bg-green-100 rounded-2xl flex items-center justify-center mb-6">
+                    <svg class="w-8 h-8 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21a4 4 0 01-4-4V5a2 2 0 012-2h4a2 2 0 012 2v12a4 4 0 01-4 4zm0 0h12a2 2 0 002-2v-4a2 2 0 00-2-2h-2.343M11 7.343l1.657-1.657a2 2 0 012.828 0l2.829 2.829a2 2 0 010 2.828l-8.486 8.485M7 17h.01"></path>
+                    </svg>
+                </div>
+                <h3 class="text-xl font-semibold mb-4">Modern UI Integration</h3>
+                <p class="text-gray-600 leading-relaxed">
+                    Beautiful bubble-style previews with smooth animations. Automatically adapts to light/dark mode with intuitive status indicators for window states.
+                </p>
+            </div>
+
+            <!-- Smart App Handling -->
+            <div class="bg-white p-8 rounded-xl shadow-lg hover:shadow-xl transition-shadow">
+                <div class="w-16 h-16 bg-green-100 rounded-2xl flex items-center justify-center mb-6">
+                    <svg class="w-8 h-8 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                    </svg>
+                </div>
+                <h3 class="text-xl font-semibold mb-4">Intelligent App Management</h3>
+                <p class="text-gray-600 leading-relaxed">
+                    Smart Finder integration with desktop window handling. Single-click to hide active apps, remembering window positions for perfect restoration.
+                </p>
+            </div>
+
+            <!-- Performance -->
+            <div class="bg-white p-8 rounded-xl shadow-lg hover:shadow-xl transition-shadow">
+                <div class="w-16 h-16 bg-green-100 rounded-2xl flex items-center justify-center mb-6">
+                    <svg class="w-8 h-8 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                    </svg>
+                </div>
+                <h3 class="text-xl font-semibold mb-4">Native Performance</h3>
+                <p class="text-gray-600 leading-relaxed">
+                    Optimized batch processing for window operations. Deep integration with macOS accessibility features ensuring smooth, native-like performance.
+                </p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Open Source Section -->
+    <div class="bg-gradient-to-b from-gray-50 to-white py-24">
+        <div class="container mx-auto px-4">
+            <h2 class="text-4xl font-bold text-center mb-8">Open Source</h2>
+            <div class="max-w-3xl mx-auto text-center">
+                <p class="text-gray-700 text-lg mb-8 leading-relaxed">
+                    DockAppToggler is open source software, allowing for community contributions and transparency. Check out our GitHub repository to explore the code, report issues, or contribute to the project.
+                </p>
+                <a href="https://github.com/LimTec-de/DockAppToggler" 
+                   class="inline-block bg-gray-800 text-white px-8 py-4 rounded-xl font-semibold hover:bg-gray-700 transition-colors shadow-lg">
+                    View Source Code
+                </a>
+            </div>
+        </div>
+    </div>
+
+    <!-- Footer with Imprint -->
+    <footer class="bg-gray-800 text-white py-16">
+        <div class="container mx-auto px-4">
+            <div class="grid md:grid-cols-2 gap-12">
+                <div>
+                    <h3 class="text-2xl font-semibold mb-6">Contact</h3>
+                    <p class="mb-2">LimTec GmbH</p>
+                    <p class="mb-2">Halderstr. 16</p>
+                    <p class="mb-2">D-86150 Augsburg</p>
+                    <p class="mb-2">Germany</p>
+                    <p class="mb-2"><a href="https://www.limtec.de">https://www.limtec.de</a></p>
+                </div>
+                <div>
+                    <h3 class="text-2xl font-semibold mb-6">Legal Information</h3>
+                    <p class="mb-2">Managing Director: Patrick Noack</p>
+                    <p class="mb-2">VAT ID: DE 236898869</p>
+                    <p class="mb-2">Commercial Register: Augsburg HRB 30954</p>
+                </div>
+            </div>
+        </div>
+    </footer>
+</body>
+</html>

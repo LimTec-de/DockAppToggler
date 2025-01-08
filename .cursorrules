@@ -1,1 +1,92 @@
-for commit message, keep them super short and concise.
+# DockAppToggler
+
+Every time you choose to apply a rule(s), explicitly state the rule(s) in the output. You can abbreviate the rule description to a single word or phrase.
+
+## Project Context
+
+A macOS utility application that provides dock app toggling functionality.
+
+* Built as a native macOS application
+* Focuses on system integration and dock manipulation
+* Prioritizes performance and reliability
+
+## Code Style and Structure
+
+* Write concise, idiomatic Swift code
+* Use Swift's modern features and patterns
+* Prefer value types over reference types when appropriate
+* Use descriptive variable names that reflect their purpose
+* Structure repository files as follows:
+
+```
+Sources/
+├── DockAppToggler/
+    ├── main.swift        # Application entry point
+    ├── Info.plist        # App configuration
+    └── Utils/            # Helper functions
+.github/
+└── workflows/            # CI/CD configurations
+```
+
+## Tech Stack
+
+* Swift
+* macOS AppKit
+* XCode build system
+
+## Naming Conventions
+
+* Use PascalCase for type names (classes, structs, enums, protocols)
+* Use camelCase for method, variable, and constant names
+* Use descriptive names that reflect purpose
+
+## Swift Usage
+
+* Follow Swift API Design Guidelines
+* Use strong typing and avoid force unwrapping
+* Implement proper error handling
+* Use Swift's modern concurrency features when appropriate
+* Document public APIs with comments
+
+## Error Handling
+
+* Use Swift's Result type for operations that can fail
+* Implement proper error types and handling
+* Provide user-friendly error messages
+* Log errors appropriately for debugging
+
+## Security
+
+* Follow macOS security best practices
+* Handle permissions appropriately
+* Implement proper sandboxing
+* Secure any user data handling
+
+## Git Usage
+
+Commit Message Prefixes:
+* "fix:" for bug fixes
+* "feat:" for new features
+* "docs:" for documentation changes
+* "refactor:" for code refactoring
+* "test:" for adding tests
+* "chore:" for maintenance
+
+Rules:
+* Keep commit messages short and concise
+* Use lowercase for commit messages
+* Reference issue numbers when applicable
+
+## Documentation
+
+* Maintain clear README with setup instructions
+* Document build requirements and dependencies
+* Keep Info.plist well-documented
+* Document system requirements and permissions
+
+## Development Workflow
+
+* Use proper version control
+* Test thoroughly before commits
+* Follow semantic versioning
+* Maintain changelog for significant changes

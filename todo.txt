@@ -1,0 +1,5 @@
+auf github webseite anlegen
+impressum, sponsoring etc angeben (patreon)
+tray icon tooltip
+thumbnail (später)
+anwendungsumschalter (später)
