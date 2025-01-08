@@ -678,10 +678,10 @@ class WindowChooserView: NSView {
                 }*/
                 
                 // Always restore original button state
-                if options[button.tag].window != topmostWindow {
+                /*if options[button.tag].window != topmostWindow {
                     button.contentTintColor = Constants.UI.Theme.secondaryTextColor
                     button.alphaValue = 0.8
-                }
+                }*/
             }
         }
     }
