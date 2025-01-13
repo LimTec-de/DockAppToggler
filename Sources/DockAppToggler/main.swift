@@ -2086,6 +2086,8 @@ class AccessibilityService {
             
         // Create a set of window IDs belonging to this app
         let cgWindowIDs = Set(windowList.compactMap { window -> CGWindowID? in
+            
+
             // Check multiple identifiers to ensure we catch all windows
             let ownerPIDMatches = (window[kCGWindowOwnerPID as String] as? pid_t) == pid
             let ownerNameMatches = (window[kCGWindowOwnerName as String] as? String) == app.localizedName
@@ -2101,6 +2103,9 @@ class AccessibilityService {
             let allowedPrefixes = ["NoMachine", "Parallels"]
             let appName = app.localizedName ?? ""
             let allowNonZeroSharingState = allowedPrefixes.contains { appName.starts(with: $0) }
+
+            // Ensure the application is active
+            guard app.isActive || allowNonZeroSharingState else { return nil }
             
             // Filter conditions for regular windows:
             // 1. Must belong to the app
@@ -4239,6 +4244,7 @@ class BubbleVisualEffectView: NSVisualEffectView {
     }
 }
 
+@MainActor
 func toggleApp(_ bundleIdentifier: String) {
     let workspace = NSWorkspace.shared
     let runningApps = workspace.runningApplications
@@ -4246,11 +4252,11 @@ func toggleApp(_ bundleIdentifier: String) {
     guard let app = runningApps.first(where: { app in
         app.bundleIdentifier == bundleIdentifier
     }) else {
-        print("App not found")
+        Logger.debug("App not found")
         return
     }
     
-    // Special handling for Finder - check if frontmost
+    // Special handling for Finder
     if bundleIdentifier == "com.apple.finder" {
         if let frontmostApp = NSWorkspace.shared.frontmostApplication,
            frontmostApp == app {
@@ -4262,26 +4268,54 @@ func toggleApp(_ bundleIdentifier: String) {
         return
     }
     
-    // Regular handling for other apps
-    let appWindows = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] ?? []
-    let visibleWindows = appWindows.filter { window in
-        guard let ownerName = window[kCGWindowOwnerName as String] as? String,
-              let app = runningApps.first(where: { app in
-                  app.localizedName == ownerName
-              }),
-              app.bundleIdentifier == bundleIdentifier else {
-            return false
-        }
-        return true
-    }
-    
-    if visibleWindows.isEmpty {
-        app.unhide()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            app.activate(options: [.activateIgnoringOtherApps])
+    Task {
+        // Create an AXUIElement for the app
+        let axApp = AXUIElementCreateApplication(app.processIdentifier)
+        
+        // Try to get windows through accessibility API first
+        var windowsRef: CFTypeRef?
+        let axResult = AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &windowsRef)
+        
+        if axResult == .success, 
+           let windows = windowsRef as? [AXUIElement], 
+           !windows.isEmpty {
+            // App has accessibility windows
+            Logger.debug("Found \(windows.count) AX windows for \(app.localizedName ?? "")")
             
-            // Create an AXUIElement for the app
-            let axApp = AXUIElementCreateApplication(app.processIdentifier)
+            if let frontmostApp = NSWorkspace.shared.frontmostApplication,
+               frontmostApp == app {
+                // App is frontmost, hide it
+                app.hide()
+            } else {
+                // App is not frontmost, show and activate it
+                app.unhide()
+                app.activate(options: [.activateIgnoringOtherApps])
+                
+                // Try to raise the first window
+                let windowInfo = WindowInfo(
+                    window: windows[0],
+                    name: app.localizedName ?? "Unknown",
+                    isAppElement: false
+                )
+                await AccessibilityService.shared.raiseWindow(windowInfo: windowInfo, for: app)
+            }
+            return
+        }
+        
+        // Fallback to CGWindow list for visible windows
+        let appWindows = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] ?? []
+        let visibleWindows = appWindows.filter { window in
+            guard let ownerName = window[kCGWindowOwnerName as String] as? String,
+                  let windowApp = runningApps.first(where: { $0.localizedName == ownerName }),
+                  windowApp.bundleIdentifier == bundleIdentifier else {
+                return false
+            }
+            return true
+        }
+        
+        if visibleWindows.isEmpty {
+            // No visible windows, try to show the app
+            app.unhide()
             
             // Create a basic WindowInfo for the app
             let windowInfo = WindowInfo(
@@ -4290,10 +4324,11 @@ func toggleApp(_ bundleIdentifier: String) {
                 isAppElement: true
             )
             
-            AccessibilityService.shared.raiseWindow(windowInfo: windowInfo, for: app)
+            app.activate(options: [.activateIgnoringOtherApps])
+            await AccessibilityService.shared.raiseWindow(windowInfo: windowInfo, for: app)
+        } else {
+            app.hide()
         }
-    } else {
-        app.hide()
     }
 }
 
