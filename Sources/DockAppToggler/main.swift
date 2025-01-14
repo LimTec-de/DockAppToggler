@@ -2458,10 +2458,13 @@ class AccessibilityService {
                   let windows = windowsRef as? [AXUIElement] else {
                 return
             }
+
+            Logger.debug("test1")
             
             var states: [(window: AXUIElement, wasVisible: Bool, order: Int, stackOrder: Int)] = []
             for (index, window) in windows.enumerated() {
                 let wasVisible = checkWindowVisibility(window)
+                Logger.debug("test2: \(wasVisible)")
                 states.append((window: window,
                              wasVisible: wasVisible,
                              order: index,
@@ -3342,6 +3345,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
 
     @MainActor private func reinitializeEventTap() async {
         Logger.info("Reinitializing event tap...")
+        //return
         
         // Check memory usage first
         let currentUsage = reportMemoryUsage()
@@ -3367,6 +3371,8 @@ class DockWatcher: NSObject, NSMenuDelegate {
         skipNextClickProcessing = false
         isMouseOverDock = false
         
+        
+
         // Reinitialize core functionality
         setupEventTap()
         setupNotifications()
@@ -3893,9 +3899,10 @@ class DockWatcher: NSObject, NSMenuDelegate {
             AccessibilityService.shared.checkWindowVisibility(windowInfo.window)
         }
         
-        // Check if app is both active AND has visible windows
+
+        // Check if app is both active AND has visible windows or has only CGWindows and has visible windows
         if app.isActive && hasVisibleWindows {
-            Logger.debug("App is active with visible windows, hiding all windows")
+            Logger.debug("App is active with visible windows or has only CGWindows with visible windows, hiding all windows")
             AccessibilityService.shared.hideAllWindows(for: app)
             return app.hide()
         } else if !hasVisibleWindows {
