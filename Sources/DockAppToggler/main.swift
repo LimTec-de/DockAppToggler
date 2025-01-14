@@ -2115,11 +2115,13 @@ class AccessibilityService {
             
             // Check if the app name starts with any of the allowed prefixes
             let allowedPrefixes = ["NoMachine", "Parallels"]
+            let trayAppPrefixes = ["KeePassXC", "Bitwarden"]
             let appName = app.localizedName ?? ""
-            let allowNonZeroSharingState = allowedPrefixes.contains { appName.starts(with: $0) }
+            let specialWindowApp = allowedPrefixes.contains { appName.starts(with: $0) }
+            let isTrayApp = trayAppPrefixes.contains { appName.starts(with: $0) }
 
             // Ensure the application is active
-            guard app.isActive || allowNonZeroSharingState else { return nil }
+            guard app.isActive && isTrayApp || specialWindowApp else { return nil }
             
             // Filter conditions for regular windows:
             // 1. Must belong to the app
@@ -2133,7 +2135,7 @@ class AccessibilityService {
                 !name.isEmpty,
                 windowLayer == 0,  // Normal window layer
                 windowAlpha == nil || windowAlpha! > 0.9,  // Normal opacity
-                allowNonZeroSharingState || windowSharingState == 0  // Modified sharing state check
+                specialWindowApp || windowSharingState == 0  // Modified sharing state check
             else {
                 return nil
             }
@@ -3428,24 +3430,18 @@ class DockWatcher: NSObject, NSMenuDelegate {
 
     
     
-    private func setupEventTap() {
+     private func setupEventTap() {
         guard AccessibilityService.shared.requestAccessibilityPermissions() else {
             Logger.error("Failed to get accessibility permissions")
             return
         }
         
-        // Fix event mask creation
-        let eventTypes: [CGEventType] = [
-            .mouseMoved,
-            .leftMouseDown,
-            .leftMouseUp,
-            .rightMouseDown,
-            .rightMouseUp
-        ]
-        
-        let eventMask: CGEventMask = eventTypes.reduce(0) { mask, type in
-            mask | (1 << type.rawValue)
-        }
+        // Optimize event mask creation by directly computing the bitmask
+        let eventMask: CGEventMask = (1 << CGEventType.mouseMoved.rawValue) |
+                                     (1 << CGEventType.leftMouseDown.rawValue) |
+                                     (1 << CGEventType.leftMouseUp.rawValue) |
+                                     (1 << CGEventType.rightMouseDown.rawValue) |
+                                     (1 << CGEventType.rightMouseUp.rawValue)
         
         let callback: CGEventTapCallBack = { proxy, type, event, refcon in
             // Wrap the entire callback in autoreleasepool
