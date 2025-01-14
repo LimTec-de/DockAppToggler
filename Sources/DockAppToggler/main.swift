@@ -3076,7 +3076,10 @@ class DockWatcher: NSObject, NSMenuDelegate {
         let compressed: Double  // Compressed Memory
         
         var total: Double {
-            return resident + compressed
+            // Convert all values to MB for consistency
+            let residentMB = resident
+            let compressedMB = compressed / 1024.0  // Convert from bytes to MB
+            return residentMB + compressedMB
         }
     }
     
@@ -3135,9 +3138,10 @@ class DockWatcher: NSObject, NSMenuDelegate {
             }
         }
         
+        // Convert all values to MB
         let resident = Double(taskInfo.resident_size) / 1024.0 / 1024.0
-        let virtual = Double(taskInfo.virtual_size) / 1024.0 / 1024.0
-        let compressed = Double(vmStats.compressions) * Double(vm_kernel_page_size) / 1024.0 / 1024.0
+        let virtual = Double(taskInfo.virtual_size) / 1024.0 / 1024.0 / 1024.0
+        let compressed = Double(vmStats.compressions) * Double(vm_kernel_page_size) / 1024.0 / 1024.0 / 1024.0
         
         return MemoryUsage(resident: resident, virtual: virtual, compressed: compressed)
     }
@@ -3149,7 +3153,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
                 guard let self = self else { return }
                 let usage = self.reportDetailedMemoryUsage()
                 
-                // Log detailed memory usage
+                // Log detailed memory usage with correct formatting
                 Logger.debug("""
                     Memory Usage:
                     - Resident: \(String(format: "%.1f", usage.resident))MB
@@ -3291,6 +3295,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
     }
     
     deinit {
+        cleanupEventTap()
         // Clean up event tap and resources (these are already nonisolated)
         cleanup()
         
@@ -3423,142 +3428,147 @@ class DockWatcher: NSObject, NSMenuDelegate {
             return
         }
         
-        // Break down event mask into individual components
-        let mouseMoved = CGEventMask(1 << CGEventType.mouseMoved.rawValue)
-        let leftMouseDown = CGEventMask(1 << CGEventType.leftMouseDown.rawValue)
-        let leftMouseUp = CGEventMask(1 << CGEventType.leftMouseUp.rawValue)
-        let rightMouseDown = CGEventMask(1 << CGEventType.rightMouseDown.rawValue)
-        let rightMouseUp = CGEventMask(1 << CGEventType.rightMouseUp.rawValue)
+        // Fix event mask creation
+        let eventTypes: [CGEventType] = [
+            .mouseMoved,
+            .leftMouseDown,
+            .leftMouseUp,
+            .rightMouseDown,
+            .rightMouseUp
+        ]
         
-        // Combine event masks
-        let eventMask = mouseMoved | leftMouseDown | leftMouseUp | rightMouseDown | rightMouseUp
-        
-        let callback: CGEventTapCallBack = { proxy, type, event, refcon in
-            guard let refconUnwrapped = refcon else {
-                return Unmanaged.passRetained(event)
-            }
-            
-            let watcher = Unmanaged<DockWatcher>.fromOpaque(refconUnwrapped).takeUnretainedValue()
-            let location = event.location
-            
-            // Update last event time for heartbeat
-            Task { @MainActor in
-                watcher.updateLastEventTime()
-            }
-            
-            // Check if the event tap is enabled
-            if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-                Task { @MainActor in
-                    await watcher.reinitializeEventTap()
-                }
-                return Unmanaged.passRetained(event)
-            }
-            
-            switch type {
-            case .mouseMoved:
-                Task { @MainActor in
-                    watcher.processMouseMovement(at: location)
-                }
-            case .leftMouseDown:
-                // Debounce clicks
-                let currentTime = ProcessInfo.processInfo.systemUptime
-                if currentTime - watcher.lastClickTime >= watcher.clickDebounceInterval {
-                    watcher.lastClickTime = currentTime
-                    
-                    // Store the app being clicked for mouseUp handling
-                    if let (app, _, iconCenter) = DockService.shared.findAppUnderCursor(at: location) {
-                        watcher.clickedApp = app
-                        watcher.lastClickedDockIcon = app
-                        watcher.skipNextClickProcessing = false  // Reset the flag
-                        
-                        // Show window chooser immediately on click
-                        Task { @MainActor in
-                            let windows = AccessibilityService.shared.listApplicationWindows(for: app)
-                            if !windows.isEmpty {
-                                watcher.showingWindowChooserOnClick = true
-                                watcher.windowChooser?.close()
-                                watcher.windowChooser = nil
-                                watcher.displayWindowSelector(for: app, at: iconCenter, windows: windows)
-                                watcher.lastHoveredApp = app
-                            }
-                        }
-                        
-                        // Return nil to prevent the event from propagating
-                        return nil
-                    }
-                }
-                // Let the event propagate only if we're not clicking on a dock item
-                return Unmanaged.passRetained(event)
-            case .leftMouseUp:
-                // Process the click on mouseUp if we have a stored app
-                if let app = watcher.clickedApp {
-                    // Always process the dock icon click
-                    if watcher.processDockIconClick(app: app) {
-                        // If we're showing the window chooser, don't close it
-                        if !watcher.showingWindowChooserOnClick {
-                            watcher.windowChooser?.close()
-                            watcher.windowChooser = nil
-                        }
-                        watcher.clickedApp = nil
-                        // Return nil to prevent the event from propagating
-                        return nil
-                    }
-                    // Reset the flag
-                    watcher.showingWindowChooserOnClick = false
-                }
-                watcher.clickedApp = nil
-            case .rightMouseDown:
-                // Check if we're clicking on a dock item
-                if let (app, _, _) = DockService.shared.findAppUnderCursor(at: location) {
-                    Task { @MainActor in
-                        // Store the right-clicked app
-                        watcher.lastRightClickedDockIcon = app
-                        // Close any existing window chooser
-                        watcher.windowChooser?.close()
-                        watcher.windowChooser = nil
-                        watcher.lastHoveredApp = nil
-                    }
-                } else {
-                    // Clear the last right-clicked app when clicking elsewhere
-                    watcher.lastRightClickedDockIcon = nil
-                }
-                return Unmanaged.passRetained(event)
-            case .rightMouseUp:
-                Task { @MainActor in
-                    // Reset context menu state after a short delay
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak watcher] in
-                        watcher?.isContextMenuActive = false
-                    }
-                }
-            default:
-                break
-            }
-            
-            return Unmanaged.passRetained(event)
+        let eventMask: CGEventMask = eventTypes.reduce(0) { mask, type in
+            mask | (1 << type.rawValue)
         }
         
-        guard let tap = CGEvent.tapCreate(
-            tap: .cghidEventTap,
+        let callback: CGEventTapCallBack = { proxy, type, event, refcon in
+            // Wrap the entire callback in autoreleasepool
+            return autoreleasepool {
+                guard let refconUnwrapped = refcon else {
+                    return Unmanaged.passUnretained(event)
+                }
+                
+                let watcher = Unmanaged<DockWatcher>.fromOpaque(refconUnwrapped).takeUnretainedValue()
+                let location = event.location // Capture location before async work
+                
+                // Update last event time for heartbeat
+                Task { @MainActor in
+                    watcher.updateLastEventTime()
+                    
+                    if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+                        await watcher.reinitializeEventTap()
+                        return
+                    }
+                    
+                    // Use another autoreleasepool for event processing
+                    autoreleasepool {
+                        switch type {
+                        case .mouseMoved:
+                            watcher.processMouseMovement(at: location)
+                        case .leftMouseDown:
+                            // Debounce clicks
+                            let currentTime = ProcessInfo.processInfo.systemUptime
+                            if currentTime - watcher.lastClickTime >= watcher.clickDebounceInterval {
+                                watcher.lastClickTime = currentTime
+                                
+                                // Store the app being clicked for mouseUp handling
+                                if let (app, _, iconCenter) = DockService.shared.findAppUnderCursor(at: location) {
+                                    watcher.clickedApp = app
+                                    watcher.lastClickedDockIcon = app
+                                    watcher.skipNextClickProcessing = false
+                                    
+                                    // Show window chooser immediately on click
+                                    let windows = AccessibilityService.shared.listApplicationWindows(for: app)
+                                    if !windows.isEmpty {
+                                        watcher.showingWindowChooserOnClick = true
+                                        watcher.windowChooser?.close()
+                                        watcher.windowChooser = nil
+                                        watcher.displayWindowSelector(for: app, at: iconCenter, windows: windows)
+                                        watcher.lastHoveredApp = app
+                                    }
+                                }
+                            }
+                        case .leftMouseUp:
+                            if let app = watcher.clickedApp {
+                                if watcher.processDockIconClick(app: app) {
+                                    if !watcher.showingWindowChooserOnClick {
+                                        watcher.windowChooser?.close()
+                                        watcher.windowChooser = nil
+                                    }
+                                    watcher.clickedApp = nil
+                                }
+                                watcher.showingWindowChooserOnClick = false
+                            }
+                            watcher.clickedApp = nil
+                        case .rightMouseDown:
+                            if let (app, _, _) = DockService.shared.findAppUnderCursor(at: location) {
+                                watcher.lastRightClickedDockIcon = app
+                                watcher.windowChooser?.close()
+                                watcher.windowChooser = nil
+                                watcher.lastHoveredApp = nil
+                            } else {
+                                watcher.lastRightClickedDockIcon = nil
+                            }
+                        case .rightMouseUp:
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak watcher] in
+                                watcher?.isContextMenuActive = false
+                            }
+                        default:
+                            break
+                        }
+                    }
+                }
+                
+                // Return the event without retaining it
+                return Unmanaged.passUnretained(event)
+            }
+        }
+        
+        // Setup the event tap with explicit error handling
+        if let eventTap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
             place: .headInsertEventTap,
             options: .defaultTap,
             eventsOfInterest: eventMask,
             callback: callback,
-            userInfo: Unmanaged.passUnretained(self).toOpaque()
-        ) else {
+            userInfo: UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
+        ) {
+            self.eventTap = eventTap
+            
+            // Create and add run loop source with explicit cleanup
+            if let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0) {
+                CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
+                self.runLoopSource = source
+                
+                // Enable the event tap
+                CGEvent.tapEnable(tap: eventTap, enable: true)
+                Logger.success("Event tap successfully created and enabled")
+            } else {
+                Logger.error("Failed to create run loop source")
+                // Clean up the event tap if we couldn't create the source
+                CFMachPortInvalidate(eventTap)
+            }
+        } else {
             Logger.error("Failed to create event tap")
-            return
         }
-        
-        self.eventTap = tap
-        
-        let runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
-        self.runLoopSource = runLoopSource
-        
-        CGEvent.tapEnable(tap: tap, enable: true)
-        _isEventTapActive = true
-        
-        Logger.success("Successfully started monitoring mouse movements")
+    }
+    
+    // Add cleanup method for event tap resources
+    private nonisolated func cleanupEventTap() {
+        autoreleasepool {
+            if let tap = eventTap {
+                CGEvent.tapEnable(tap: tap, enable: false)
+                CFMachPortInvalidate(tap)
+            }
+            
+            if let source = runLoopSource {
+                CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .commonModes)
+                CFRunLoopSourceInvalidate(source)
+            }
+            
+            eventTap = nil
+            runLoopSource = nil
+        }
     }
     
     private func setupNotifications() {
