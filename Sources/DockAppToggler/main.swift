@@ -276,7 +276,8 @@ private class CloseButton: NSButton {
     }
     
     deinit {
-        // Remove: MemoryTracker.shared.track(self) { "destroyed" }
+        // Remove observer
+        NotificationCenter.default.removeObserver(self)
     }
 }
 
@@ -1938,37 +1939,50 @@ class WindowChooserController: NSWindowController {
     }
 
     func prepareForReuse() {
-        // Clean up chooser view
-        chooserView?.cleanup()
-        chooserView = nil
-        
-        // Remove tracking area
-        if let oldArea = trackingArea {
-            window?.contentView?.removeTrackingArea(oldArea)
-            trackingArea = nil
+        autoreleasepool {
+            // Clean up chooser view
+            chooserView?.cleanup()
+            chooserView = nil
+            
+            // Remove tracking area
+            if let oldArea = trackingArea {
+                window?.contentView?.removeTrackingArea(oldArea)
+                trackingArea = nil
+            }
+            
+            // Clean up visual effect view
+            if let visualEffect = visualEffectView {
+                visualEffect.layer?.removeAllAnimations()
+                visualEffect.layer?.removeFromSuperlayer()
+                visualEffect.removeFromSuperview()
+                visualEffectView = nil
+            }
+            
+            // Clean up window content
+            if let contentView = window?.contentView {
+                contentView.subviews.forEach { view in
+                    view.layer?.removeAllAnimations()
+                    view.layer?.removeFromSuperlayer()
+                    view.removeFromSuperview()
+                }
+                contentView.layer?.sublayers?.removeAll()
+            }
+            
+            // Reset window properties
+            window?.delegate = nil
+            window?.contentView = nil
+            window?.orderOut(nil)
+            
+            // Clear other references
+            isClosing = false
+            
+            // Suggest garbage collection
+            if #available(macOS 10.15, *) {
+                Task { @MainActor in
+                    await Task.yield()
+                }
+            }
         }
-        
-        // Clean up visual effect view and its layer
-        visualEffectView?.layer?.removeFromSuperlayer()
-        visualEffectView?.removeFromSuperview()
-        visualEffectView = nil
-        
-        // Clean up window content
-        window?.contentView?.subviews.forEach { view in
-            view.layer?.removeFromSuperlayer()
-            view.removeFromSuperview()
-        }
-        window?.contentView?.layer?.sublayers?.removeAll()
-        
-        // Reset window properties
-        window?.delegate = nil
-        window?.contentView = nil
-        
-        // Hide window but don't close it (for reuse)
-        window?.orderOut(nil)
-        
-        // Clear other references
-        isClosing = false
     }
     
     deinit {
@@ -3051,23 +3065,247 @@ class DockWatcher: NSObject, NSMenuDelegate {
     private var cleanupTimer: Timer?
     private let cleanupDelay: TimeInterval = 5.0 // 5 seconds after mouse leaves dock
     
+    // Add property for memory cleanup timer
+    private var memoryCleanupTimer: Timer?
+    private let memoryThreshold: Double = 100.0 // MB
+    
+    // Add memory usage types
+    private struct MemoryUsage {
+        let resident: Double    // RSS (Resident Set Size)
+        let virtual: Double     // Virtual Memory Size
+        let compressed: Double  // Compressed Memory
+        
+        var total: Double {
+            return resident + compressed
+        }
+    }
+    
+    // Add memory thresholds as static properties
+    private static let memoryThresholds = (
+        warning: 80.0,     // MB - Start cleaning up
+        critical: 120.0,   // MB - Force cleanup
+        restart: 150.0     // MB - Restart app
+    )
+    
+    // Add memory reporting function
+    private func reportMemoryUsage() -> Double {
+        var taskInfo = mach_task_basic_info()
+        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size)/4
+        
+        let kerr: kern_return_t = withUnsafeMutablePointer(to: &taskInfo) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: 1) {
+                task_info(mach_task_self_,
+                         task_flavor_t(MACH_TASK_BASIC_INFO),
+                         $0,
+                         &count)
+            }
+        }
+        
+        if kerr == KERN_SUCCESS {
+            return Double(taskInfo.resident_size) / 1024.0 / 1024.0
+        }
+        return 0.0
+    }
+    
+    // Add detailed memory reporting function
+    private func reportDetailedMemoryUsage() -> MemoryUsage {
+        var taskInfo = mach_task_basic_info()
+        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size)/4
+        
+        let _ = withUnsafeMutablePointer(to: &taskInfo) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: 1) {
+                task_info(mach_task_self_,
+                         task_flavor_t(MACH_TASK_BASIC_INFO),
+                         $0,
+                         &count)
+            }
+        }
+        
+        // Get compressed memory
+        var vmStats = vm_statistics64()
+        var vmCount = mach_msg_type_number_t(MemoryLayout<vm_statistics64>.size / MemoryLayout<integer_t>.size)
+        
+        let hostPort = mach_host_self()
+        let _ = withUnsafeMutablePointer(to: &vmStats) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: 1) {
+                host_statistics64(hostPort,
+                                HOST_VM_INFO64,
+                                $0,
+                                &vmCount)
+            }
+        }
+        
+        let resident = Double(taskInfo.resident_size) / 1024.0 / 1024.0
+        let virtual = Double(taskInfo.virtual_size) / 1024.0 / 1024.0
+        let compressed = Double(vmStats.compressions) * Double(vm_kernel_page_size) / 1024.0 / 1024.0
+        
+        return MemoryUsage(resident: resident, virtual: virtual, compressed: compressed)
+    }
+    
+    // Update setupMemoryMonitoring to use detailed memory reporting
+    private func setupMemoryMonitoring() {
+        memoryCleanupTimer = Timer.scheduledTimer(withTimeInterval: 15.0, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                let usage = self.reportDetailedMemoryUsage()
+                
+                // Log detailed memory usage
+                Logger.debug("""
+                    Memory Usage:
+                    - Resident: \(String(format: "%.1f", usage.resident))MB
+                    - Virtual: \(String(format: "%.1f", usage.virtual))MB
+                    - Compressed: \(String(format: "%.1f", usage.compressed))MB
+                    - Total: \(String(format: "%.1f", usage.total))MB
+                    """)
+                
+                if usage.total > Self.memoryThresholds.restart {
+                    Logger.warning("Memory usage critical (\(String(format: "%.1f", usage.total))MB). Restarting app...")
+                    NSApplication.restart(skipUpdateCheck: true)
+                } else if usage.total > Self.memoryThresholds.critical {
+                    Logger.warning("Memory usage high (\(String(format: "%.1f", usage.total))MB). Performing aggressive cleanup...")
+                    await self.performAggressiveCleanup()
+                } else if usage.total > Self.memoryThresholds.warning {
+                    Logger.info("Memory usage elevated (\(String(format: "%.1f", usage.total))MB). Performing routine cleanup...")
+                    await self.cleanupResources()
+                }
+            }
+        }
+    }
+    
     override init() {
         super.init()
         setupEventTap()
         setupNotifications()
         setupDockMenuTracking()
-        startHeartbeat()  // Add heartbeat monitoring
-        Logger.info("DockWatcher initialized")
-        //setupMemoryCleanupTimer()
+        startHeartbeat()
+        setupMemoryMonitoring()
     }
     
-    /*private func setupMemoryCleanupTimer() {
-        _memoryCleanupTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.cleanupResources()
+    @MainActor private func performAggressiveCleanup() async {
+        // Force close any open menus
+        windowChooser?.close()
+        windowChooser = nil
+        
+        // Clear all caches
+        autoreleasepool {
+            // Clear all window controllers
+            chooserControllers.values.forEach { controller in
+                controller.prepareForReuse()
+            }
+            chooserControllers.removeAll()
+            
+            // Clear all tracking areas from window chooser
+            if let chooser = windowChooser,
+               let contentView = chooser.window?.contentView {
+                contentView.trackingAreas.forEach { area in
+                    contentView.removeTrackingArea(area)
+                }
             }
         }
-    }*/
+        
+        // Perform main cleanup
+        await cleanupResources()
+        
+        // Force a garbage collection cycle
+        if #available(macOS 10.15, *) {
+            await Task.yield()
+            await Task.yield()
+        }
+        
+        // If memory is still too high, restart the app
+        let currentUsage = reportMemoryUsage()
+        if currentUsage > memoryThreshold * 1.5 {
+            Logger.warning("Memory still too high after cleanup. Initiating restart...")
+            NSApplication.restart(skipUpdateCheck: true)
+        }
+    }
+
+    @MainActor private func cleanupResources() async {
+        guard !isMouseOverDock else { return }
+        
+        Logger.debug("Starting memory cleanup")
+        
+        // Cancel pending operations
+        menuShowTask?.cancel()
+        menuShowTask = nil
+        cleanupTimer?.invalidate()
+        cleanupTimer = nil
+        
+        autoreleasepool {
+            // Clear window chooser
+            if let chooser = windowChooser {
+                chooser.prepareForReuse()
+                windowChooser = nil
+            }
+            
+            // Clear app references
+            currentApp = nil
+            lastHoveredApp = nil
+            clickedApp = nil
+            lastClickedDockIcon = nil
+            lastRightClickedDockIcon = nil
+            lastWindowOrder = nil
+            
+            // Clear window controllers
+            for controller in chooserControllers.values {
+                if let window = controller.window {
+                    // Clear tracking areas
+                    window.contentView?.trackingAreas.forEach { area in
+                        window.contentView?.removeTrackingArea(area)
+                    }
+                    
+                    // Clear view hierarchy
+                    window.contentView?.subviews.forEach { view in
+                        view.layer?.removeAllAnimations()
+                        view.layer?.removeFromSuperlayer()
+                        view.removeFromSuperview()
+                    }
+                    
+                    window.contentView = nil
+                    window.delegate = nil
+                }
+                controller.prepareForReuse()
+            }
+            chooserControllers.removeAll()
+        }
+        
+        // Disable updates during cleanup
+        NSDisableScreenUpdates()
+        
+        // Clear graphics memory
+        autoreleasepool {
+            CATransaction.begin()
+            CATransaction.flush()
+            CATransaction.commit()
+        }
+        
+        // Force garbage collection
+        if #available(macOS 10.15, *) {
+            await Task.yield()
+        }
+        
+        NSEnableScreenUpdates()
+        
+        let memoryUsage = reportMemoryUsage()
+        Logger.debug("Memory cleanup completed. Current usage: \(memoryUsage) MB")
+    }
+    
+    deinit {
+        // Clean up event tap and resources (these are already nonisolated)
+        cleanup()
+        
+        // Remove observer (this is thread-safe)
+        NotificationCenter.default.removeObserver(self)
+        
+        // Schedule timer cleanup on main actor
+        Task { @MainActor [weak self] in
+            // Clean up timers
+            self?.memoryCleanupTimer?.invalidate()
+            self?.heartbeatTimer?.invalidate()
+            self?.memoryCleanupTimer = nil
+            self?.heartbeatTimer = nil
+        }
+    }
     
     private func startHeartbeat() {
         // Stop existing timer if any
@@ -3083,41 +3321,27 @@ class DockWatcher: NSObject, NSMenuDelegate {
                 
                 if timeSinceLastEvent > self.eventTimeoutInterval {
                     Logger.warning("Event tap appears inactive (no events for \(Int(timeSinceLastEvent)) seconds). Reinitializing...")
-                    self.reinitializeEventTap()
+                    await self.reinitializeEventTap()
                 }
             }
         }
     }
 
-    @MainActor private func reinitializeEventTap() {
+    @MainActor private func reinitializeEventTap() async {
         Logger.info("Reinitializing event tap...")
         
         // Check memory usage first
-        var info = mach_task_basic_info()
-        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size)/4
+        let currentUsage = reportMemoryUsage()
         
-        let kerr: kern_return_t = withUnsafeMutablePointer(to: &info) {
-            $0.withMemoryRebound(to: integer_t.self, capacity: 1) {
-                task_info(mach_task_self_,
-                         task_flavor_t(MACH_TASK_BASIC_INFO),
-                         $0,
-                         &count)
-            }
-        }
-        
-        if kerr == KERN_SUCCESS {
-            let usedMB = Double(info.resident_size) / 1024.0 / 1024.0
-            
-            if usedMB > 60.0 {
-                Logger.warning("Memory usage too high (\(String(format: "%.1f", usedMB))MB). Performing full restart...")
-                NSApplication.restart()
-                return
-            }
+        if currentUsage > 60.0 {
+            Logger.warning("Memory usage too high (\(String(format: "%.1f", currentUsage))MB). Performing full restart...")
+            NSApplication.restart()
+            return
         }
         
         // If we're here, either memory check failed or usage is acceptable
         // Proceed with normal reinitialization
-        cleanupResources()
+        await cleanupResources()
         
         // Reset all state
         currentApp = nil
@@ -3131,15 +3355,13 @@ class DockWatcher: NSObject, NSMenuDelegate {
         isMouseOverDock = false
         
         // Reinitialize core functionality
-        Task { @MainActor in
-            setupEventTap()
-            setupNotifications()
-            setupDockMenuTracking()
-            startHeartbeat()
-            
-            Logger.success("Event tap reinitialized successfully")
-            _lastEventTime = ProcessInfo.processInfo.systemUptime
-        }
+        setupEventTap()
+        setupNotifications()
+        setupDockMenuTracking()
+        startHeartbeat()
+        
+        Logger.success("Event tap reinitialized successfully")
+        _lastEventTime = ProcessInfo.processInfo.systemUptime
     }
 
     @MainActor private func updateLastEventTime() {
@@ -3193,10 +3415,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
         _windowChooser = nil
     }
 
-    deinit {
-        // Remove observer
-        NotificationCenter.default.removeObserver(self)
-    }
+    
     
     private func setupEventTap() {
         guard AccessibilityService.shared.requestAccessibilityPermissions() else {
@@ -3230,7 +3449,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
             // Check if the event tap is enabled
             if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
                 Task { @MainActor in
-                    watcher.reinitializeEventTap()
+                    await watcher.reinitializeEventTap()
                 }
                 return Unmanaged.passRetained(event)
             }
@@ -3773,83 +3992,6 @@ class DockWatcher: NSObject, NSMenuDelegate {
                     }
                 }
             }
-        }
-    }
-
-    @MainActor private func cleanupResources() {
-        // Only cleanup if mouse is still outside dock
-        guard !isMouseOverDock else { return }
-        
-        // Prepare window chooser for reuse instead of closing
-        if let chooser = windowChooser {
-            chooser.prepareForReuse()
-            windowChooser = nil  // Clear reference immediately
-        }
-        
-        // Clear all app references
-        currentApp = nil
-        lastHoveredApp = nil
-        clickedApp = nil
-        lastClickedDockIcon = nil
-        lastRightClickedDockIcon = nil
-        
-        // Clear window states
-        lastWindowOrder = nil
-        
-        // Clear all temporary state
-        menuShowTask?.cancel()
-        menuShowTask = nil
-        cleanupTimer?.invalidate()
-        cleanupTimer = nil
-        
-        // Clean up window controllers
-        for controller in chooserControllers.values {
-            controller.prepareForReuse()
-        }
-        chooserControllers.removeAll()
-        
-        // Force immediate cleanup
-        Task { @MainActor in
-            #if DEBUG
-            Logger.debug("Starting aggressive memory cleanup")
-            #endif
-            
-            NSDisableScreenUpdates()
-            
-            // First cleanup pass
-            do {
-                // Clear layer caches
-                CATransaction.flush()
-                
-                // Clear view hierarchies in window controllers
-                for controller in chooserControllers.values {
-                    if let contentView = controller.window?.contentView {
-                        contentView.subviews.forEach { view in
-                            view.layer?.removeFromSuperlayer()
-                            view.removeFromSuperview()
-                        }
-                    }
-                }
-                
-                // Suggest garbage collection
-                if #available(macOS 10.15, *) {
-                    await Task.yield()
-                    await Task.yield()
-                }
-                
-                // Second cleanup pass
-                CATransaction.flush()
-                
-                if #available(macOS 10.15, *) {
-                    await Task.yield()
-                }
-            }
-            
-            NSEnableScreenUpdates()
-            
-            #if DEBUG
-            Logger.debug("Completed aggressive memory cleanup")
-            #endif
         }
     }
 }
