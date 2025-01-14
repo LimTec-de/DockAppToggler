@@ -3115,7 +3115,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
         var taskInfo = mach_task_basic_info()
         var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size)/4
         
-        let _ = withUnsafeMutablePointer(to: &taskInfo) {
+        withUnsafeMutablePointer(to: &taskInfo) {
             $0.withMemoryRebound(to: integer_t.self, capacity: 1) {
                 task_info(mach_task_self_,
                          task_flavor_t(MACH_TASK_BASIC_INFO),
@@ -3124,12 +3124,20 @@ class DockWatcher: NSObject, NSMenuDelegate {
             }
         }
         
-        // Get compressed memory
+        // Use static divisors
+        let mbDivisor = 1024.0 * 1024.0
+        let gbDivisor = mbDivisor * 1024.0
+        
+        // Calculate values once
+        let resident = Double(taskInfo.resident_size) / mbDivisor
+        let virtual = Double(taskInfo.virtual_size) / gbDivisor
+        
+        // Get compressed memory more efficiently
         var vmStats = vm_statistics64()
         var vmCount = mach_msg_type_number_t(MemoryLayout<vm_statistics64>.size / MemoryLayout<integer_t>.size)
         
         let hostPort = mach_host_self()
-        let _ = withUnsafeMutablePointer(to: &vmStats) {
+        withUnsafeMutablePointer(to: &vmStats) {
             $0.withMemoryRebound(to: integer_t.self, capacity: 1) {
                 host_statistics64(hostPort,
                                 HOST_VM_INFO64,
@@ -3138,10 +3146,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
             }
         }
         
-        // Convert all values to MB
-        let resident = Double(taskInfo.resident_size) / 1024.0 / 1024.0
-        let virtual = Double(taskInfo.virtual_size) / 1024.0 / 1024.0 / 1024.0
-        let compressed = Double(vmStats.compressions) * Double(vm_kernel_page_size) / 1024.0 / 1024.0 / 1024.0
+        let compressed = Double(vmStats.compressions) * Double(vm_kernel_page_size) / gbDivisor
         
         return MemoryUsage(resident: resident, virtual: virtual, compressed: compressed)
     }
@@ -3153,7 +3158,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
                 guard let self = self else { return }
                 let usage = self.reportDetailedMemoryUsage()
                 
-                // Log detailed memory usage with correct formatting
+                // Use static strings and format once
                 Logger.debug("""
                     Memory Usage:
                     - Resident: \(String(format: "%.1f", usage.resident))MB
@@ -3162,6 +3167,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
                     - Total: \(String(format: "%.1f", usage.total))MB
                     """)
                 
+                // Use static thresholds
                 if usage.total > Self.memoryThresholds.restart {
                     Logger.warning("Memory usage critical (\(String(format: "%.1f", usage.total))MB). Restarting app...")
                     NSApplication.restart(skipUpdateCheck: true)
