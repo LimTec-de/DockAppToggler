@@ -3350,7 +3350,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
         // Check memory usage first
         let currentUsage = reportMemoryUsage()
         
-        if currentUsage > 60.0 {
+        if currentUsage > 80.0 {
             Logger.warning("Memory usage too high (\(String(format: "%.1f", currentUsage))MB). Performing full restart...")
             NSApplication.restart()
             return
@@ -4162,7 +4162,7 @@ class LoginItemManager {
 Logger.info("Starting Dock App Toggler...")
 
 // Check command line arguments
-let shouldSkipUpdateCheck = CommandLine.arguments.contains("--skip-update-check")
+let shouldSkipUpdateCheck = CommandLine.arguments.contains("--s")
 
 // Initialize app components
 let app = NSApplication.shared
@@ -4170,9 +4170,9 @@ let app = NSApplication.shared
 // Run the accessibility check once at startup
 _ = AccessibilityService.shared.requestAccessibilityPermissions()
 
-// Create the shared updater controller only if not skipping updates
-let sharedUpdater = shouldSkipUpdateCheck ? nil : SPUStandardUpdaterController(
-    startingUpdater: true,
+// Create the shared updater controller - always create it, but control auto-check behavior
+let sharedUpdater = SPUStandardUpdaterController(
+    startingUpdater: !shouldSkipUpdateCheck,  // Only start the updater if not skipping
     updaterDelegate: nil,
     userDriverDelegate: UpdateController()
 )
@@ -4525,7 +4525,7 @@ extension NSApplication {
         // Prepare arguments
         var args = [executablePath]
         if skipUpdateCheck {
-            args.append("--skip-update-check")
+            args.append("--s")
         }
         
         // Convert arguments to C-style
