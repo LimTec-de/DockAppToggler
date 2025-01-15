@@ -3358,10 +3358,10 @@ class DockWatcher: NSObject, NSMenuDelegate {
         
         // If we're here, either memory check failed or usage is acceptable
         // Proceed with normal reinitialization
-        await cleanupResources()
+        //await cleanupResources()
         
         // Reset all state
-        currentApp = nil
+        /*currentApp = nil
         lastHoveredApp = nil
         clickedApp = nil
         lastClickedDockIcon = nil
@@ -3376,8 +3376,8 @@ class DockWatcher: NSObject, NSMenuDelegate {
         // Reinitialize core functionality
         setupEventTap()
         setupNotifications()
-        setupDockMenuTracking()
-        startHeartbeat()
+        setupDockMenuTracking)
+        startHeartbeat()*/
         
         Logger.success("Event tap reinitialized successfully")
         _lastEventTime = ProcessInfo.processInfo.systemUptime
