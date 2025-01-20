@@ -22,7 +22,7 @@ class WindowChooserController: NSWindowController {
         return chooserView?.topmostWindow
     }
     
-    init(at point: CGPoint, windows: [WindowInfo], app: NSRunningApplication, callback: @escaping (AXUIElement, Bool) -> Void) {
+    init(at point: NSPoint, windows: [WindowInfo], app: NSRunningApplication, callback: @escaping (AXUIElement, Bool) -> Void) {
         self.app = app
         self.iconCenter = point
         self.callback = callback
@@ -112,6 +112,7 @@ class WindowChooserController: NSWindowController {
             windows: windows,
             appName: app.localizedName ?? "Unknown",
             app: app,
+            iconCenter: iconCenter,
             callback: { [weak self] window, isHideAction in
                 guard let self = self else { return }
                 
@@ -126,6 +127,8 @@ class WindowChooserController: NSWindowController {
                 if isHideAction {
                     // Hide the selected window
                     AccessibilityService.shared.hideWindow(window: window, for: self.app)
+                    // Close menu only for hide actions
+                    self.close()
                 } else {
                     // Always show and raise the window
                     AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
@@ -135,12 +138,12 @@ class WindowChooserController: NSWindowController {
                     let windowInfo = WindowInfo(window: window, name: windowName)
                     AccessibilityService.shared.raiseWindow(windowInfo: windowInfo, for: self.app)
                     self.app.activate(options: [.activateIgnoringOtherApps])
-                }
-                
-                // Add a small delay to ensure window state has updated
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-                    // Refresh the menu to update all states
-                    self?.refreshMenu()
+                    
+                    // Add a small delay to ensure window state has updated
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                        // Refresh the menu to update all states
+                        self?.refreshMenu()
+                    }
                 }
             }
         )
@@ -321,6 +324,7 @@ class WindowChooserController: NSWindowController {
             windows: windows,
             appName: app.localizedName ?? "Unknown",
             app: app,
+            iconCenter: point,
             callback: callback
         )
         
@@ -379,12 +383,6 @@ class WindowChooserController: NSWindowController {
             return
         }
         
-        // If window doesn't exist yet, create it
-        if window == nil {
-            createWindow(with: windows)
-            return
-        }
-        
         // Update existing window content if needed
         if needsWindowUpdate(windows: windows) {
             // Update content without recreating window
@@ -439,6 +437,7 @@ class WindowChooserController: NSWindowController {
             windows: windows,
             appName: app.localizedName ?? "Unknown",
             app: app,
+            iconCenter: iconCenter,
             callback: callback
         )
         

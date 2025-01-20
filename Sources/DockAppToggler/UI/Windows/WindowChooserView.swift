@@ -15,11 +15,14 @@ class WindowChooserView: NSView {
     private let doubleClickInterval: TimeInterval = 0.3
     internal var topmostWindow: AXUIElement?
     private var lastClickTime: TimeInterval = 0
+    // Add property to store dock icon center
+    private let dockIconCenter: NSPoint
     
-    init(windows: [WindowInfo], appName: String, app: NSRunningApplication, callback: @escaping (AXUIElement, Bool) -> Void) {
+    init(windows: [WindowInfo], appName: String, app: NSRunningApplication, iconCenter: NSPoint, callback: @escaping (AXUIElement, Bool) -> Void) {
         self.options = windows
         self.callback = callback
         self.targetApp = app
+        self.dockIconCenter = iconCenter  // Store the passed-in dock icon center
         
         // Find the topmost window
         if let frontmost = windows.first(where: { window in
@@ -296,40 +299,31 @@ class WindowChooserView: NSView {
         let windowInfo = options[sender.tag]
         Logger.debug("Selected window info - Name: \(windowInfo.name), ID: \(windowInfo.cgWindowID ?? 0)")
         
+        if windowInfo.cgWindowID != nil && windowInfo.window == nil {
+            // For CGWindow entries, just activate the app
+            targetApp.activate(options: [.activateIgnoringOtherApps])
+            callback?(windowInfo.window, false)  // This will trigger the window raise through CGWindow
+            
+            // Update topmost window and refresh menu
+            topmostWindow = windowInfo.window
+            updateButtonStates()
+            
+            // Refresh menu after a small delay to let window state update
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                if let windowController = self?.window?.windowController as? WindowChooserController {
+                    windowController.refreshMenu()
+                }
+            }
+            return
+        }
+        
         // Check for double click
         let currentTime = ProcessInfo.processInfo.systemUptime
         let isDoubleClick = (currentTime - lastClickTime) < doubleClickInterval
         lastClickTime = currentTime
         
         if windowInfo.isAppElement {
-            // Handle app element click - try to open/activate the app
-            if let bundleURL = targetApp.bundleURL {
-                let configuration = NSWorkspace.OpenConfiguration()
-                configuration.activates = true
-                
-                NSWorkspace.shared.openApplication(
-                    at: bundleURL,
-                    configuration: configuration,
-                    completionHandler: nil
-                )
-                
-                // Schedule window chooser to appear after app launch
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                    Task { @MainActor in
-                        // Get fresh window list
-                        let updatedWindows = AccessibilityService.shared.listApplicationWindows(for: self.targetApp)
-                        if !updatedWindows.isEmpty && !updatedWindows[0].isAppElement {
-                            // Only show if we have actual windows now
-                            self.callback?(updatedWindows[0].window, false)
-                        }
-                    }
-                }
-                
-                // Close the menu
-                if let windowController = self.window?.windowController as? WindowChooserController {
-                    windowController.close()
-                }
-            }
+            handleAppElementClick()
         } else {
             // Handle window click with new approach
             Logger.debug("Window selection details:")
@@ -340,7 +334,10 @@ class WindowChooserView: NSView {
             // Update topmost window
             topmostWindow = windowInfo.window
             
-            // First unminimize if needed and raise the window
+            // First activate the app
+            targetApp.activate(options: [.activateIgnoringOtherApps])
+            
+            // Then unminimize if needed and raise the window
             var isMinimized = false
             var minimizedValue: AnyObject?
             if AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success,
@@ -371,27 +368,56 @@ class WindowChooserView: NSView {
                 
                 // Wait for unminimize animation, then raise and handle double-click
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                    // Set focus attributes
+                    AXUIElementSetAttributeValue(windowInfo.window, kAXMainAttribute as CFString, true as CFTypeRef)
+                    AXUIElementSetAttributeValue(windowInfo.window, kAXFocusedAttribute as CFString, true as CFTypeRef)
+                    
+                    // Update topmost window
+                    self.topmostWindow = windowInfo.window
+                    self.updateButtonStates()
+                    
+                    // Update minimize button state
+                    if let hideButton = self.hideButtons.first(where: { $0.tag == sender.tag }) as? MinimizeButton {
+                        hideButton.updateMinimizedState(false)  // Window is now unminimized
+                    }
+                    
                     self.callback?(windowInfo.window, false)
                     
-                    // Wait for raise animation before minimizing others
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                         handleDoubleClick()
+                        
+                        // Refresh menu after all operations are complete
+                        if let windowController = self.window?.windowController as? WindowChooserController {
+                            windowController.refreshMenu()
+                        }
                     }
                 }
             } else {
-                // For non-minimized windows, just raise and handle double-click
+                // Set focus attributes
+                AXUIElementSetAttributeValue(windowInfo.window, kAXMainAttribute as CFString, true as CFTypeRef)
+                AXUIElementSetAttributeValue(windowInfo.window, kAXFocusedAttribute as CFString, true as CFTypeRef)
+                
+                // Update topmost window
+                topmostWindow = windowInfo.window
+                updateButtonStates()
+                
+                // Update minimize button state
+                if let hideButton = hideButtons.first(where: { $0.tag == sender.tag }) as? MinimizeButton {
+                    hideButton.updateMinimizedState(false)  // Window is now unminimized
+                }
+                
+                // Raise window
                 callback?(windowInfo.window, false)
                 
-                // Small delay to let the raise animation complete
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                     handleDoubleClick()
+                    
+                    // Refresh menu after all operations are complete
+                    if let windowController = self.window?.windowController as? WindowChooserController {
+                        windowController.refreshMenu()
+                    }
                 }
             }
-        }
-        
-        // Close the menu after action
-        if let windowController = self.window?.windowController as? WindowChooserController {
-            windowController.close()
         }
     }
     
@@ -512,13 +538,39 @@ class WindowChooserView: NSView {
             // Unminimize and raise the window
             AXUIElementSetAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
             AccessibilityService.shared.raiseWindow(windowInfo: windowInfo, for: targetApp)
+            
+            // Update topmost window
+            topmostWindow = windowInfo.window
+            
+            // Update button colors
+            if let titleButton = buttons.first(where: { $0.tag == sender.tag }) {
+                titleButton.contentTintColor = Constants.UI.Theme.primaryTextColor
+            }
         } else {
             // Minimize the window
             AccessibilityService.shared.minimizeWindow(windowInfo: windowInfo, for: targetApp)
+            
+            // If this was the topmost window, clear it
+            if windowInfo.window == topmostWindow {
+                topmostWindow = nil
+                
+                // Update button colors
+                if let titleButton = buttons.first(where: { $0.tag == sender.tag }) {
+                    titleButton.contentTintColor = Constants.UI.Theme.minimizedTextColor
+                }
+            }
+        }
+        
+        // Update minimize button state
+        if let hideButton = hideButtons.first(where: { $0.tag == sender.tag }) as? MinimizeButton {
+            hideButton.updateMinimizedState(!isMinimized)
         }
         
         // Add a small delay to ensure window state has updated
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            // Update all button states
+            self?.updateButtonStates()
+            
             // Refresh the menu to update all states
             if let windowController = self?.window?.windowController as? WindowChooserController {
                 windowController.refreshMenu()
@@ -734,9 +786,34 @@ class WindowChooserView: NSView {
             
             // Add refresh after a small delay to ensure window has moved
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-                self?.refreshButtons(for: window, at: sender.tag)
+                guard let self = self else { return }
+                
+                // Update button state
+                if let button = self.subviews.compactMap({ $0 as? NSButton })
+                    .first(where: { $0.tag == sender.tag && $0.action == #selector(maximizeWindow(_:)) }) {
+                    
+                    let isOnSecondary = self.isWindowOnSecondaryDisplay(window)
+                    let config = NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
+                    
+                    if isOnSecondary {
+                        // Create custom icon with "2" badge
+                        if let badgeIcon = self.createCustomBadgeIcon(baseSymbol: "square.fill", badgeNumber: "2", config: config) {
+                            button.image = badgeIcon
+                        }
+                    } else {
+                        if let image = NSImage(systemSymbolName: "square.fill", accessibilityDescription: "Toggle Window Size")?
+                            .withSymbolConfiguration(config) {
+                            button.image = image
+                        }
+                    }
+                    
+                    button.contentTintColor = Constants.UI.Theme.iconTintColor
+                }
+                
+                self.refreshButtons(for: window, at: sender.tag)
+                
                 // Also refresh the entire menu to update all states
-                if let windowController = self?.window?.windowController as? WindowChooserController {
+                if let windowController = self.window?.windowController as? WindowChooserController {
                     windowController.refreshMenu()
                 }
             }
@@ -1128,7 +1205,7 @@ class WindowChooserView: NSView {
     }
     
     // Add new method to handle close button clicks
-    @objc private func closeWindowButtonClicked(_ sender: NSButton) {
+    @objc private func closeButtonClicked(_ sender: NSButton) {
         let windowInfo = options[sender.tag]
         
         if windowInfo.isAppElement {
@@ -1139,14 +1216,30 @@ class WindowChooserView: NSView {
             if let windowController = self.window?.windowController as? WindowChooserController {
                 windowController.close()
             }
-        } else if windowInfo.cgWindowID != nil {
+        } else if windowInfo.cgWindowID != nil && windowInfo.window == nil {
             // For CGWindow entries, use CGWindow-based closing
             AccessibilityService.shared.closeWindow(windowInfo: windowInfo, for: targetApp)
             
-            // Add a small delay to ensure window state has updated
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-                // Refresh the menu to update all states
-                if let windowController = self?.window?.windowController as? WindowChooserController {
+            // If this was the topmost window, clear it
+            if windowInfo.window == topmostWindow {
+                topmostWindow = nil
+                updateButtonStates()
+            }
+            
+            // Remove the closed window from options
+            options.remove(at: sender.tag)
+            
+            // Update menu size and layout
+            if let windowController = self.window?.windowController as? WindowChooserController {
+                // Add a small delay to ensure window state has updated
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    // Get fresh window list
+                    let windows = AccessibilityService.shared.listApplicationWindows(for: self.targetApp)
+                    
+                    // Update menu contents with stored dock icon position
+                    windowController.updateWindows(windows, for: self.targetApp, at: self.dockIconCenter)
+                    
+                    // Refresh menu state
                     windowController.refreshMenu()
                 }
             }
@@ -1160,10 +1253,20 @@ class WindowChooserView: NSView {
                 let closeButton = closeButtonRef as! AXUIElement
                 AXUIElementPerformAction(closeButton, kAXPressAction as CFString)
                 
-                // Add a small delay to ensure the window has closed
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-                    // Refresh the menu
-                    if let windowController = self?.window?.windowController as? WindowChooserController {
+                // If this was the topmost window, clear it
+                if windowInfo.window == topmostWindow {
+                    topmostWindow = nil
+                    updateButtonStates()
+                }
+                
+                // Remove the closed window from options
+                options.remove(at: sender.tag)
+                
+                // Update menu size and layout
+                if let windowController = self.window?.windowController as? WindowChooserController {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        let windows = AccessibilityService.shared.listApplicationWindows(for: self.targetApp)
+                        windowController.updateWindows(windows, for: self.targetApp, at: self.dockIconCenter)
                         windowController.refreshMenu()
                     }
                 }
@@ -1182,7 +1285,7 @@ class WindowChooserView: NSView {
             ),
             tag: index,
             target: self,
-            action: #selector(closeWindowButtonClicked(_:))
+            action: #selector(closeButtonClicked(_:))
         )
     }
     
@@ -1257,5 +1360,24 @@ class WindowChooserView: NSView {
         
         // Remove self from superview
         self.removeFromSuperview()
+    }
+
+    // Add new method to update button states
+    private func updateButtonStates() {
+        for (index, windowInfo) in options.enumerated() {
+            if let button = buttons.first(where: { $0.tag == index }) {
+                var minimizedValue: AnyObject?
+                let isMinimized = AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success &&
+                                 (minimizedValue as? Bool == true)
+                
+                if isMinimized {
+                    button.contentTintColor = Constants.UI.Theme.minimizedTextColor
+                } else if windowInfo.window == topmostWindow {
+                    button.contentTintColor = Constants.UI.Theme.primaryTextColor
+                } else {
+                    button.contentTintColor = Constants.UI.Theme.secondaryTextColor
+                }
+            }
+        }
     }
 }

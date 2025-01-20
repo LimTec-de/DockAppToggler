@@ -516,8 +516,9 @@ class DockWatcher: NSObject, NSMenuDelegate {
                                     let windows = AccessibilityService.shared.listApplicationWindows(for: app)
                                     if !windows.isEmpty {
                                         watcher.showingWindowChooserOnClick = true
-                                        watcher.windowChooser?.close()
-                                        watcher.windowChooser = nil
+                                        //watcher.windowChooser?.close()
+                                        //watcher.windowChooser = nil
+                                        watcher.windowChooser?.refreshMenu()
                                         watcher.displayWindowSelector(for: app, at: iconCenter, windows: windows)
                                         watcher.lastHoveredApp = app
                                     }
@@ -527,8 +528,9 @@ class DockWatcher: NSObject, NSMenuDelegate {
                             if let app = watcher.clickedApp {
                                 if watcher.processDockIconClick(app: app) {
                                     if !watcher.showingWindowChooserOnClick {
-                                        watcher.windowChooser?.close()
-                                        watcher.windowChooser = nil
+                                        //watcher.windowChooser?.close()
+                                        //watcher.windowChooser = nil
+                                        watcher.windowChooser?.refreshMenu()
                                     }
                                     watcher.clickedApp = nil
                                 }
@@ -649,12 +651,41 @@ class DockWatcher: NSObject, NSMenuDelegate {
                 windows: windows,
                 app: app,
                 callback: { window, isHideAction in
-                    // Find the WindowInfo for this window
+                    // Get the window info from our windows list to ensure we have the correct ID
                     if let windowInfo = windows.first(where: { $0.window == window }) {
+                        if let windowID = windowInfo.cgWindowID {
+                            // Store the CGWindowID in the AXUIElement
+                            AXUIElementSetAttributeValue(window, Constants.Accessibility.windowIDKey, windowID as CFTypeRef)
+                            Logger.debug("Callback: Set window ID \(windowID) on AXUIElement")
+                        }
+                        
                         if isHideAction {
+                            // Hide the selected window
                             AccessibilityService.shared.hideWindow(window: window, for: app)
                         } else {
+                            // First activate the app
+                            app.activate(options: [.activateIgnoringOtherApps])
+                            
+                            // Then unminimize if needed
+                            AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
+                            
+                            // Get window info for raising
+                            var titleValue: AnyObject?
+                            AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleValue)
+                            let windowName = (titleValue as? String) ?? ""
+                            let windowInfo = WindowInfo(window: window, name: windowName)
+                            
+                            // Raise window
                             AccessibilityService.shared.raiseWindow(windowInfo: windowInfo, for: app)
+                            
+                            // Ensure window gets focus
+                            AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, true as CFTypeRef)
+                            AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, true as CFTypeRef)
+                            
+                            // Final app activation to ensure focus
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                                app.activate(options: [.activateIgnoringOtherApps])
+                            }
                         }
                     }
                 }
@@ -671,27 +702,6 @@ class DockWatcher: NSObject, NSMenuDelegate {
             // Always update position
             existingChooser.updatePosition(point)
             existingChooser.window?.makeKeyAndOrderFront(nil)
-        } else {
-            // No chooser exists, create new one
-            let chooser = WindowChooserController(
-                at: point,
-                windows: windows,
-                app: app,
-                callback: { window, isHideAction in
-                    // Find the WindowInfo for this window
-                    if let windowInfo = windows.first(where: { $0.window == window }) {
-                        if isHideAction {
-                            AccessibilityService.shared.hideWindow(window: window, for: app)
-                        } else {
-                            AccessibilityService.shared.raiseWindow(windowInfo: windowInfo, for: app)
-                        }
-                    }
-                }
-            )
-            
-            windowChooser = chooser
-            currentApp = app
-            chooser.window?.makeKeyAndOrderFront(nil)
         }
     }
     
@@ -707,15 +717,9 @@ class DockWatcher: NSObject, NSMenuDelegate {
         if let (app, _, iconCenter) = DockService.shared.findAppUnderCursor(at: point) {
             isMouseOverDock = true
             
-            // Don't show menu if we're in the middle of a click
-            if clickedApp != nil {
+            // Don't show menu if context menu is active
+            if isContextMenuActive {
                 return
-            }
-            
-            // If this is a different app than the last right-clicked one,
-            // clear the lastRightClickedDockIcon
-            if app != lastRightClickedDockIcon {
-                lastRightClickedDockIcon = nil
             }
             
             // Handle transition between apps
@@ -794,24 +798,28 @@ class DockWatcher: NSObject, NSMenuDelegate {
 
         Logger.debug("Processing click for app: \(app.localizedName ?? "Unknown")")
 
-        // Store the current mouse location and icon center before closing
-        let mouseLocation = NSEvent.mouseLocation
-        let iconCenter = DockService.shared.findAppUnderCursor(at: mouseLocation)?.iconCenter
-
-        // Process the click
-        let result = handleDockIconClick(app: app)
+        // Get all windows
+        let windows = AccessibilityService.shared.listApplicationWindows(for: app)
         
-        // Don't reopen the window chooser - let the hover behavior handle it
-        windowChooser?.close()
-        windowChooser = nil
-        lastHoveredApp = nil
-        
-        return result
-    }
-
-    // Add new helper method to handle the actual click logic
-    private func handleDockIconClick(app: NSRunningApplication) -> Bool {
-        Logger.debug("Processing click for app: \(app.localizedName ?? "Unknown")")
+        // Special handling for CGWindow-only applications (like NoMachine)
+        let hasCGWindowsOnly = windows.allSatisfy { $0.cgWindowID != nil && $0.window == nil }
+        if hasCGWindowsOnly {
+            if app.isActive {
+                Logger.debug("CGWindow-only app is active, hiding")
+                app.hide()
+                return true
+            } else {
+                Logger.debug("CGWindow-only app is not active, activating")
+                app.unhide()
+                app.activate(options: [.activateIgnoringOtherApps])
+                
+                // Force raise all windows
+                for windowInfo in windows {
+                    AccessibilityService.shared.raiseWindow(windowInfo: windowInfo, for: app)
+                }
+                return true
+            }
+        }
 
         // Special handling for Finder
         if app.bundleIdentifier == "com.apple.finder" {
@@ -900,9 +908,6 @@ class DockWatcher: NSObject, NSMenuDelegate {
             }
         }
 
-        // Get all windows
-        let windows = AccessibilityService.shared.listApplicationWindows(for: app)
-        
         // If we only have the app entry (no real windows), handle launch
         if windows.count == 0 || windows[0].isAppElement {
             Logger.debug("App has no windows, launching")
@@ -996,12 +1001,6 @@ class DockWatcher: NSObject, NSMenuDelegate {
                     // If no highlighted window, just raise the first one
                     AccessibilityService.shared.raiseWindow(windowInfo: firstWindow, for: app)
                 }
-                
-                // Close the window chooser after window restoration is complete
-                try? await Task.sleep(nanoseconds: 100_000_000) // 100ms delay
-                windowChooser?.close()
-                windowChooser = nil
-                lastHoveredApp = nil
             }
             return true
         } else {
