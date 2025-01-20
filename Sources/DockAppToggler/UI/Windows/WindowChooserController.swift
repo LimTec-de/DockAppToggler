@@ -10,7 +10,7 @@ class WindowChooserController: NSWindowController {
     var chooserView: WindowChooserView?
     
     // Keep other properties private
-    private let app: NSRunningApplication
+    private var app: NSRunningApplication
     private let iconCenter: CGPoint
     private var visualEffectView: NSVisualEffectView?
     private var trackingArea: NSTrackingArea?
@@ -193,18 +193,182 @@ class WindowChooserController: NSWindowController {
         })
     }
     
-    private func finishClosing() {
-        // Clean up resources
+    @MainActor private func cleanup() {
+        // Remove tracking area
+        if let trackingArea = trackingArea,
+           let contentView = window?.contentView {
+            contentView.removeTrackingArea(trackingArea)
+        }
         trackingArea = nil
-        chooserView = nil
         
-        super.close()
+        // Clean up view hierarchy
+        if let window = window {
+            // Remove all tracking areas from subviews
+            window.contentView?.subviews.forEach { view in
+                view.trackingAreas.forEach { area in
+                    view.removeTrackingArea(area)
+                }
+            }
+            
+            // Clear view hierarchy
+            window.contentView?.subviews.forEach { view in
+                view.layer?.removeAllAnimations()
+                view.layer?.removeFromSuperlayer()
+                view.removeFromSuperview()
+            }
+            
+            // Clear window properties
+            window.delegate = nil
+            window.contentViewController = nil
+            window.contentView = nil
+        }
+        
+        // Clean up chooser view
+        chooserView?.cleanup()
+        chooserView = nil
+    }
+    
+    @MainActor func prepareForReuse() {
+        cleanup()
+    }
+    
+    @MainActor private func finishClosing() {
+        cleanup()
+        
+        // Clear window reference
+        window?.close()
+        window = nil
+        
+        // Clear other properties
+        trackingArea = nil
+        visualEffectView = nil
         isClosing = false
+        
+        // Force a cleanup cycle
+        autoreleasepool {
+            // Clear graphics memory
+            CATransaction.begin()
+            CATransaction.flush()
+            CATransaction.commit()
+        }
         
         // Post notification that window chooser is closed
         NotificationCenter.default.post(name: NSNotification.Name("WindowChooserDidClose"), object: self)
     }
     
+    deinit {
+        // Remove observer
+        NotificationCenter.default.removeObserver(self)
+        
+        // Ensure cleanup runs on main thread synchronously
+        if !Thread.isMainThread {
+            DispatchQueue.main.sync {
+                Task { @MainActor in
+                    cleanup()
+                }
+            }
+        }
+    }
+    
+    private func updateWindowSize(to height: CGFloat, animated: Bool = true) {
+        guard let window = window else { return }
+        
+        // Calculate new frame
+        let newFrame = NSRect(
+            x: window.frame.origin.x,
+            y: window.frame.origin.y,
+            width: Constants.UI.windowWidth,
+            height: height
+        )
+        
+        // Update window frame immediately to ensure correct size
+        window.setFrame(newFrame, display: true)
+        
+        // Update container view and its subviews immediately
+        if let containerView = window.contentView {
+            containerView.frame = NSRect(origin: .zero, size: newFrame.size)
+            containerView.subviews.forEach { view in
+                view.frame = containerView.bounds
+            }
+        }
+        
+        // If animated, animate the transition after setting the frame
+        if animated {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.15
+                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                
+                // Update visual properties with animation
+                if let containerView = window.contentView {
+                    containerView.subviews.forEach { view in
+                        view.animator().frame = containerView.bounds
+                    }
+                }
+            }
+        }
+    }
+
+    func updateWindows(_ windows: [WindowInfo], for app: NSRunningApplication, at point: CGPoint) {
+        // Update app reference
+        self.app = app
+        
+        // Force immediate size update without animation
+        let newHeight = Constants.UI.windowHeight(for: windows.count)
+        updateWindowSize(to: newHeight, animated: false)
+        
+        // Create new chooser view with updated content
+        let newView = WindowChooserView(
+            windows: windows,
+            appName: app.localizedName ?? "Unknown",
+            app: app,
+            callback: callback
+        )
+        
+        // Replace old view with new one
+        if let oldView = chooserView {
+            oldView.removeFromSuperview()
+        }
+        
+        // Add and position new view immediately
+        if let containerView = window?.contentView?.subviews.first {
+            containerView.addSubview(newView)
+            newView.frame = containerView.bounds
+        }
+        
+        // Update reference
+        chooserView = newView
+        
+        // Update position
+        updatePosition(point)
+    }
+
+    func updatePosition(_ point: CGPoint) {
+        guard let window = window else { return }
+        
+        // Calculate new frame
+        let frame = window.frame
+        let targetX = point.x - frame.width/2
+        let dockHeight = DockService.shared.getDockMagnificationSize()
+        let targetY = dockHeight + Constants.UI.arrowOffset - 4
+        
+        // Always animate position changes
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.15
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            context.allowsImplicitAnimation = true
+            
+            window.setFrame(
+                NSRect(
+                    x: targetX,
+                    y: targetY,
+                    width: frame.width,
+                    height: frame.height
+                ),
+                display: true
+            )
+        }
+    }
+
     func refreshMenu() {
         // Get fresh window list
         let windows = AccessibilityService.shared.listApplicationWindows(for: app)
@@ -215,14 +379,29 @@ class WindowChooserController: NSWindowController {
             return
         }
         
-        // Store current window position
-        let currentFrame = self.window?.frame ?? NSRect.zero
+        // If window doesn't exist yet, create it
+        if window == nil {
+            createWindow(with: windows)
+            return
+        }
         
-        // Create entirely new window
+        // Update existing window content if needed
+        if needsWindowUpdate(windows: windows) {
+            // Update content without recreating window
+            chooserView?.updateWindows(windows, app: app)
+            
+            // Update window size
+            let newHeight = Constants.UI.windowHeight(for: windows.count)
+            updateWindowSize(to: newHeight)
+        }
+    }
+    
+    private func createWindow(with windows: [WindowInfo]) {
+        // Create new window
         let newWindow = NSWindow(
             contentRect: NSRect(
-                x: currentFrame.origin.x,
-                y: currentFrame.origin.y,
+                x: 0,
+                y: 0,
                 width: Constants.UI.windowWidth,
                 height: Constants.UI.windowHeight(for: windows.count)
             ),
@@ -231,12 +410,13 @@ class WindowChooserController: NSWindowController {
             defer: false
         )
         
-        // Configure new window
+        // Configure window
         newWindow.backgroundColor = .clear
         newWindow.isOpaque = false
         newWindow.hasShadow = true
         newWindow.level = .popUpMenu
         newWindow.appearance = NSApp.effectiveAppearance
+        newWindow.alphaValue = 0
         
         // Create container view for shadow
         let containerView = NSView(frame: newWindow.contentView!.bounds)
@@ -254,7 +434,7 @@ class WindowChooserController: NSWindowController {
         visualEffect.wantsLayer = true
         visualEffect.layer?.masksToBounds = true
         
-        // Create new chooser view
+        // Create chooser view
         let newView = WindowChooserView(
             windows: windows,
             appName: app.localizedName ?? "Unknown",
@@ -271,73 +451,35 @@ class WindowChooserController: NSWindowController {
         visualEffect.frame = containerView.bounds
         newView.frame = visualEffect.bounds
         
-        // Replace old window with new one
-        let oldWindow = self.window
+        // Store references
         self.window = newWindow
+        self.chooserView = newView
         
-        // Show new window and close old one
+        // Show window
         newWindow.makeKeyAndOrderFront(nil)
-        oldWindow?.close()
+        
+        // Fade in with animation
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = Constants.UI.animationDuration
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            newWindow.animator().alphaValue = 1
+        }
+        
+        // Setup tracking area after window is shown
+        setupTrackingArea()
     }
-
+    
     func needsWindowUpdate(windows: [WindowInfo]) -> Bool {
         // Compare current windows with new windows
         guard let currentWindows = chooserView?.options else { return true }
         
         if currentWindows.count != windows.count { return true }
         
-        // Compare window IDs and states
+        // Compare window IDs only - skip minimized state check for performance
         for (current, new) in zip(currentWindows, windows) {
             if current.cgWindowID != new.cgWindowID { return true }
-            
-            // Check if minimized state changed
-            var currentMinimized: AnyObject?
-            var newMinimized: AnyObject?
-            let currentState = AXUIElementCopyAttributeValue(current.window, kAXMinimizedAttribute as CFString, &currentMinimized) == .success && (currentMinimized as? Bool == true)
-            let newState = AXUIElementCopyAttributeValue(new.window, kAXMinimizedAttribute as CFString, &newMinimized) == .success && (newMinimized as? Bool == true)
-            
-            if currentState != newState { return true }
         }
         
         return false
-    }
-
-    func updateWindows(_ windows: [WindowInfo], for app: NSRunningApplication, at point: CGPoint) {
-        // Update the chooser view with new windows
-        chooserView?.updateWindows(windows, app: app)
-        
-        // Update window size if needed
-        let newHeight = Constants.UI.windowHeight(for: windows.count)
-        if window?.frame.height != newHeight {
-            var frame = window?.frame ?? .zero
-            frame.size.height = newHeight
-            window?.setFrame(frame, display: true, animate: true)
-        }
-    }
-
-    func updatePosition(_ point: CGPoint) {
-        guard let window = window else { return }
-        var frame = window.frame
-        frame.origin.x = point.x - frame.width/2
-        let dockHeight = DockService.shared.getDockMagnificationSize()
-        frame.origin.y = dockHeight + Constants.UI.arrowOffset - 4
-        window.setFrame(frame, display: true)
-    }
-
-    func prepareForReuse() {
-        // Remove tracking area
-        if let trackingArea = trackingArea,
-           let contentView = window?.contentView {
-            contentView.removeTrackingArea(trackingArea)
-        }
-        trackingArea = nil
-        
-        // Clean up view references
-        chooserView = nil
-    }
-    
-    deinit {
-        // Remove observer
-        NotificationCenter.default.removeObserver(self)
     }
 } 

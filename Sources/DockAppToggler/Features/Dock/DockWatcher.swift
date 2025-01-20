@@ -425,9 +425,14 @@ class DockWatcher: NSObject, NSMenuDelegate {
     @MainActor private func cleanupWindows() {
         // Hide windows immediately
         for controller in _chooserControllers.values {
-            controller.window?.orderOut(nil)
+            controller.prepareForReuse()
+            controller.close()
         }
-        _windowChooser?.window?.orderOut(nil)
+        
+        if let chooser = _windowChooser {
+            chooser.prepareForReuse()
+            chooser.close()
+        }
         
         // Reset state variables
         lastHoveredApp = nil
@@ -436,6 +441,8 @@ class DockWatcher: NSObject, NSMenuDelegate {
         showingWindowChooserOnClick = false
         lastClickTime = 0
         lastMouseMoveTime = 0
+        currentApp = nil
+        lastWindowOrder = nil
         
         // Clear references
         _chooserControllers.removeAll()
@@ -444,6 +451,14 @@ class DockWatcher: NSObject, NSMenuDelegate {
         // Cancel any pending tasks
         menuShowTask?.cancel()
         menuShowTask = nil
+        
+        // Force a cleanup cycle
+        autoreleasepool {
+            // Clear graphics memory
+            CATransaction.begin()
+            CATransaction.flush()
+            CATransaction.commit()
+        }
     }
 
     
@@ -703,34 +718,30 @@ class DockWatcher: NSObject, NSMenuDelegate {
                 lastRightClickedDockIcon = nil
             }
             
-            // Only proceed if it's a different app or we don't have a chooser
-            if app != lastHoveredApp || windowChooser == nil {
-                // Cancel any pending tasks
-                menuShowTask?.cancel()
-                menuShowTask = nil
+            // Handle transition between apps
+            if app != lastHoveredApp {
+                // Get windows for the new app
+                let windows = AccessibilityService.shared.listApplicationWindows(for: app)
                 
-                // Create weak reference to avoid retain cycles
-                weak var weakSelf = self
-                let task = DispatchWorkItem { [weak self] in
-                    guard let self = self else { return }
-                    
-                    Task {
-                        let windows = AccessibilityService.shared.listApplicationWindows(for: app)
-                        
-                        if !windows.isEmpty {
-                            await MainActor.run {
-                                guard let self = weakSelf, !self.isClosing else { return }
-                                self.displayWindowSelector(for: app, at: iconCenter, windows: windows)
-                                self.lastHoveredApp = app
-                            }
-                        }
+                if !windows.isEmpty {
+                    if let existingChooser = windowChooser {
+                        // Reuse existing chooser for smooth transition
+                        existingChooser.updateWindows(windows, for: app, at: iconCenter)
+                        existingChooser.updatePosition(iconCenter)
+                        lastHoveredApp = app
+                        currentApp = app
+                    } else {
+                        // Create new chooser if none exists
+                        displayWindowSelector(for: app, at: iconCenter, windows: windows)
                     }
+                } else {
+                    // No windows, close any existing chooser
+                    windowChooser?.close()
+                    windowChooser = nil
+                    lastHoveredApp = nil
                 }
-                
-                menuShowTask = task
-                DispatchQueue.main.asyncAfter(deadline: .now() + menuShowDelay, execute: task)
             } else if let chooser = windowChooser {
-                // If it's the same app, just update the position
+                // Same app, just update position
                 chooser.updatePosition(iconCenter)
             }
             return
