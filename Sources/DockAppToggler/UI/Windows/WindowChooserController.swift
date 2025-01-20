@@ -30,15 +30,17 @@ class WindowChooserController: NSWindowController {
         let height = Constants.UI.windowHeight(for: windows.count)
         let width = Constants.UI.windowWidth
         
-        // Calculate position to be centered above the Dock icon
-        let dockHeight: CGFloat = 70 // Approximate Dock height
-        let tooltipOffset: CGFloat = -4 // Negative offset to overlap the Dock slightly
+        // Get the main screen and its frame
+        guard let screen = NSScreen.main else {
+            fatalError("No main screen available")
+        }
         
         // Keep x position exactly at click point for perfect centering
         let adjustedX = point.x - width/2
         
-        // Position the window just above the Dock
-        let adjustedY = dockHeight + tooltipOffset
+        // Position the window above the Dock with magnification consideration
+        let dockHeight = DockService.shared.getDockMagnificationSize()
+        let adjustedY = dockHeight + Constants.UI.arrowOffset - 4
         
         let frame = NSRect(x: adjustedX, 
                           y: adjustedY, 
@@ -172,6 +174,12 @@ class WindowChooserController: NSWindowController {
         guard !isClosing else { return }
         isClosing = true
         
+        // Remove tracking area
+        if let trackingArea = trackingArea,
+           let contentView = window?.contentView {
+            contentView.removeTrackingArea(trackingArea)
+        }
+        
         // Store self reference before animation
         let controller = self
         
@@ -186,8 +194,15 @@ class WindowChooserController: NSWindowController {
     }
     
     private func finishClosing() {
+        // Clean up resources
+        trackingArea = nil
+        chooserView = nil
+        
         super.close()
         isClosing = false
+        
+        // Post notification that window chooser is closed
+        NotificationCenter.default.post(name: NSNotification.Name("WindowChooserDidClose"), object: self)
     }
     
     func refreshMenu() {
@@ -304,55 +319,21 @@ class WindowChooserController: NSWindowController {
         guard let window = window else { return }
         var frame = window.frame
         frame.origin.x = point.x - frame.width/2
-        frame.origin.y = Constants.UI.dockHeight + Constants.UI.arrowOffset
+        let dockHeight = DockService.shared.getDockMagnificationSize()
+        frame.origin.y = dockHeight + Constants.UI.arrowOffset - 4
         window.setFrame(frame, display: true)
     }
 
     func prepareForReuse() {
-        autoreleasepool {
-            // Clean up chooser view
-            chooserView?.cleanup()
-            chooserView = nil
-            
-            // Remove tracking area
-            if let oldArea = trackingArea {
-                window?.contentView?.removeTrackingArea(oldArea)
-                trackingArea = nil
-            }
-            
-            // Clean up visual effect view
-            if let visualEffect = visualEffectView {
-                visualEffect.layer?.removeAllAnimations()
-                visualEffect.layer?.removeFromSuperlayer()
-                visualEffect.removeFromSuperview()
-                visualEffectView = nil
-            }
-            
-            // Clean up window content
-            if let contentView = window?.contentView {
-                contentView.subviews.forEach { view in
-                    view.layer?.removeAllAnimations()
-                    view.layer?.removeFromSuperlayer()
-                    view.removeFromSuperview()
-                }
-                contentView.layer?.sublayers?.removeAll()
-            }
-            
-            // Reset window properties
-            window?.delegate = nil
-            window?.contentView = nil
-            window?.orderOut(nil)
-            
-            // Clear other references
-            isClosing = false
-            
-            // Suggest garbage collection
-            if #available(macOS 10.15, *) {
-                Task { @MainActor in
-                    await Task.yield()
-                }
-            }
+        // Remove tracking area
+        if let trackingArea = trackingArea,
+           let contentView = window?.contentView {
+            contentView.removeTrackingArea(trackingArea)
         }
+        trackingArea = nil
+        
+        // Clean up view references
+        chooserView = nil
     }
     
     deinit {

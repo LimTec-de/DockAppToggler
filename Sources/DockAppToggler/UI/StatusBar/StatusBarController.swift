@@ -47,6 +47,9 @@ class StatusBarController {
                 // Set as template
                 resizedImage.isTemplate = true
                 button.image = resizedImage
+                
+                // Add tooltip
+                button.toolTip = Bundle.main.infoDictionary?[kCFBundleNameKey as String] as? String ?? "DockAppToggler"
             }
         }
         
@@ -61,6 +64,11 @@ class StatusBarController {
         
         // Add separator
         menu.addItem(NSMenuItem.separator())
+        
+        // Add help menu item
+        let helpItem = NSMenuItem(title: "Show Help...", action: #selector(showHelp), keyEquivalent: "h")
+        helpItem.target = self
+        menu.addItem(helpItem)
         
         // Add update menu item only if updater is available
         if let updaterController = updaterController {
@@ -102,7 +110,19 @@ class StatusBarController {
         autostartMenuItem.state = LoginItemManager.shared.isLoginItemEnabled ? .on : .off
     }
     
+    @objc private func showHelp() {
+        HelpWindowController.show()
+    }
+    
     @objc private func restartApp() {
-        NSApplication.restart()
+        StatusBarController.performRestart()
+    }
+    
+    static func performRestart() {
+        // Set flag to skip help on next launch
+        UserDefaults.standard.set(true, forKey: "HideHelpOnStartup")
+        
+        // Restart without checking for updates
+        NSApplication.restart(skipUpdateCheck: true)
     }
 } 

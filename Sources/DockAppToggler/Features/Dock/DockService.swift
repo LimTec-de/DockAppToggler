@@ -10,6 +10,16 @@ class DockService {
     
     private init() {}
     
+    func getDockMagnificationSize() -> CGFloat {
+        let defaults = UserDefaults.init(suiteName: "com.apple.dock")
+        let magnificationEnabled = defaults?.bool(forKey: "magnification") ?? false
+        if magnificationEnabled {
+            let magnifiedSize = defaults?.double(forKey: "largesize") ?? 128.0
+            return CGFloat(magnifiedSize)
+        }
+        return Constants.UI.dockHeight
+    }
+    
     func findDockProcess() -> NSRunningApplication? {
         return workspace.runningApplications.first(where: { $0.bundleIdentifier == Constants.Identifiers.dockBundleID })
     }

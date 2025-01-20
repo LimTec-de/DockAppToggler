@@ -30,6 +30,11 @@ let app = NSApplication.shared
 // Run the accessibility check once at startup
 _ = AccessibilityService.shared.requestAccessibilityPermissions()
 
+// Show help screen on first launch
+DispatchQueue.main.async {
+    HelpWindowController.showIfNeeded()
+}
+
 // Create the shared updater controller - always create it, but control auto-check behavior
 let sharedUpdater = SPUStandardUpdaterController(
     startingUpdater: !shouldSkipUpdateCheck,  // Only start the updater if not skipping
@@ -41,6 +46,7 @@ let sharedUpdater = SPUStandardUpdaterController(
 let appController = (
     watcher: DockWatcher(),
     statusBar: StatusBarController(updater: sharedUpdater),
+    statusBarWatcher: StatusBarWatcher(),
     updater: sharedUpdater
 )
 

@@ -14,6 +14,7 @@ class WindowChooserView: NSView {
     private var lastMaximizeClickTime: TimeInterval = 0
     private let doubleClickInterval: TimeInterval = 0.3
     internal var topmostWindow: AXUIElement?
+    private var lastClickTime: TimeInterval = 0
     
     init(windows: [WindowInfo], appName: String, app: NSRunningApplication, callback: @escaping (AXUIElement, Bool) -> Void) {
         self.options = windows
@@ -295,6 +296,11 @@ class WindowChooserView: NSView {
         let windowInfo = options[sender.tag]
         Logger.debug("Selected window info - Name: \(windowInfo.name), ID: \(windowInfo.cgWindowID ?? 0)")
         
+        // Check for double click
+        let currentTime = ProcessInfo.processInfo.systemUptime
+        let isDoubleClick = (currentTime - lastClickTime) < doubleClickInterval
+        lastClickTime = currentTime
+        
         if windowInfo.isAppElement {
             // Handle app element click - try to open/activate the app
             if let bundleURL = targetApp.bundleURL {
@@ -318,11 +324,11 @@ class WindowChooserView: NSView {
                         }
                     }
                 }
-            }
-            
-            // Close the menu
-            if let windowController = self.window?.windowController as? WindowChooserController {
-                windowController.close()
+                
+                // Close the menu
+                if let windowController = self.window?.windowController as? WindowChooserController {
+                    windowController.close()
+                }
             }
         } else {
             // Handle window click with new approach
@@ -334,30 +340,58 @@ class WindowChooserView: NSView {
             // Update topmost window
             topmostWindow = windowInfo.window
             
-            // First unminimize if needed
+            // First unminimize if needed and raise the window
+            var isMinimized = false
             var minimizedValue: AnyObject?
             if AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success,
-               let isMinimized = minimizedValue as? Bool,
-               isMinimized {
-                AXUIElementSetAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
-                
-                // Add a small delay to allow unminimization
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                    // Pass the clicked window info
-                    AccessibilityService.shared.raiseWindow(windowInfo: windowInfo, for: self.targetApp)
-                }
-            } else {
-                // Pass the clicked window info
-                AccessibilityService.shared.raiseWindow(windowInfo: windowInfo, for: targetApp)
+               let minimizedState = minimizedValue as? Bool {
+                isMinimized = minimizedState
             }
             
-            // Add a small delay to ensure window state has updated
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-                // Refresh the menu to update all states
-                if let windowController = self?.window?.windowController as? WindowChooserController {
-                    windowController.refreshMenu()
+            // Handle window raising and minimizing other windows
+            let handleDoubleClick = {
+                if isDoubleClick {
+                    // Double click: minimize all other windows
+                    for (index, otherWindow) in self.options.enumerated() {
+                        if index != sender.tag && !otherWindow.isAppElement {
+                            // Minimize other windows
+                            AXUIElementSetAttributeValue(otherWindow.window, kAXMinimizedAttribute as CFString, true as CFTypeRef)
+                        }
+                    }
                 }
             }
+            
+            if isMinimized {
+                // For minimized windows, we need to:
+                // 1. Unminimize
+                // 2. Wait for unminimize animation
+                // 3. Raise window
+                // 4. Handle double-click if needed
+                AXUIElementSetAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
+                
+                // Wait for unminimize animation, then raise and handle double-click
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                    self.callback?(windowInfo.window, false)
+                    
+                    // Wait for raise animation before minimizing others
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        handleDoubleClick()
+                    }
+                }
+            } else {
+                // For non-minimized windows, just raise and handle double-click
+                callback?(windowInfo.window, false)
+                
+                // Small delay to let the raise animation complete
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    handleDoubleClick()
+                }
+            }
+        }
+        
+        // Close the menu after action
+        if let windowController = self.window?.windowController as? WindowChooserController {
+            windowController.close()
         }
     }
     
