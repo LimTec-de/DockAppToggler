@@ -16,11 +16,16 @@ class WindowChooserController: NSWindowController {
     private var trackingArea: NSTrackingArea?
     private var isClosing: Bool = false
     private let callback: (AXUIElement, Bool) -> Void
-
+    
+    // Add dockService property
+    private let dockService = DockService.shared
+    
     // Alternative: Add a public method to get the topmost window
     var topmostWindow: AXUIElement? {
         return chooserView?.topmostWindow
     }
+    
+    private var isHandlingToggle = false
     
     init(at point: NSPoint, windows: [WindowInfo], app: NSRunningApplication, callback: @escaping (AXUIElement, Bool) -> Void) {
         self.app = app
@@ -116,21 +121,11 @@ class WindowChooserController: NSWindowController {
             callback: { [weak self] window, isHideAction in
                 guard let self = self else { return }
                 
-                // Get the window info from our windows list to ensure we have the correct ID
-                if let windowInfo = windows.first(where: { $0.window == window }),
-                   let windowID = windowInfo.cgWindowID {
-                    // Store the CGWindowID in the AXUIElement
-                    AXUIElementSetAttributeValue(window, Constants.Accessibility.windowIDKey, windowID as CFTypeRef)
-                    Logger.debug("Callback: Set window ID \(windowID) on AXUIElement")
-                }
-                
                 if isHideAction {
                     // Hide the selected window
                     AccessibilityService.shared.hideWindow(window: window, for: self.app)
-                    // Close menu only for hide actions
-                    self.close()
                 } else {
-                    // Always show and raise the window
+                    // Show and raise the window
                     AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
                     var titleValue: AnyObject?
                     AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleValue)
@@ -138,12 +133,12 @@ class WindowChooserController: NSWindowController {
                     let windowInfo = WindowInfo(window: window, name: windowName)
                     AccessibilityService.shared.raiseWindow(windowInfo: windowInfo, for: self.app)
                     self.app.activate(options: [.activateIgnoringOtherApps])
-                    
-                    // Add a small delay to ensure window state has updated
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-                        // Refresh the menu to update all states
-                        self?.refreshMenu()
-                    }
+                }
+                
+                // Update menu after any action with a small delay
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
+                    self.refreshMenuState()
                 }
             }
         )
@@ -177,23 +172,12 @@ class WindowChooserController: NSWindowController {
         guard !isClosing else { return }
         isClosing = true
         
-        // Remove tracking area
-        if let trackingArea = trackingArea,
-           let contentView = window?.contentView {
-            contentView.removeTrackingArea(trackingArea)
-        }
+        // Remove tracking area and event monitors immediately
+        cleanup()
         
-        // Store self reference before animation
-        let controller = self
-        
-        // Animate window closing
-        NSAnimationContext.runAnimationGroup({ context in
-            context.duration = Constants.UI.animationDuration
-            window?.animator().alphaValue = 0
-        }, completionHandler: {
-            // Use stored reference to call super and update state
-            controller.finishClosing()
-        })
+        // Close window immediately without animation
+        window?.close()
+        finishClosing()
     }
     
     @MainActor private func cleanup() {
@@ -204,31 +188,18 @@ class WindowChooserController: NSWindowController {
         }
         trackingArea = nil
         
-        // Clean up view hierarchy
+        // Clean up view hierarchy immediately
         if let window = window {
-            // Remove all tracking areas from subviews
             window.contentView?.subviews.forEach { view in
                 view.trackingAreas.forEach { area in
                     view.removeTrackingArea(area)
                 }
-            }
-            
-            // Clear view hierarchy
-            window.contentView?.subviews.forEach { view in
-                view.layer?.removeAllAnimations()
-                view.layer?.removeFromSuperlayer()
                 view.removeFromSuperview()
             }
             
-            // Clear window properties
-            window.delegate = nil
-            window.contentViewController = nil
             window.contentView = nil
+            window.delegate = nil
         }
-        
-        // Clean up chooser view
-        chooserView?.cleanup()
-        chooserView = nil
     }
     
     @MainActor func prepareForReuse() {
@@ -346,51 +317,56 @@ class WindowChooserController: NSWindowController {
         updatePosition(point)
     }
 
-    func updatePosition(_ point: CGPoint) {
+    func updatePosition(_ iconCenter: CGPoint) {
         guard let window = window else { return }
         
-        // Calculate new frame
-        let frame = window.frame
-        let targetX = point.x - frame.width/2
-        let dockHeight = DockService.shared.getDockMagnificationSize()
-        let targetY = dockHeight + Constants.UI.arrowOffset - 4
+        // Calculate new window position
+        let menuWidth = window.frame.width
+        let menuHeight = window.frame.height
+        let screenFrame = window.screen?.visibleFrame ?? .zero
         
-        // Always animate position changes
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.15
-            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            context.allowsImplicitAnimation = true
-            
-            window.setFrame(
-                NSRect(
-                    x: targetX,
-                    y: targetY,
-                    width: frame.width,
-                    height: frame.height
-                ),
-                display: true
-            )
+        // Position menu above dock icon
+        let xPos = max(screenFrame.minX, min(iconCenter.x - menuWidth / 2, screenFrame.maxX - menuWidth))
+        let dockHeight = DockService.shared.getDockMagnificationSize()
+        let yPos = dockHeight + Constants.UI.arrowOffset - 4
+        
+        let newFrame = NSRect(x: xPos, y: yPos, width: menuWidth, height: menuHeight)
+        
+        // Check if this is a significant position change (different dock icon)
+        let currentCenterX = window.frame.origin.x + (window.frame.width / 2)
+        let isSignificantMove = abs(currentCenterX - iconCenter.x) > window.frame.width / 2
+        
+        if window.isVisible && isSignificantMove {
+            // Use fade transition only for significant position changes
+            NSAnimationContext.runAnimationGroup({ context in
+                context.duration = 0.15
+                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                window.animator().alphaValue = 0.0
+            }) { [weak self] in
+                self?.window?.setFrame(newFrame, display: true)
+                NSAnimationContext.runAnimationGroup({ context in
+                    context.duration = 0.15
+                    context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                    self?.window?.animator().alphaValue = 1.0
+                })
+            }
+        } else {
+            // Direct update for initial display or small movements
+            window.setFrame(newFrame, display: true)
+            window.alphaValue = 1.0
         }
     }
 
     func refreshMenu() {
-        // Get fresh window list
-        let windows = AccessibilityService.shared.listApplicationWindows(for: app)
-        
-        // If no windows left, close the menu
-        if windows.isEmpty {
-            self.close()
-            return
-        }
-        
-        // Update existing window content if needed
-        if needsWindowUpdate(windows: windows) {
-            // Update content without recreating window
-            chooserView?.updateWindows(windows, app: app)
-            
-            // Update window size
-            let newHeight = Constants.UI.windowHeight(for: windows.count)
-            updateWindowSize(to: newHeight)
+        if let windows = chooserView?.options {
+            if needsWindowUpdate(windows: windows) {
+                // Update content without recreating window
+                chooserView?.updateWindows(windows)  // Remove extra app argument
+                
+                // Update window size
+                let newHeight = Constants.UI.windowHeight(for: windows.count)
+                updateWindowSize(to: newHeight)
+            }
         }
     }
     
@@ -480,5 +456,81 @@ class WindowChooserController: NSWindowController {
         }
         
         return false
+    }
+    
+    private func handleAppToggle(_ bundleIdentifier: String) {
+        // Prevent multiple simultaneous toggles
+        guard !isHandlingToggle else { return }
+        isHandlingToggle = true
+        
+        // First close the window immediately
+        close()
+        
+        // Then handle the app toggle
+        Task {
+            do {
+                try await dockService.toggleApp(bundleIdentifier)
+                
+                // Add a delay to allow window state to update
+                try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
+                
+                // Update window states
+                await MainActor.run {
+                    updateWindowStates()
+                }
+            } catch {
+                // Show error notification after a short delay to ensure window is closed
+                try? await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
+                await MainActor.run {
+                    showErrorNotification(error.localizedDescription)
+                }
+                Logger.error("Failed to toggle app: \(error)")
+            }
+            
+            isHandlingToggle = false
+        }
+    }
+    
+    private func updateWindowStates() {
+        // Get fresh window list
+        let updatedWindows = AccessibilityService.shared.listApplicationWindows(for: app)
+        
+        // Update window states in chooser view
+        chooserView?.updateWindows(updatedWindows)
+        
+        // If all windows are minimized, close the menu
+        if updatedWindows.allSatisfy({ windowInfo in
+            var minimizedValue: AnyObject?
+            return AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success &&
+                   (minimizedValue as? Bool == true)
+        }) {
+            close()
+        }
+    }
+    
+    private func showErrorNotification(_ message: String) {
+        let notification = NSUserNotification()
+        notification.title = "DockAppToggler"
+        notification.informativeText = message
+        NSUserNotificationCenter.default.deliver(notification)
+    }
+    
+    private func refreshMenuState() {
+        // Get fresh window list
+        let updatedWindows = AccessibilityService.shared.listApplicationWindows(for: app)
+        
+        // Update window chooser view with new windows
+        chooserView?.updateWindows(updatedWindows)
+        
+        // If all windows are minimized, close the menu
+        let allMinimized = updatedWindows.allSatisfy { windowInfo in
+            var minimizedValue: AnyObject?
+            return AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success &&
+                   (minimizedValue as? Bool == true)
+        }
+        
+        if allMinimized {
+            close()
+        }
     }
 } 

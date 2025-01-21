@@ -10,12 +10,14 @@ class DockService {
     
     private init() {}
     
+    private let timeout: TimeInterval = 3.0 // 3 second timeout
+    
     func getDockMagnificationSize() -> CGFloat {
         let defaults = UserDefaults.init(suiteName: "com.apple.dock")
         let magnificationEnabled = defaults?.bool(forKey: "magnification") ?? false
         if magnificationEnabled {
             let magnifiedSize = defaults?.double(forKey: "largesize") ?? 128.0
-            return CGFloat(magnifiedSize)
+            return CGFloat(magnifiedSize + 20)
         }
         return Constants.UI.dockHeight
     }
@@ -67,56 +69,12 @@ class DockService {
         var urlUntyped: CFTypeRef?
         let urlResult = AXUIElementCopyAttributeValue(element, Constants.Accessibility.urlKey, &urlUntyped)
         
-        // Try standard URL method first
         if urlResult == .success,
            let urlRef = urlUntyped as? NSURL,
            let url = urlRef as URL? {
             
-            // Check if it's a Wine application (.exe)
-            if url.path.lowercased().hasSuffix(".exe") {
-                let baseExeName = url.deletingPathExtension().lastPathComponent.lowercased()
-                
-                // Create a filtered list of potential Wine apps first
-                let potentialWineApps = workspace.runningApplications.filter { app in
-                    // Only check apps that are:
-                    // 1. Active or regular activation policy
-                    // 2. Have a name that matches our target or contains "wine"
-                    guard let processName = app.localizedName?.lowercased(),
-                        app.activationPolicy == .regular else {
-                        return false
-                    }
-                    return processName.contains(baseExeName) || processName.contains("wine")
-                }
-                
-                // First try exact name matches (most likely to be correct)
-                if let exactMatch = potentialWineApps.first(where: { app in
-                    app.localizedName?.lowercased() == baseExeName
-                }) {
-                    // Quick validation with a single window check
-                    let windows = AccessibilityService.shared.listApplicationWindows(for: exactMatch)
-                    if !windows.isEmpty {
-                        return (app: exactMatch, url: url, iconCenter: iconCenter)
-                    }
-                }
-                
-                // Then try partial matches
-                for wineApp in potentialWineApps {
-                    // Cache window list to avoid multiple calls
-                    let windows = AccessibilityService.shared.listApplicationWindows(for: wineApp)
-                    
-                    // Check if any window contains our target name
-                    if windows.contains(where: { window in
-                        window.name.lowercased().contains(baseExeName)
-                    }) {
-                        return (app: wineApp, url: url, iconCenter: iconCenter)
-                    }
-                }
-            }
-            
-            // Standard bundle ID matching
-            if let bundle = Bundle(url: url),
-               let bundleId = bundle.bundleIdentifier,
-               let app = workspace.runningApplications.first(where: { $0.bundleIdentifier == bundleId }) {
+            // Find the corresponding running application
+            if let app = findRunningApp(for: url) {
                 return (app: app, url: url, iconCenter: iconCenter)
             }
         }
@@ -124,18 +82,162 @@ class DockService {
         return nil
     }
     
-    func performDockIconAction(app: NSRunningApplication, clickCount: Int64) -> Bool {
-        if app.isActive {
-            if clickCount == 2 {
-                Logger.info("Double-click detected, terminating app: \(app.localizedName ?? "Unknown")")
-                return app.terminate()
-            } else {
-                Logger.info("Single-click detected, hiding app: \(app.localizedName ?? "Unknown")")
-                return app.hide()
-            }
+    private func findRunningApp(for url: URL) -> NSRunningApplication? {
+        // First try standard bundle ID matching
+        if let bundle = Bundle(url: url),
+           let bundleId = bundle.bundleIdentifier,
+           let app = workspace.runningApplications.first(where: { $0.bundleIdentifier == bundleId }) {
+            return app
         }
         
-        Logger.info("Letting Dock handle click: \(app.localizedName ?? "Unknown")")
-        return false
+        // Handle Wine applications
+        if url.path.lowercased().hasSuffix(".exe") {
+            let baseExeName = url.deletingPathExtension().lastPathComponent.lowercased()
+            
+            // Try exact name matches first
+            if let exactMatch = workspace.runningApplications.first(where: { app in
+                guard let processName = app.localizedName?.lowercased(),
+                      app.activationPolicy == .regular else {
+                    return false
+                }
+                return processName == baseExeName
+            }) {
+                return exactMatch
+            }
+            
+            // Then try partial matches
+            return workspace.runningApplications.first(where: { app in
+                guard let processName = app.localizedName?.lowercased(),
+                      app.activationPolicy == .regular else {
+                    return false
+                }
+                return processName.contains(baseExeName) || processName.contains("wine")
+            })
+        }
+        
+        return nil
+    }
+    
+    func performDockIconAction(app: NSRunningApplication, clickCount: Int64) -> Bool {
+        // Always return false for right-clicks to let the Dock handle them
+        if clickCount < 0 {
+            Logger.info("Right-click detected, letting Dock handle it: \(app.localizedName ?? "Unknown")")
+            return false
+        }
+        
+        // Don't handle the click if the app is not active
+        if !app.isActive {
+            Logger.info("App not active, letting Dock handle click: \(app.localizedName ?? "Unknown")")
+            return false
+        }
+        
+        if clickCount == 2 {
+            Logger.info("Double-click detected, terminating app: \(app.localizedName ?? "Unknown")")
+            return app.terminate()
+        } else {
+            Logger.info("Single-click detected, hiding app: \(app.localizedName ?? "Unknown")")
+            return app.hide()
+        }
+    }
+    
+    func toggleApp(_ bundleIdentifier: String) async throws {
+        // Get app reference on main actor
+        guard let app = workspace.runningApplications.first(where: { $0.bundleIdentifier == bundleIdentifier }) else {
+            throw DockServiceError.appNotFound
+        }
+        
+        // Create a task with timeout
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            // Add timeout task
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(2.0 * 1_000_000_000))
+                throw DockServiceError.timeout
+            }
+            
+            // Add toggle task
+            group.addTask { [app] in
+                if app.isActive {
+                    Logger.debug("Hiding app: \(app.localizedName ?? bundleIdentifier)")
+                    if !app.hide() {
+                        throw DockServiceError.operationFailed
+                    }
+                } else {
+                    Logger.debug("Activating app: \(app.localizedName ?? bundleIdentifier)")
+                    if !app.activate(options: [.activateIgnoringOtherApps]) {
+                        throw DockServiceError.operationFailed
+                    }
+                }
+            }
+            
+            // Wait for first completion or error
+            do {
+                _ = try await group.next()
+                group.cancelAll()
+            } catch {
+                group.cancelAll()
+                Logger.error("App toggle failed: \(error)")
+                throw error
+            }
+        }
+    }
+    
+    private func withTimeout<T: Sendable>(_ timeout: TimeInterval = 3.0, operation: @Sendable @escaping () async throws -> T) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            let operation = operation
+            
+            // Main operation task
+            group.addTask { @Sendable in
+                try await operation()
+            }
+            
+            // Timeout task
+            group.addTask { @Sendable in
+                try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                Logger.warning("Operation timed out after \(timeout) seconds")
+                throw DockServiceError.timeout
+            }
+            
+            // Wait for first completion
+            do {
+                guard let result = try await group.next() else {
+                    throw DockServiceError.unknown
+                }
+                group.cancelAll()
+                return result
+            } catch {
+                group.cancelAll()
+                throw error
+            }
+        }
+    }
+    
+    // Add method to reset tracking state
+    func resetDockTracking() {
+        // Force the Dock to reset its tracking state
+        if let dockApp = findDockProcess() {
+            let pid = dockApp.processIdentifier
+            let axElement = AXUIElementCreateApplication(pid)
+            
+            // Send a notification to reset tracking
+            var value: CFTypeRef?  // Make this optional
+            if AXUIElementCopyAttributeValue(axElement, "AXFocused" as CFString, &value) == .success {
+                AXUIElementSetAttributeValue(axElement, "AXFocused" as CFString, true as CFTypeRef)
+                AXUIElementSetAttributeValue(axElement, "AXFocused" as CFString, false as CFTypeRef)
+            }
+        }
+    }
+    
+    enum DockServiceError: Error {
+        case timeout
+        case appNotFound
+        case operationFailed
+        case unknown
+    }
+}
+
+// Add Task timeout extension
+extension Task where Success == Never, Failure == Never {
+    static func timeout(seconds: TimeInterval) async throws {
+        try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
     }
 }

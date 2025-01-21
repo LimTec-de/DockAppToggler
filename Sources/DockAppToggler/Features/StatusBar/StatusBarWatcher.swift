@@ -21,8 +21,27 @@ class TooltipWindow {
         // Configure tooltip window
         tooltip.level = .floating
         tooltip.isOpaque = false
-        tooltip.backgroundColor = .clear
         tooltip.hasShadow = true
+        tooltip.isMovableByWindowBackground = false
+        
+        // Create content view with rounded corners and proper system appearance
+        let contentView = NSVisualEffectView()
+        contentView.wantsLayer = true
+        contentView.material = .popover
+        contentView.blendingMode = .withinWindow
+        contentView.state = .active
+        
+        // Create a container view to handle the rounded corners
+        let containerView = NSView()
+        containerView.wantsLayer = true
+        containerView.layer?.cornerCurve = .continuous
+        containerView.layer?.cornerRadius = 4
+        containerView.layer?.masksToBounds = true
+        
+        // Set up view hierarchy
+        containerView.addSubview(contentView)
+        tooltip.contentView = containerView
+        tooltip.backgroundColor = .clear
         
         // Create label with system font
         let label = NSTextField(frame: .zero)
@@ -30,51 +49,48 @@ class TooltipWindow {
         label.isBezeled = false
         label.isEditable = false
         label.drawsBackground = false
-        label.textColor = .black
-        label.font = .systemFont(ofSize: 13.5)  // Match Dock tooltip font size
+        label.textColor = .labelColor // Use system label color for automatic dark mode support
+        label.font = .systemFont(ofSize: NSFont.smallSystemFontSize + 1.5) // Slightly larger than system small font
         label.alignment = .center
+        label.cell?.truncatesLastVisibleLine = true
+        label.maximumNumberOfLines = 1
         
-        // Calculate size with padding
-        let textSize = label.intrinsicContentSize
-        let horizontalPadding: CGFloat = 10
-        let verticalPadding: CGFloat = 5
-        let extraWidth: CGFloat = 4  // Add extra width to prevent text clipping
-        let windowWidth = textSize.width + horizontalPadding * 2 + extraWidth
+        // Calculate size and set frames
+        let textSize = (text as NSString).size(withAttributes: [
+            .font: label.font as Any
+        ])
+        let horizontalPadding: CGFloat = 12
+        let verticalPadding: CGFloat = 6
+        let textBuffer: CGFloat = 8
+        let windowWidth = textSize.width + horizontalPadding * 2 + textBuffer
         let windowHeight = textSize.height + verticalPadding * 2
         
         // Position window
         let windowX = location.x - windowWidth / 2
         
         // Calculate Y position relative to menu bar
-        guard let screen = NSScreen.main else {
-            return
-        }
+        guard let screen = NSScreen.main else { return }
         let menuBarY = screen.frame.maxY
-        let tooltipGap: CGFloat = 3  // Gap between menu bar and tooltip
-        let windowY = menuBarY - 24 - windowHeight - tooltipGap  // 24 is menu bar height
+        let tooltipGap: CGFloat = 4
+        let menuBarHeight: CGFloat = 24
+        let windowY = menuBarY - menuBarHeight - windowHeight - tooltipGap
         
+        // Set frames
+        containerView.frame = NSRect(x: 0, y: 0, width: windowWidth, height: windowHeight)
+        contentView.frame = containerView.bounds
+        
+        // Then set window frame
         tooltip.setFrame(NSRect(x: windowX, y: windowY,
                               width: windowWidth, height: windowHeight),
-                        display: true)
+                        display: false)
         
-        // Center label in window
+        // Center label in window with buffer space
         label.frame = NSRect(x: horizontalPadding,
                            y: verticalPadding,
-                           width: textSize.width + extraWidth,  // Add extra width here too
+                           width: textSize.width + textBuffer,
                            height: textSize.height)
         
-        // Create content view with rounded corners and gradient background
-        let contentView = NSVisualEffectView(frame: tooltip.frame)
-        contentView.wantsLayer = true
-        contentView.material = .hudWindow  // Semi-transparent light material
-        contentView.blendingMode = .behindWindow
-        contentView.state = .active
-        contentView.layer?.cornerRadius = 6
-        
-        // Add label to content view
         contentView.addSubview(label)
-        
-        tooltip.contentView = contentView
         tooltip.orderFront(nil)
         window = tooltip
     }

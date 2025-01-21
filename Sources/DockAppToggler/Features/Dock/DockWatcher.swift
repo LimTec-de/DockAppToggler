@@ -538,18 +538,42 @@ class DockWatcher: NSObject, NSMenuDelegate {
                             }
                             watcher.clickedApp = nil
                         case .rightMouseDown:
-                            if let (app, _, _) = DockService.shared.findAppUnderCursor(at: location) {
-                                watcher.lastRightClickedDockIcon = app
-                                watcher.windowChooser?.close()
-                                watcher.windowChooser = nil
-                                watcher.lastHoveredApp = nil
-                            } else {
-                                watcher.lastRightClickedDockIcon = nil
+                            // Let the Dock handle right-clicks and reset tracking
+                            if let appUnderCursor = DockService.shared.findAppUnderCursor(at: event.location) {
+                                // Hide window chooser temporarily without destroying it
+                                watcher.windowChooser?.window?.orderOut(nil)  // Just hide the window
+                                watcher.isContextMenuActive = true
+                                
+                                DockService.shared.performDockIconAction(app: appUnderCursor.app, clickCount: -1)
+                                
+                                // Reset tracking after the context menu is closed
+                                let resetWork = DispatchWorkItem { [weak watcher] in
+                                    Task { @MainActor in
+                                        DockService.shared.resetDockTracking()
+                                    }
+                                }
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: resetWork)
                             }
                         case .rightMouseUp:
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak watcher] in
-                                watcher?.isContextMenuActive = false
+                            // Add a delay before showing the window chooser again
+                            let showWork = DispatchWorkItem { [weak watcher] in
+                                Task { @MainActor in
+                                    guard let watcher = watcher else { return }
+                                    watcher.isContextMenuActive = false
+                                    
+                                    // Show the window chooser again if it exists and mouse is still over dock
+                                    if let chooser = watcher.windowChooser,
+                                       let app = watcher.lastHoveredApp,
+                                       let (hoveredApp, _, iconCenter) = DockService.shared.findAppUnderCursor(at: NSEvent.mouseLocation) {
+                                        if hoveredApp == app {
+                                            // Update position and show
+                                            chooser.updatePosition(iconCenter)
+                                            chooser.window?.makeKeyAndOrderFront(nil)
+                                        }
+                                    }
+                                }
                             }
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: showWork)
                         default:
                             break
                         }
@@ -706,21 +730,15 @@ class DockWatcher: NSObject, NSMenuDelegate {
     }
     
     @MainActor private func processMouseMovement(at point: CGPoint) {
-        // Debounce mouse move events
-        let currentTime = ProcessInfo.processInfo.systemUptime
-        guard (currentTime - lastMouseMoveTime) >= Constants.Performance.mouseDebounceInterval else {
+        // Don't process mouse movements if context menu is active
+        if isContextMenuActive {
             return
         }
-        lastMouseMoveTime = currentTime
         
         // Check if mouse is over any dock item
         if let (app, _, iconCenter) = DockService.shared.findAppUnderCursor(at: point) {
             isMouseOverDock = true
-            
-            // Don't show menu if context menu is active
-            if isContextMenuActive {
-                return
-            }
+            cleanupTimer?.invalidate() // Cancel any pending cleanup
             
             // Handle transition between apps
             if app != lastHoveredApp {
@@ -732,6 +750,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
                         // Reuse existing chooser for smooth transition
                         existingChooser.updateWindows(windows, for: app, at: iconCenter)
                         existingChooser.updatePosition(iconCenter)
+                        existingChooser.window?.makeKeyAndOrderFront(nil)
                         lastHoveredApp = app
                         currentApp = app
                     } else {
@@ -739,53 +758,57 @@ class DockWatcher: NSObject, NSMenuDelegate {
                         displayWindowSelector(for: app, at: iconCenter, windows: windows)
                     }
                 } else {
-                    // No windows, close any existing chooser
-                    windowChooser?.close()
-                    windowChooser = nil
+                    // No windows, just hide the chooser
+                    windowChooser?.window?.orderOut(nil)
                     lastHoveredApp = nil
                 }
             } else if let chooser = windowChooser {
-                // Same app, just update position
+                // Same app, just update position and show
                 chooser.updatePosition(iconCenter)
+                chooser.window?.makeKeyAndOrderFront(nil)
             }
-            return
-        }
-        
-        // Mouse is not over dock - check if it's over the window chooser
-        isMouseOverDock = false
-        
-        if let chooser = windowChooser,
-           let window = chooser.window {
-            let mouseLocation = NSEvent.mouseLocation
-            let windowFrame = window.frame
-            
-            // Create expanded frame for hysteresis
-            let expandedFrame = NSRect(
-                x: windowFrame.minX - Constants.UI.menuDismissalMargin,
-                y: windowFrame.minY - Constants.UI.menuDismissalMargin,
-                width: windowFrame.width + Constants.UI.menuDismissalMargin * 2,
-                height: windowFrame.height + Constants.UI.menuDismissalMargin * 2
-            )
-            
-            // If mouse is outside both dock and expanded window frame, close the chooser
-            if !expandedFrame.contains(mouseLocation) {
-                Task { @MainActor in
-                    // Double check position before closing
+        } else {
+            // Check if mouse is over the window chooser (with hysteresis)
+            if let chooser = windowChooser,
+               let window = chooser.window {
+                let mouseLocation = NSEvent.mouseLocation
+                let windowFrame = window.frame
+                
+                // Create expanded frame for hysteresis
+                let expandedFrame = NSRect(
+                    x: windowFrame.minX - Constants.UI.menuDismissalMargin,
+                    y: windowFrame.minY - Constants.UI.menuDismissalMargin,
+                    width: windowFrame.width + Constants.UI.menuDismissalMargin * 2,
+                    height: windowFrame.height + Constants.UI.menuDismissalMargin * 2
+                )
+                
+                // If mouse is outside both dock and expanded window frame, hide the chooser
+                if !expandedFrame.contains(mouseLocation) {
+                    // Double check position before hiding
                     let currentLocation = NSEvent.mouseLocation
                     if !expandedFrame.contains(currentLocation) &&
                         DockService.shared.findAppUnderCursor(at: currentLocation) == nil {
-                        chooser.prepareForReuse()
-                        chooser.close()
-                        windowChooser = nil
+                        window.orderOut(nil)
+                        isMouseOverDock = false
                         lastHoveredApp = nil
-                        await cleanupResources()
+                        
+                        // Start cleanup timer
+                        cleanupTimer?.invalidate()
+                        cleanupTimer = Timer.scheduledTimer(withTimeInterval: cleanupDelay, repeats: false) { [weak self] _ in
+                            Task { @MainActor [weak self] in
+                                guard let self = self else { return }
+                                if !self.isMouseOverDock {
+                                    await self.cleanupResources()
+                                }
+                            }
+                        }
                     }
                 }
+            } else {
+                // No window chooser is visible, reset state
+                isMouseOverDock = false
+                lastHoveredApp = nil
             }
-        } else {
-            // No window chooser is visible, reset state
-            lastHoveredApp = nil
-            isMouseOverDock = false
         }
     }
     

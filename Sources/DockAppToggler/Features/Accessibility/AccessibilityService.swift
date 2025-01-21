@@ -98,11 +98,8 @@ class AccessibilityService {
         // Store CGWindow information for debugging and matching
         var cgWindows: [(id: CGWindowID, name: String?, bounds: CGRect)] = []
         
-            
         // Create a set of window IDs belonging to this app
         let cgWindowIDs = Set(windowList.compactMap { window -> CGWindowID? in
-            
-
             // Check multiple identifiers to ensure we catch all windows
             let ownerPIDMatches = (window[kCGWindowOwnerPID as String] as? pid_t) == pid
             let ownerNameMatches = (window[kCGWindowOwnerName as String] as? String) == app.localizedName
@@ -170,7 +167,6 @@ class AccessibilityService {
             Logger.debug("  - ID: \(window.id), Name: \(window.name ?? "unnamed"), Bounds: \(window.bounds)")
         }
         
-        
         // Get windows using Accessibility API
         var windowsRef: CFTypeRef?
         if AXUIElementCopyAttributeValue(axApp, Constants.Accessibility.windowsKey, &windowsRef) == .success,
@@ -216,8 +212,6 @@ class AccessibilityService {
                                     role == "AXDialog" || // Or is a dialog
                                     subrole == "AXStandardWindow") // Or has standard window subrole
                 
-                
-
                 if !isHidden && isValidWindow {
                     // Get window position and size
                     var positionValue: CFTypeRef?
@@ -267,44 +261,27 @@ class AccessibilityService {
             }
         }
         
-        // If we found CGWindows but no AX windows, try to create windows from CGWindow info
+        // If we found CGWindows but no AX windows, add just the app itself
         if windows.isEmpty && !cgWindows.isEmpty {
-            Logger.debug("No AX windows found, creating from \(cgWindows.count) CGWindows")
-            for cgWindow in cgWindows {
-                // Create a new AXUIElement for each window
-                let axWindow = AXUIElementCreateApplication(app.processIdentifier)
-                
-                // Store the CGWindowID in the AXUIElement immediately
-                let windowID = cgWindow.id  // This is already a CGWindowID (UInt32)
-                let numValue = windowID as CFNumber
-                Logger.debug("Setting window ID \(windowID) on AXUIElement")
-                
-                // Set both the window ID and title
-                AXUIElementSetAttributeValue(axWindow, Constants.Accessibility.windowIDKey, numValue)
-                if let title = cgWindow.name {
-                    AXUIElementSetAttributeValue(axWindow, kAXTitleAttribute as CFString, title as CFTypeRef)
-                }
-                
-                windows.append(WindowInfo(
-                    window: axWindow,
-                    name: cgWindow.name ?? cleanAppName,
-                    isAppElement: false,
-                    cgWindowID: windowID,
-                    position: CGPoint(x: cgWindow.bounds.minX, y: cgWindow.bounds.minY),
-                    size: CGSize(width: cgWindow.bounds.width, height: cgWindow.bounds.height),
-                    bounds: cgWindow.bounds
-                ))
-            }
+            Logger.debug("CGWindow-only application detected, adding app element")
+            windows.append(WindowInfo(
+                window: axApp,
+                name: cleanAppName,
+                isAppElement: true,
+                cgWindowID: nil,
+                position: nil,
+                size: nil,
+                bounds: nil
+            ))
         }
         
-        // Sort windows alphabetically by name
-        windows.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-        
-        // If no windows were found, add the app itself
+        // If no windows were found at all, add the app itself
         if windows.isEmpty {
-            windows.append(WindowInfo(window: axApp,
-                                    name: cleanAppName,
-                                    isAppElement: true))
+            windows.append(WindowInfo(
+                window: axApp,
+                name: cleanAppName,
+                isAppElement: true
+            ))
         }
         
         Logger.debug("Found \(windows.count) total windows for \(cleanAppName)")
@@ -363,33 +340,39 @@ class AccessibilityService {
     }
     
     func raiseWindow(windowInfo: WindowInfo, for app: NSRunningApplication) {
-        Logger.debug("=== RAISING WINDOW ===")
-        Logger.debug("Raising window - Name: \(windowInfo.name), ID: \(windowInfo.cgWindowID ?? 0)")
-        
-        // Get the window's owner PID
-        var pid: pid_t = 0
-        AXUIElementGetPid(windowInfo.window, &pid)
-        
-        // First try using CGWindow APIs if we have a window ID
-        if let windowID = windowInfo.cgWindowID {
-            Logger.debug("Using CGWindow APIs with ID: \(windowID)")
-            raiseCGWindow(windowID: windowID, ownerPID: pid)
+        Logger.debug("=== RAISING WINDOW/APP ===")
+        Logger.debug("Raising - Name: \(windowInfo.name), IsAppElement: \(windowInfo.isAppElement)")
+
+        if windowInfo.isAppElement {
+            // For app elements, just activate the application
+            app.activate(options: [.activateIgnoringOtherApps])
+            Logger.debug("Activated application directly")
         } else {
-            Logger.debug("No CGWindowID available, using AX APIs")
-            // Unminimize first if needed
-            AXUIElementSetAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
+            // Existing window raising logic
+            // Get the window's owner PID
+            var pid: pid_t = 0
+            AXUIElementGetPid(windowInfo.window, &pid)
             
-            // Then raise the window
-            AXUIElementPerformAction(windowInfo.window, kAXRaiseAction as CFString)
+            // First try using CGWindow APIs if we have a window ID
+            if let windowID = windowInfo.cgWindowID {
+                Logger.debug("Using CGWindow APIs with ID: \(windowID)")
+                raiseCGWindow(windowID: windowID, ownerPID: pid)
+            } else {
+                Logger.debug("No CGWindowID available, using AX APIs")
+                // Unminimize first if needed
+                AXUIElementSetAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
+                
+                // Then raise the window
+                AXUIElementPerformAction(windowInfo.window, kAXRaiseAction as CFString)
+            }
+            
+            // Activate the app
+            app.activate(options: [.activateIgnoringOtherApps])
         }
         
-        // Activate the app
-        app.activate(options: [.activateIgnoringOtherApps])
-        
-        Logger.debug("Completed raising window")
         Logger.debug("=== RAISING COMPLETE ===")
         
-        // Important: Signal completion
+        // Signal completion
         Task { @MainActor in
             NotificationCenter.default.post(name: NSNotification.Name("WindowRaiseComplete"), object: nil)
         }
@@ -430,7 +413,27 @@ class AccessibilityService {
     }
     
     func hideWindow(window: AXUIElement, for app: NSRunningApplication) {
-        AXUIElementSetAttributeValue(window, kAXHiddenAttribute as CFString, true as CFTypeRef)
+        var pid: pid_t = 0
+        AXUIElementGetPid(window, &pid)
+        
+        // Check if this is a CGWindow-only application
+        var windowsRef: CFTypeRef?
+        let hasAXWindows = AXUIElementCopyAttributeValue(window, Constants.Accessibility.windowsKey, &windowsRef) == .success &&
+                          (windowsRef as? [AXUIElement])?.isEmpty == false
+        
+        // Check if this is the app element and if the hidden attribute is settable
+        var isSettable = DarwinBoolean(false)
+        let settableResult = AXUIElementIsAttributeSettable(window, kAXHiddenAttribute as CFString, &isSettable)
+        
+        if pid == app.processIdentifier && (!hasAXWindows || settableResult != .success || !isSettable.boolValue) {
+            // If this is a CGWindow-only app or we can't set hidden attribute, hide the app
+            Logger.debug("Hiding entire application: \(app.localizedName ?? "Unknown")")
+            app.hide()
+        } else {
+            // Existing window hiding logic for regular windows
+            Logger.debug("Hiding individual window")
+            AXUIElementSetAttributeValue(window, kAXHiddenAttribute as CFString, true as CFTypeRef)
+        }
     }
     
     func checkWindowVisibility(_ window: AXUIElement) -> Bool {
