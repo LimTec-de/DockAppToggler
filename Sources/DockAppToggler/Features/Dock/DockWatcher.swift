@@ -285,22 +285,27 @@ class DockWatcher: NSObject, NSMenuDelegate {
             chooserControllers.removeAll()
         }
         
-        // Disable updates during cleanup
-        NSDisableScreenUpdates()
-        
-        // Clear graphics memory
-        autoreleasepool {
-            CATransaction.begin()
-            CATransaction.flush()
-            CATransaction.commit()
+        // Use NSAnimationContext with proper async handling
+        await withCheckedContinuation { continuation in
+            NSAnimationContext.runAnimationGroup({ context in
+                context.duration = 0
+                context.allowsImplicitAnimation = false
+                
+                // Clear graphics memory
+                autoreleasepool {
+                    CATransaction.begin()
+                    CATransaction.flush()
+                    CATransaction.commit()
+                }
+            }, completionHandler: {
+                continuation.resume()
+            })
         }
         
-        // Force garbage collection
+        // Force garbage collection after animation
         if #available(macOS 10.15, *) {
             await Task.yield()
         }
-        
-        NSEnableScreenUpdates()
         
         let memoryUsage = reportMemoryUsage()
         Logger.debug("Memory cleanup completed. Current usage: \(memoryUsage) MB")
@@ -541,13 +546,13 @@ class DockWatcher: NSObject, NSMenuDelegate {
                             // Let the Dock handle right-clicks and reset tracking
                             if let appUnderCursor = DockService.shared.findAppUnderCursor(at: event.location) {
                                 // Hide window chooser temporarily without destroying it
-                                watcher.windowChooser?.window?.orderOut(nil)  // Just hide the window
+                                watcher.windowChooser?.window?.orderOut(nil)
                                 watcher.isContextMenuActive = true
                                 
-                                DockService.shared.performDockIconAction(app: appUnderCursor.app, clickCount: -1)
+                                _ = DockService.shared.performDockIconAction(app: appUnderCursor.app, clickCount: -1)
                                 
                                 // Reset tracking after the context menu is closed
-                                let resetWork = DispatchWorkItem { [weak watcher] in
+                                let resetWork = DispatchWorkItem {
                                     Task { @MainActor in
                                         DockService.shared.resetDockTracking()
                                     }
@@ -660,16 +665,14 @@ class DockWatcher: NSObject, NSMenuDelegate {
     }
     
     private func displayWindowSelector(for app: NSRunningApplication, at point: CGPoint, windows: [WindowInfo]) {
-        // For different app, always create a new chooser
-        if app != currentApp {
-            // Clean up existing chooser
+        Task { @MainActor in
+            // Clean up existing chooser properly
             if let existingChooser = windowChooser {
                 existingChooser.prepareForReuse()
                 existingChooser.close()
+                windowChooser = nil
             }
-            windowChooser = nil
-            
-            // Create new chooser
+
             let chooser = WindowChooserController(
                 at: point,
                 windows: windows,
@@ -715,17 +718,19 @@ class DockWatcher: NSObject, NSMenuDelegate {
                 }
             )
             
+            // Verify window was created successfully
+            guard chooser.window != nil else {
+                Logger.error("Failed to create window chooser window")
+                return
+            }
+            
             windowChooser = chooser
             currentApp = app
-            chooser.window?.makeKeyAndOrderFront(nil)
-        } else if let existingChooser = windowChooser {
-            // Same app, update if windows changed
-            if existingChooser.needsWindowUpdate(windows: windows) {
-                existingChooser.updateWindows(windows, for: app, at: point)
+            
+            // Ensure window is shown on main thread
+            DispatchQueue.main.async {
+                chooser.window?.makeKeyAndOrderFront(nil)
             }
-            // Always update position
-            existingChooser.updatePosition(point)
-            existingChooser.window?.makeKeyAndOrderFront(nil)
         }
     }
     
@@ -746,26 +751,41 @@ class DockWatcher: NSObject, NSMenuDelegate {
                 let windows = AccessibilityService.shared.listApplicationWindows(for: app)
                 
                 if !windows.isEmpty {
-                    if let existingChooser = windowChooser {
+                    // Check if window chooser is in a valid state
+                    if let existingChooser = windowChooser, 
+                       existingChooser.window != nil && !existingChooser.window!.isReleasedWhenClosed {
                         // Reuse existing chooser for smooth transition
                         existingChooser.updateWindows(windows, for: app, at: iconCenter)
                         existingChooser.updatePosition(iconCenter)
                         existingChooser.window?.makeKeyAndOrderFront(nil)
-                        lastHoveredApp = app
-                        currentApp = app
                     } else {
-                        // Create new chooser if none exists
+                        // Create new chooser if none exists or if it's in an invalid state
+                        windowChooser?.close()
+                        windowChooser = nil
                         displayWindowSelector(for: app, at: iconCenter, windows: windows)
                     }
+                    lastHoveredApp = app
+                    currentApp = app
                 } else {
-                    // No windows, just hide the chooser
-                    windowChooser?.window?.orderOut(nil)
+                    // No windows, cleanup properly
+                    windowChooser?.close()
+                    windowChooser = nil
                     lastHoveredApp = nil
                 }
             } else if let chooser = windowChooser {
-                // Same app, just update position and show
-                chooser.updatePosition(iconCenter)
-                chooser.window?.makeKeyAndOrderFront(nil)
+                // Verify chooser is still valid
+                if chooser.window == nil || chooser.window!.isReleasedWhenClosed {
+                    // Recreate chooser if it's in an invalid state
+                    let windows = AccessibilityService.shared.listApplicationWindows(for: app)
+                    if !windows.isEmpty {
+                        windowChooser = nil
+                        displayWindowSelector(for: app, at: iconCenter, windows: windows)
+                    }
+                } else {
+                    // Same app, just update position and show
+                    chooser.updatePosition(iconCenter)
+                    chooser.window?.makeKeyAndOrderFront(nil)
+                }
             }
         } else {
             // Check if mouse is over the window chooser (with hysteresis)
@@ -825,7 +845,9 @@ class DockWatcher: NSObject, NSMenuDelegate {
         let windows = AccessibilityService.shared.listApplicationWindows(for: app)
         
         // Special handling for CGWindow-only applications (like NoMachine)
-        let hasCGWindowsOnly = windows.allSatisfy { $0.cgWindowID != nil && $0.window == nil }
+        let hasCGWindowsOnly = windows.allSatisfy { windowInfo in 
+            windowInfo.cgWindowID != nil && windowInfo.isAppElement
+        }
         if hasCGWindowsOnly {
             if app.isActive {
                 Logger.debug("CGWindow-only app is active, hiding")
@@ -855,8 +877,8 @@ class DockWatcher: NSObject, NSMenuDelegate {
                 // Get window role and subrole
                 var roleValue: AnyObject?
                 var subroleValue: AnyObject?
-                let roleResult = AXUIElementCopyAttributeValue(windowInfo.window, kAXRoleAttribute as CFString, &roleValue)
-                let subroleResult = AXUIElementCopyAttributeValue(windowInfo.window, kAXSubroleAttribute as CFString, &subroleValue)
+                _ = AXUIElementCopyAttributeValue(windowInfo.window, kAXRoleAttribute as CFString, &roleValue)
+                _ = AXUIElementCopyAttributeValue(windowInfo.window, kAXSubroleAttribute as CFString, &subroleValue)
                 
                 let role = (roleValue as? String) ?? ""
                 let subrole = (subroleValue as? String) ?? ""
@@ -910,12 +932,12 @@ class DockWatcher: NSObject, NSMenuDelegate {
                     let highlightedWindow = windowChooser?.chooserView?.topmostWindow
                     
                     // Split windows into highlighted and others
-                    let (highlighted, others) = nonMinimizedWindows.partition { windowInfo in
+                    let (highlighted, otherWindows) = windows.partition { windowInfo in
                         windowInfo.window == highlightedWindow
                     }
                     
                     // First restore all other windows
-                    for windowInfo in others {
+                    for windowInfo in otherWindows {
                         AccessibilityService.shared.raiseWindow(windowInfo: windowInfo, for: app)
                     }
                     
@@ -971,6 +993,29 @@ class DockWatcher: NSObject, NSMenuDelegate {
                         isAppElement: false
                     )
                     AccessibilityService.shared.raiseWindow(windowInfo: windowInfo, for: app)
+                    
+                    // Schedule window chooser refresh
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                        Task { @MainActor [weak self] in
+                            guard let self = self,
+                                  let (_, _, iconCenter) = DockService.shared.findAppUnderCursor(at: NSEvent.mouseLocation) else {
+                                return
+                            }
+                            
+                            // Get fresh window list
+                            let updatedWindows = AccessibilityService.shared.listApplicationWindows(for: app)
+                            if !updatedWindows.isEmpty {
+                                if let existingChooser = self.windowChooser {
+                                    existingChooser.updateWindows(updatedWindows, for: app, at: iconCenter)
+                                    existingChooser.updatePosition(iconCenter)
+                                    existingChooser.window?.makeKeyAndOrderFront(nil)
+                                } else if self.isMouseOverDock {
+                                    // Create new chooser if mouse is still over dock
+                                    self.displayWindowSelector(for: app, at: iconCenter, windows: updatedWindows)
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -998,7 +1043,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
             let highlightedWindow = windowChooser?.chooserView?.topmostWindow
             
             // Split windows into highlighted and others
-            let (highlighted, others) = windows.partition { windowInfo in
+            let (highlighted, _) = windows.partition { windowInfo in
                 windowInfo.window == highlightedWindow
             }
             
