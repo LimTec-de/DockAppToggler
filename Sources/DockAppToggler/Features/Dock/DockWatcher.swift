@@ -188,6 +188,33 @@ class DockWatcher: NSObject, NSMenuDelegate {
         }
     }
     
+    // Add new property for tracking menu state
+    private var lastMenuInteractionTime: TimeInterval = 0
+    private var menuWatchdogTimer: Timer?
+    private let menuTimeoutInterval: TimeInterval = 30.0 // 30 seconds timeout
+    
+    // Add method to start menu watchdog
+    private func startMenuWatchdog() {
+        menuWatchdogTimer?.invalidate()
+        menuWatchdogTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                
+                let currentTime = ProcessInfo.processInfo.systemUptime
+                if let chooser = self.windowChooser,
+                   currentTime - self.lastMenuInteractionTime > self.menuTimeoutInterval {
+                    Logger.warning("Window chooser appears hung, forcing cleanup...")
+                    chooser.prepareForReuse()
+                    chooser.close()
+                    self.windowChooser = nil
+                    self.lastHoveredApp = nil
+                    self.isMouseOverDock = false
+                    await self.cleanupResources()
+                }
+            }
+        }
+    }
+    
     override init() {
         super.init()
         setupEventTap()
@@ -195,6 +222,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
         setupDockMenuTracking()
         startHeartbeat()
         setupMemoryMonitoring()
+        startMenuWatchdog()
     }
     
     @MainActor private func performAggressiveCleanup() async {
@@ -313,15 +341,12 @@ class DockWatcher: NSObject, NSMenuDelegate {
     
     deinit {
         cleanupEventTap()
-        // Clean up event tap and resources (these are already nonisolated)
         cleanup()
-        
-        // Remove observer (this is thread-safe)
         NotificationCenter.default.removeObserver(self)
         
-        // Schedule timer cleanup on main actor
         Task { @MainActor [weak self] in
-            // Clean up timers
+            self?.menuWatchdogTimer?.invalidate()
+            self?.menuWatchdogTimer = nil
             self?.memoryCleanupTimer?.invalidate()
             self?.heartbeatTimer?.invalidate()
             self?.memoryCleanupTimer = nil
@@ -352,40 +377,43 @@ class DockWatcher: NSObject, NSMenuDelegate {
     @MainActor private func reinitializeEventTap() async {
         Logger.info("Reinitializing event tap...")
         
-        // Check memory usage first
-        let currentUsage = reportMemoryUsage()
+        // First clean up existing resources
+        cleanupEventTap()
         
-        if currentUsage > 100.0 {
-            Logger.warning("Memory usage too high (\(String(format: "%.1f", currentUsage))MB). Performing full restart...")
-            StatusBarController.performRestart()
-            return
-        }
-        
-        // If we're here, either memory check failed or usage is acceptable
-        // Proceed with normal reinitialization
-        //await cleanupResources()
+        // Force cleanup window chooser and its resources
+        forceCleanupWindowChooser()
         
         // Reset all state
-        /*currentApp = nil
+        isContextMenuActive = false
         lastHoveredApp = nil
+        currentApp = nil
         clickedApp = nil
         lastClickedDockIcon = nil
         lastRightClickedDockIcon = nil
-        isContextMenuActive = false
         showingWindowChooserOnClick = false
         skipNextClickProcessing = false
         isMouseOverDock = false
+        lastClickTime = 0
         
+        // Clear all timers
+        cleanupTimer?.invalidate()
+        cleanupTimer = nil
+        menuShowTask?.cancel()
+        menuShowTask = nil
         
-
-        // Reinitialize core functionality
+        // Perform thorough cleanup
+        await cleanupResources()
+        
+        // Add small delay to ensure cleanup is complete
+        try? await Task.sleep(nanoseconds: 100_000_000) // 100ms
+        
+        // Reinitialize event tap
         setupEventTap()
-        setupNotifications()
-        setupDockMenuTracking)
-        startHeartbeat()*/
         
-        Logger.success("Event tap reinitialized successfully")
+        // Reset event time after successful reinitialization
         _lastEventTime = ProcessInfo.processInfo.systemUptime
+        
+        Logger.success("Event tap and window chooser resources reinitialized successfully")
     }
 
     @MainActor private func updateLastEventTime() {
@@ -666,8 +694,16 @@ class DockWatcher: NSObject, NSMenuDelegate {
     
     private func displayWindowSelector(for app: NSRunningApplication, at point: CGPoint, windows: [WindowInfo]) {
         Task { @MainActor in
+            // Force cleanup if current chooser is potentially hung
+            if let _ = windowChooser,
+               ProcessInfo.processInfo.systemUptime - lastMenuInteractionTime > menuTimeoutInterval {
+                Logger.warning("Forcing cleanup of potentially hung window chooser")
+                forceCleanupWindowChooser()
+            }
+            
             // Clean up existing chooser properly
-            if let existingChooser = windowChooser {
+            if let existingChooser = windowChooser,
+               existingChooser.window != nil {
                 existingChooser.prepareForReuse()
                 existingChooser.close()
                 windowChooser = nil
@@ -731,10 +767,15 @@ class DockWatcher: NSObject, NSMenuDelegate {
             DispatchQueue.main.async {
                 chooser.window?.makeKeyAndOrderFront(nil)
             }
+            
+            // Reset interaction time when creating new chooser
+            lastMenuInteractionTime = ProcessInfo.processInfo.systemUptime
         }
     }
     
     @MainActor private func processMouseMovement(at point: CGPoint) {
+        lastMenuInteractionTime = ProcessInfo.processInfo.systemUptime
+        
         // Don't process mouse movements if context menu is active
         if isContextMenuActive {
             return
@@ -1138,4 +1179,18 @@ class DockWatcher: NSObject, NSMenuDelegate {
     }
 
     private var isClosing: Bool = false
+    
+    // Add force cleanup method
+    @MainActor private func forceCleanupWindowChooser() {
+        if let chooser = windowChooser {
+            chooser.prepareForReuse()
+            chooser.close()
+            windowChooser = nil
+        }
+        lastHoveredApp = nil
+        isMouseOverDock = false
+        Task {
+            await cleanupResources()
+        }
+    }
 }
