@@ -9,6 +9,7 @@ class StatusBarController {
     private var menu: NSMenu
     private weak var updaterController: SPUStandardUpdaterController?
     private let autostartMenuItem: NSMenuItem
+    private let tooltipsMenuItem: NSMenuItem
     
     // Use nonisolated(unsafe) for the monitor since we need to modify it
     private nonisolated(unsafe) var mouseEventMonitor: AnyObject?
@@ -28,6 +29,13 @@ class StatusBarController {
         autostartMenuItem = NSMenuItem(
             title: "Start at Login",
             action: #selector(toggleAutostart),
+            keyEquivalent: ""
+        )
+        
+        // Create tooltips menu item
+        tooltipsMenuItem = NSMenuItem(
+            title: "Tray Tooltips",
+            action: #selector(toggleTooltips),
             keyEquivalent: ""
         )
         
@@ -68,6 +76,16 @@ class StatusBarController {
         // Get current state of window previews
         let previewsEnabled = !WindowThumbnailView.arePreviewsDisabled()
         
+        
+        // Add autostart toggle
+        autostartMenuItem.target = self
+        menu.addItem(autostartMenuItem)
+        
+        // Add tooltips toggle
+        tooltipsMenuItem.target = self
+        tooltipsMenuItem.state = UserDefaults.standard.bool(forKey: "StatusBarTooltipsEnabled") ? .on : .off
+        menu.addItem(tooltipsMenuItem)
+        
         // Create menu item with checkmark
         previewsMenuItem = NSMenuItem(
             title: "Window Previews",
@@ -76,11 +94,8 @@ class StatusBarController {
         )
         previewsMenuItem?.target = self
         previewsMenuItem?.state = previewsEnabled ? .on : .off
-        
-        // Add autostart toggle
-        autostartMenuItem.target = self
-        menu.addItem(autostartMenuItem)
-        
+        menu.addItem(previewsMenuItem!)
+
         // Add separator
         menu.addItem(NSMenuItem.separator())
         
@@ -108,7 +123,7 @@ class StatusBarController {
         restartItem.target = self
         menu.addItem(restartItem)
         
-        menu.addItem(previewsMenuItem!)
+        
         
         menu.addItem(NSMenuItem.separator())
         
@@ -147,6 +162,15 @@ class StatusBarController {
             // Update menu item state
             sender.state = WindowThumbnailView.arePreviewsDisabled() ? .off : .on
         }
+    }
+    
+    @objc private func toggleTooltips() {
+        let newState = tooltipsMenuItem.state == .off
+        UserDefaults.standard.set(newState, forKey: "StatusBarTooltipsEnabled")
+        tooltipsMenuItem.state = newState ? .on : .off
+        
+        // Post notification for StatusBarWatcher
+        NotificationCenter.default.post(name: .statusBarTooltipsStateChanged, object: nil)
     }
     
     @objc private func statusBarButtonClicked(_ sender: NSStatusBarButton) {

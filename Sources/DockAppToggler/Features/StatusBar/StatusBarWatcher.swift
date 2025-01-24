@@ -2,6 +2,10 @@ import AppKit
 import Cocoa
 import ApplicationServices
 
+extension Notification.Name {
+    static let statusBarTooltipsStateChanged = Notification.Name("statusBarTooltipsStateChanged")
+}
+
 @MainActor
 class TooltipWindow {
     private var window: NSWindow?
@@ -107,14 +111,45 @@ class StatusBarWatcher {
     private var lastHoveredPid: pid_t = 0
     private var lastHoveredElement: AXUIElement?
     private let tooltipWindow = TooltipWindow()
+    private var isEnabled: Bool
     
     init() {
+        // Initialize with saved preference, default to true
+        if UserDefaults.standard.object(forKey: "StatusBarTooltipsEnabled") == nil {
+            UserDefaults.standard.set(true, forKey: "StatusBarTooltipsEnabled")
+            self.isEnabled = true
+        } else {
+            self.isEnabled = UserDefaults.standard.bool(forKey: "StatusBarTooltipsEnabled")
+        }
+        
         if !checkAccessibilityPermissions() {
             print("[StatusBarWatcher] Please grant accessibility permissions in System Settings > Privacy & Security > Accessibility")
             return
         }
         
-        startWatching()
+        setupNotificationObserver()
+        if isEnabled {
+            startWatching()
+        }
+    }
+    
+    private func setupNotificationObserver() {
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleTooltipsStateChanged),
+            name: .statusBarTooltipsStateChanged,
+            object: nil
+        )
+    }
+    
+    @objc private func handleTooltipsStateChanged() {
+        isEnabled = UserDefaults.standard.bool(forKey: "StatusBarTooltipsEnabled")
+        if isEnabled {
+            startWatching()
+        } else {
+            cleanup()
+            tooltipWindow.hide()
+        }
     }
     
     private nonisolated func checkAccessibilityPermissions() -> Bool {
@@ -193,6 +228,7 @@ class StatusBarWatcher {
     }
     
     private func handleMouseMove(_ event: NSEvent) {
+        guard isEnabled else { return }
         let mouseLocation = NSEvent.mouseLocation
         let menuBarHeight: CGFloat = 24.0
         
