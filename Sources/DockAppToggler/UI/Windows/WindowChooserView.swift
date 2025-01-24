@@ -17,6 +17,8 @@ class WindowChooserView: NSView {
     private var lastClickTime: TimeInterval = 0
     // Add property to store dock icon center
     private let dockIconCenter: NSPoint
+    // Add new property to store thumbnail view
+    private var thumbnailView: WindowThumbnailView?
     
     // Change from instance method to static method
     private static func sortWindows(_ windows: [WindowInfo]) -> [WindowInfo] {
@@ -45,6 +47,13 @@ class WindowChooserView: NSView {
         super.init(frame: NSRect(x: 0, y: 0, width: Constants.UI.windowWidth, height: Constants.UI.windowHeight(for: windows.count)))
         setupTitle(appName)
         setupButtons()
+        
+        // Add to init method after super.init
+        self.thumbnailView = WindowThumbnailView(
+            targetApp: app,
+            dockIconCenter: iconCenter,
+            options: windows
+        )
     }
     
     required init?(coder: NSCoder) {
@@ -265,6 +274,12 @@ class WindowChooserView: NSView {
                     backgroundView.setAccessibilityIdentifier("hover-background-\(button.tag)")
                     
                     self.addSubview(backgroundView, positioned: .below, relativeTo: nil)
+                    
+                    // Show thumbnail for this window
+                    if button.tag < options.count {
+                        let windowInfo = options[button.tag]
+                        thumbnailView?.showThumbnail(for: windowInfo)
+                    }
                 }/* else if event.trackingArea?.userInfo?["isControlButton"] as? Bool == true {
                     // Control button highlight (minimize, close, etc.)
                     let buttonHoverColor = isDark ? 
@@ -293,6 +308,9 @@ class WindowChooserView: NSView {
                             view.removeFromSuperview()
                         }
                     }
+                    
+                    // Hide thumbnail
+                    thumbnailView?.hideThumbnail()
                 } /* else if event.trackingArea?.userInfo?["isControlButton"] as? Bool == true {
                     // Remove control button highlight
                     button.layer?.backgroundColor = .clear
@@ -361,6 +379,14 @@ class WindowChooserView: NSView {
             // Handle window raising and minimizing other windows
             let handleDoubleClick = {
                 if isDoubleClick {
+                    // Double click: minimize all other windows
+                    for (index, otherWindow) in self.options.enumerated() {
+                        if index != sender.tag && !otherWindow.isAppElement {
+                            // Minimize other windows
+                            AXUIElementSetAttributeValue(otherWindow.window, kAXMinimizedAttribute as CFString, true as CFTypeRef)
+                        }
+                    }
+
                     // Double click: minimize all other windows
                     for (index, otherWindow) in self.options.enumerated() {
                         if index != sender.tag && !otherWindow.isAppElement {
@@ -1360,6 +1386,13 @@ class WindowChooserView: NSView {
         // Force layout update
         needsLayout = true
         window?.contentView?.needsLayout = true
+        
+        // Update thumbnail view options
+        thumbnailView = WindowThumbnailView(
+            targetApp: targetApp,
+            dockIconCenter: dockIconCenter, 
+            options: self.options
+        )
     }
 
     // Add helper method to update a single window's state
@@ -1426,6 +1459,10 @@ class WindowChooserView: NSView {
         
         // Remove self from superview
         self.removeFromSuperview()
+        
+        // Cleanup thumbnail view
+        thumbnailView?.cleanup()
+        thumbnailView = nil
     }
 
     // Add new method to update button states

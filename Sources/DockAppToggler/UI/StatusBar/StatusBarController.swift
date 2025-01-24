@@ -13,9 +13,12 @@ class StatusBarController {
     // Use nonisolated(unsafe) for the monitor since we need to modify it
     private nonisolated(unsafe) var mouseEventMonitor: AnyObject?
     
+    // Add menu item property to track state
+    private var previewsMenuItem: NSMenuItem?
+    
     init(updater: SPUStandardUpdaterController?) {
         statusBar = NSStatusBar.system
-        statusItem = statusBar.statusItem(withLength: NSStatusItem.squareLength)
+        statusItem = statusBar.statusItem(withLength: NSStatusItem.variableLength)
         menu = NSMenu()
         
         // Store the shared updater controller
@@ -62,6 +65,18 @@ class StatusBarController {
     }
     
     private func setupMenu() {
+        // Get current state of window previews
+        let previewsEnabled = !WindowThumbnailView.arePreviewsDisabled()
+        
+        // Create menu item with checkmark
+        previewsMenuItem = NSMenuItem(
+            title: "Window Previews",
+            action: #selector(toggleWindowPreviews(_:)),
+            keyEquivalent: ""
+        )
+        previewsMenuItem?.target = self
+        previewsMenuItem?.state = previewsEnabled ? .on : .off
+        
         // Add autostart toggle
         autostartMenuItem.target = self
         menu.addItem(autostartMenuItem)
@@ -93,6 +108,8 @@ class StatusBarController {
         restartItem.target = self
         menu.addItem(restartItem)
         
+        menu.addItem(previewsMenuItem!)
+        
         menu.addItem(NSMenuItem.separator())
         
         let quitItem = NSMenuItem(title: "Quit", 
@@ -120,6 +137,31 @@ class StatusBarController {
     
     @objc private func restartApp() {
         StatusBarController.performRestart()
+    }
+    
+    @objc private func toggleWindowPreviews(_ sender: NSMenuItem) {
+        Task { @MainActor in
+            // Toggle previews
+            WindowThumbnailView.togglePreviews()
+            
+            // Update menu item state
+            sender.state = WindowThumbnailView.arePreviewsDisabled() ? .off : .on
+        }
+    }
+    
+    @objc private func statusBarButtonClicked(_ sender: NSStatusBarButton) {
+        // Update menu item state before showing menu
+        if let previewsItem = previewsMenuItem {
+            previewsItem.state = WindowThumbnailView.arePreviewsDisabled() ? .off : .on
+        }
+        
+        // Show menu
+        statusItem.menu = menu
+        statusItem.button?.performClick(nil)
+    }
+    
+    @objc private func quit() {
+        NSApplication.shared.terminate(nil)
     }
     
     static func performRestart() {

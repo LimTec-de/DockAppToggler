@@ -151,7 +151,7 @@ class AccessibilityService {
                     return nil
                 }
                 
-                Logger.debug("Adding window '\(name)' (\(rect.width) x \(rect.height))")
+                //Logger.debug("Adding window '\(name)' (\(rect.width) x \(rect.height))")
                 cgWindows.append((
                     id: windowID,
                     name: name,
@@ -243,7 +243,7 @@ class AccessibilityService {
                         }
                     }
                     
-                    Logger.debug("Adding window: '\(title)' ID: \(windowID ?? 0) role: \(role ?? "none") subrole: \(subrole ?? "none") minimized: \(isMinimized) position: \(position?.debugDescription ?? "unknown") size: \(size?.debugDescription ?? "unknown")")
+                    //Logger.debug("Adding window: '\(title)' ID: \(windowID ?? 0) role: \(role ?? "none") subrole: \(subrole ?? "none") minimized: \(isMinimized) position: \(position?.debugDescription ?? "unknown") size: \(size?.debugDescription ?? "unknown")")
                     
                     // Create window info with all available data
                     windows.append(WindowInfo(
@@ -285,7 +285,9 @@ class AccessibilityService {
         }
         
         Logger.debug("Found \(windows.count) total windows for \(cleanAppName)")
-        return windows
+        
+        // Before returning windows array, sort alphabetically by name
+        return windows.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
     private func createWindowInfo(for window: AXUIElement, app: NSRunningApplication, index: Int) -> WindowInfo? {
@@ -307,7 +309,7 @@ class AccessibilityService {
         
         let windowID = number.uint32Value
         let windowName = windowTitle
-        Logger.success("Adding window: '\(windowName)' ID: \(windowID)")
+        //Logger.success("Adding window: '\(windowName)' ID: \(windowID)")
         return WindowInfo(window: window, name: windowName)
     }
     
@@ -335,7 +337,7 @@ class AccessibilityService {
         let windowTitle = matchingWindows[index][kCGWindowName as CFString] as? String
         let windowName = windowTitle ?? "\(app.localizedName ?? "Window") \(index + 1)"
         
-        Logger.success("Adding window (fallback): '\(windowName)' ID: \(windowID)")
+        //Logger.success("Adding window (fallback): '\(windowName)' ID: \(windowID)")
         return WindowInfo(window: window, name: windowName)
     }
     
