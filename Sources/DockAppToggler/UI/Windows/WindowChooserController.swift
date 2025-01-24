@@ -244,7 +244,7 @@ class WindowChooserController: NSWindowController {
         }
     }
     
-    private func updateWindowSize(to height: CGFloat, animated: Bool = true) {
+    func updateWindowSize(to height: CGFloat) {
         guard let window = window else { return }
         
         // Calculate new frame
@@ -255,29 +255,14 @@ class WindowChooserController: NSWindowController {
             height: height
         )
         
-        // Update window frame immediately to ensure correct size
+        // Update window frame
         window.setFrame(newFrame, display: true)
         
-        // Update container view and its subviews immediately
+        // Update container view and its subviews
         if let containerView = window.contentView {
             containerView.frame = NSRect(origin: .zero, size: newFrame.size)
             containerView.subviews.forEach { view in
                 view.frame = containerView.bounds
-            }
-        }
-        
-        // If animated, animate the transition after setting the frame
-        if animated {
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.15
-                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-                
-                // Update visual properties with animation
-                if let containerView = window.contentView {
-                    containerView.subviews.forEach { view in
-                        view.animator().frame = containerView.bounds
-                    }
-                }
             }
         }
     }
@@ -286,11 +271,7 @@ class WindowChooserController: NSWindowController {
         // Update app reference
         self.app = app
         
-        // Force immediate size update without animation
-        let newHeight = Constants.UI.windowHeight(for: windows.count)
-        updateWindowSize(to: newHeight, animated: false)
-        
-        // Create new chooser view with updated content
+        // Create new chooser view first to get filtered window count
         let newView = WindowChooserView(
             windows: windows,
             appName: app.localizedName ?? "Unknown",
@@ -298,6 +279,10 @@ class WindowChooserController: NSWindowController {
             iconCenter: point,
             callback: callback
         )
+        
+        // Use filtered window count for height calculation
+        let newHeight = Constants.UI.windowHeight(for: newView.options.count)
+        updateWindowSize(to: newHeight)
         
         // Replace old view with new one
         if let oldView = chooserView {

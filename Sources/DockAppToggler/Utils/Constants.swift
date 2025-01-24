@@ -4,6 +4,7 @@
 
 /// Constants used throughout the DockAppToggler application
 enum Constants {
+
     /// UI-related constants for layout and dimensions
     enum UI {
         // Window dimensions
@@ -38,8 +39,22 @@ enum Constants {
         static let animationDuration: TimeInterval = 0.15
         
         // Calculate total height needed for a given number of buttons
-        static func windowHeight(for buttonCount: Int) -> CGFloat {
-            return titleHeight + CGFloat(buttonCount) * (buttonHeight + 2) + verticalPadding * 2
+        static func windowHeight(for windowCount: Int) -> CGFloat {
+            // Base height includes title area
+            let baseHeight = titleHeight + titlePadding
+            
+            // Calculate button area height
+            let buttonsHeight = CGFloat(windowCount) * buttonSpacing
+            
+            // Add padding - use less padding for single window
+            let totalPadding = windowCount <= 1 ? verticalPadding : (verticalPadding * 2)
+            
+            // Calculate total height
+            let totalHeight = baseHeight + buttonsHeight + totalPadding
+            
+            // Ensure minimum height but keep it compact for single entries
+            let minHeight: CGFloat = windowCount <= 1 ? 70 : 100
+            return max(totalHeight, minHeight)
         }
         
         // Theme-related constants
