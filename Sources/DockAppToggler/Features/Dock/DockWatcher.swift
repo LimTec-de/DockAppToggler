@@ -227,14 +227,21 @@ class DockWatcher: NSObject, NSMenuDelegate {
     private var lastProcessedTime: TimeInterval = 0
     private let windowsCacheTimeout: TimeInterval = 2.0  // Cache windows for 2 seconds
     
+    // Add new properties
+    private var historyController: WindowHistoryController?
+    private var historyCheckTimer: Timer?
+    private let historyShowThreshold: CGFloat = 20 // pixels from bottom
+    
     override init() {
         super.init()
+        windowChooser = nil  // Ensure it starts nil
         setupEventTap()
         setupNotifications()
         setupDockMenuTracking()
         startHeartbeat()
         setupMemoryMonitoring()
         startMenuWatchdog()
+        startHistoryCheck()
     }
     
     @MainActor private func performAggressiveCleanup() async {
@@ -289,6 +296,14 @@ class DockWatcher: NSObject, NSMenuDelegate {
         // Clean up thumbnail
         currentThumbnailView?.cleanup()
         currentThumbnailView = nil
+        
+        // Clean up window chooser
+        windowChooser?.close()
+        windowChooser = nil
+        
+        // Clean up history controller
+        historyController?.close()
+        historyController = nil
         
         // Cancel pending operations
         menuShowTask?.cancel()
@@ -952,7 +967,9 @@ class DockWatcher: NSObject, NSMenuDelegate {
             } else {
                 Logger.debug("CGWindow-only app is not active, activating")
                 app.unhide()
-                app.activate(options: [.activateIgnoringOtherApps])
+                Task { @MainActor in
+                    AccessibilityService.shared.activateApp(app)
+                }
                 
                 // Force raise all windows
                 for windowInfo in windows {
@@ -1170,8 +1187,9 @@ class DockWatcher: NSObject, NSMenuDelegate {
         } else {
             // Just activate the app if it has visible windows but isn't active
             Logger.debug("App has visible windows but isn't active, activating")
-            app.unhide()
-            app.activate(options: [.activateIgnoringOtherApps])
+            Task { @MainActor in
+                AccessibilityService.shared.activateApp(app)
+            }
             return true
         }
     }
@@ -1196,5 +1214,140 @@ class DockWatcher: NSObject, NSMenuDelegate {
         Task {
             await cleanupResources()
         }
+    }
+    
+    private func startHistoryCheck() {
+        historyCheckTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.checkMouseForHistory()
+            }
+        }
+    }
+    
+    private func checkMouseForHistory() {
+        Logger.debug("Checking mouse for history menu...")
+        
+        let mouseLocation = NSEvent.mouseLocation
+        
+        // Only check window chooser's window visibility
+        if let chooserWindow = windowChooser?.window, chooserWindow.isVisible {
+            // Close only if mouse is not near bottom AND not over the menu
+            if mouseLocation.y > 2 && !chooserWindow.frame.contains(mouseLocation) && !isMouseOverDock {
+                Logger.debug("  - Mouse moved away (not near dock or menu), closing window chooser")
+                windowChooser?.close()
+                windowChooser = nil
+            }
+            return
+        }
+        
+        guard let screen = NSScreen.main else {
+            Logger.debug("  - No main screen available")
+            return
+        }
+        
+        // Check if mouse is at bottom of screen
+        let distanceFromBottom = mouseLocation.y
+        Logger.debug("  - Mouse distance from bottom: \(distanceFromBottom)")
+        
+        // Show menu if mouse is very close to bottom
+        if distanceFromBottom < 2 {
+            Logger.debug("  - Showing history menu")
+            showHistoryMenu()
+        }
+    }
+    
+    private func showHistoryMenu() {
+        Logger.debug("Attempting to show history menu...")
+        
+        // Get all recent windows across apps
+        let recentWindows = WindowHistory.shared.getAllRecentWindows()
+        Logger.debug("  - Found \(recentWindows.count) recent windows")
+        
+        guard !recentWindows.isEmpty else {
+            Logger.debug("  - No recent windows to show")
+            return
+        }
+        
+        // Calculate screen center point
+        guard let screen = NSScreen.main else { return }
+        let centerPoint = CGPoint(x: screen.frame.width / 2, y: 0)
+        
+        // Use the first window's app as the reference app (required by WindowChooserController)
+        guard let firstWindow = recentWindows.first,
+              let bundleId = firstWindow.bundleIdentifier,
+              let referenceApp = NSRunningApplication.runningApplications(withBundleIdentifier: bundleId).first else {
+            Logger.debug("  - Could not find reference app")
+            return
+        }
+        
+        // Create window chooser controller
+        Logger.debug("  - Creating window chooser for history")
+        let controller = WindowChooserController(
+            at: centerPoint,
+            windows: recentWindows,
+            app: referenceApp,  // Use reference app
+            callback: { window, isHideAction in
+                // Find the window info and its app
+                if let windowInfo = recentWindows.first(where: { $0.window == window }),
+                   let bundleId = windowInfo.bundleIdentifier,
+                   let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleId).first {
+                    if isHideAction {
+                        AccessibilityService.shared.hideWindow(window: window, for: app)
+                    } else {
+                        AccessibilityService.shared.raiseWindow(windowInfo: windowInfo, for: app)
+                    }
+                }
+            }
+        )
+        
+        // Position at bottom of screen
+        if let window = controller.window {
+            let xPos = (screen.frame.width - window.frame.width) / 2
+            window.setFrameOrigin(NSPoint(x: xPos, y: 0))
+            
+            // Configure window
+            window.level = NSWindow.Level.popUpMenu
+            window.collectionBehavior = NSWindow.CollectionBehavior([.transient, .canJoinAllSpaces])
+        }
+        
+        // Store and show the controller
+        Logger.debug("  - Showing history menu")
+        self.windowChooser = controller
+        controller.showWindow(self)
+    }
+
+    // Add method to check if window chooser is really visible
+    private func isWindowChooserVisible() -> Bool {
+        guard let chooser = windowChooser,
+              let window = chooser.window else {
+            return false
+        }
+        return window.isVisible
+    }
+
+    // Update mouseExitedDock to prevent immediate cleanup
+    func mouseExitedDock() {
+        Logger.debug("Mouse exited dock")
+        
+        // Don't immediately set isMouseOverDock to false
+        // Instead, wait a short moment to allow movement to menu
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
+            
+            // Only set to false if mouse isn't over the menu
+            if let chooserWindow = windowChooser?.window,
+               !chooserWindow.frame.contains(NSEvent.mouseLocation) {
+                isMouseOverDock = false
+                Logger.debug("  - Mouse not over menu, cleaning up")
+                windowChooser?.close()
+                windowChooser = nil
+            }
+        }
+    }
+
+    // Add method to cleanup history controller
+    private func cleanupHistoryController() {
+        historyController?.close()
+        historyController = nil
     }
 }

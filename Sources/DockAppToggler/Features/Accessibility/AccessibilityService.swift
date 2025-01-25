@@ -246,15 +246,17 @@ class AccessibilityService {
                     //Logger.debug("Adding window: '\(title)' ID: \(windowID ?? 0) role: \(role ?? "none") subrole: \(subrole ?? "none") minimized: \(isMinimized) position: \(position?.debugDescription ?? "unknown") size: \(size?.debugDescription ?? "unknown")")
                     
                     // Create window info with all available data
-                    windows.append(WindowInfo(
+                    let windowInfo = WindowInfo(
                         window: window,
                         name: title.isEmpty ? cleanAppName : title,
-                        isAppElement: false,
                         cgWindowID: windowID,
+                        isAppElement: false,
+                        bundleIdentifier: app.bundleIdentifier,
                         position: position,
                         size: size,
                         bounds: getWindowBounds(window)
-                    ))
+                    )
+                    windows.append(windowInfo)
                 } else {
                     Logger.debug("Skipping window: '\(title)' - hidden: \(isHidden), valid: \(isValidWindow), role: \(role ?? "none"), subrole: \(subrole ?? "none")")
                 }
@@ -264,24 +266,32 @@ class AccessibilityService {
         // If we found CGWindows but no AX windows, add just the app itself
         if windows.isEmpty && !cgWindows.isEmpty {
             Logger.debug("CGWindow-only application detected, adding app element")
-            windows.append(WindowInfo(
+            let appWindowInfo = WindowInfo(
                 window: axApp,
                 name: cleanAppName,
-                isAppElement: true,
                 cgWindowID: nil,
+                isAppElement: true,
+                bundleIdentifier: app.bundleIdentifier,
                 position: nil,
                 size: nil,
                 bounds: nil
-            ))
+            )
+            windows.append(appWindowInfo)
         }
         
         // If no windows were found at all, add the app itself
         if windows.isEmpty {
-            windows.append(WindowInfo(
+            let appWindowInfo = WindowInfo(
                 window: axApp,
                 name: cleanAppName,
-                isAppElement: true
-            ))
+                cgWindowID: nil,
+                isAppElement: true,
+                bundleIdentifier: app.bundleIdentifier,
+                position: nil,
+                size: nil,
+                bounds: nil
+            )
+            windows.append(appWindowInfo)
         }
         
         Logger.debug("Found \(windows.count) total windows for \(cleanAppName)")
@@ -344,6 +354,11 @@ class AccessibilityService {
     func raiseWindow(windowInfo: WindowInfo, for app: NSRunningApplication) {
         Logger.debug("=== RAISING WINDOW/APP ===")
         Logger.debug("Raising - Name: \(windowInfo.name), IsAppElement: \(windowInfo.isAppElement)")
+
+        // Add window to history before raising
+        Task { @MainActor in
+            WindowHistory.shared.addWindow(windowInfo, for: app)
+        }
 
         if windowInfo.isAppElement {
             // For app elements, just activate the application
@@ -858,6 +873,24 @@ class AccessibilityService {
         }
         
         Logger.debug("❌ No matching window found")
+    }
+
+    @MainActor
+    func activateApp(_ app: NSRunningApplication) {
+        // Get all windows before activating
+        let windows = listApplicationWindows(for: app)
+        
+        // Activate the app
+        app.unhide()
+        app.activate(options: [.activateIgnoringOtherApps])
+        
+        // Add first non-app-element window to history if available
+        if let firstWindow = windows.first(where: { !$0.isAppElement }) {
+            WindowHistory.shared.addWindow(firstWindow, for: app)
+        } else if let appElement = windows.first {
+            // Fallback to app element if no regular windows
+            WindowHistory.shared.addWindow(appElement, for: app)
+        }
     }
 }
 

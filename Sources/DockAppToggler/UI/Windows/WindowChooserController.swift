@@ -27,10 +27,17 @@ class WindowChooserController: NSWindowController {
     
     private var isHandlingToggle = false
     
+    // Add new properties
+    private var isHistoryMenu = false
+    private var menuTitle: String
+    
+    // Regular init for dock menu
     init(at point: NSPoint, windows: [WindowInfo], app: NSRunningApplication, callback: @escaping (AXUIElement, Bool) -> Void) {
         self.app = app
         self.iconCenter = point
         self.callback = callback
+        self.menuTitle = app.localizedName ?? "Unknown"
+        self.isHistoryMenu = false
         
         let height = Constants.UI.windowHeight(for: windows.count)
         let width = Constants.UI.windowWidth
@@ -49,7 +56,7 @@ class WindowChooserController: NSWindowController {
         
         let frame = NSRect(x: adjustedX, 
                           y: adjustedY, 
-                          width: width, 
+                          width: width,
                           height: height)
         
         let window = NSWindow(
@@ -65,8 +72,57 @@ class WindowChooserController: NSWindowController {
         setupChooserView(windows: windows)
         setupTrackingArea()
         animateAppearance()
+    }
+    
+    // New init for history menu
+    convenience init(historyAt point: CGPoint, 
+                    windows: [WindowInfo], 
+                    app: NSRunningApplication, 
+                    callback: @escaping (AXUIElement, Bool) -> Void) {
+        let dummyPoint = NSPoint(x: point.x, y: point.y)
+        self.init(at: dummyPoint, windows: windows, app: app, callback: callback)
         
-        window.ignoresMouseEvents = false
+        // Set history menu properties
+        self.isHistoryMenu = true
+        self.menuTitle = "Recent Windows"
+        
+        // Recreate chooser view with the correct title
+        if let contentView = window?.contentView?.subviews.first {
+            chooserView?.removeFromSuperview()
+            let newChooserView = WindowChooserView(
+                windows: windows,
+                appName: "Recent Windows",
+                app: app,
+                iconCenter: .zero,
+                callback: callback
+            )
+            contentView.addSubview(newChooserView)
+            newChooserView.frame = contentView.bounds
+            self.chooserView = newChooserView
+        }
+        
+        // Override window configuration for history menu
+        if let window = window {
+            // Set fixed height for history menu
+            var frame = window.frame
+            frame.size.height = 300
+            
+            // Position at bottom of screen with negative offset to hide arrow
+            frame.origin = NSPoint(
+                x: point.x - frame.width / 2,
+                y: -10  // Negative offset to hide the bubble arrow
+            )
+            window.setFrame(frame, display: true)
+            
+            // Configure window appearance
+            window.level = NSWindow.Level.popUpMenu
+            window.collectionBehavior = NSWindow.CollectionBehavior([.transient, .canJoinAllSpaces])
+            
+            // Hide the bubble arrow for history menu
+            if let visualEffect = visualEffectView as? BubbleVisualEffectView {
+                visualEffect.showsArrow = false
+            }
+        }
     }
     
     required init?(coder: NSCoder) {
@@ -106,43 +162,23 @@ class WindowChooserController: NSWindowController {
         self.visualEffectView = visualEffect
     }
     
-    // Remove the separate setupVisualEffect method since it's now handled in configureWindow
     private func setupVisualEffect(width: CGFloat, height: CGFloat) {
         // This method is no longer needed
     }
     
     private func setupChooserView(windows: [WindowInfo]) {
         guard let contentView = window?.contentView else { return }
+        
         let chooserView = WindowChooserView(
             windows: windows,
-            appName: app.localizedName ?? "Unknown",
+            appName: menuTitle,
             app: app,
-            iconCenter: iconCenter,
-            callback: { [weak self] window, isHideAction in
-                guard let self = self else { return }
-                
-                if isHideAction {
-                    // Hide the selected window
-                    AccessibilityService.shared.hideWindow(window: window, for: self.app)
-                } else {
-                    // Show and raise the window
-                    AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
-                    var titleValue: AnyObject?
-                    AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleValue)
-                    let windowName = (titleValue as? String) ?? ""
-                    let windowInfo = WindowInfo(window: window, name: windowName)
-                    AccessibilityService.shared.raiseWindow(windowInfo: windowInfo, for: self.app)
-                    self.app.activate(options: [.activateIgnoringOtherApps])
-                }
-                
-                // Update menu after any action with a small delay
-                Task { @MainActor in
-                    try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
-                    self.refreshMenuState()
-                }
-            }
+            iconCenter: isHistoryMenu ? .zero : iconCenter,
+            callback: callback
         )
+        
         contentView.addSubview(chooserView)
+        chooserView.frame = contentView.bounds
         self.chooserView = chooserView
     }
     

@@ -227,6 +227,38 @@ class DockService {
         }
     }
     
+    // Add method to get dock height
+    func getDockHeight() -> CGFloat {
+        // Get the dock's frame
+        guard let dockFrame = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first?.processIdentifier else {
+            return 70
+        }
+        
+        let dockElement = AXUIElementCreateApplication(dockFrame)
+        var position: CFTypeRef?
+        var size: CFTypeRef?
+        
+        // Get dock position and size
+        guard AXUIElementCopyAttributeValue(dockElement, kAXPositionAttribute as CFString, &position) == .success,
+              AXUIElementCopyAttributeValue(dockElement, kAXSizeAttribute as CFString, &size) == .success,
+              let positionRef = position,
+              let sizeRef = size,
+              CFGetTypeID(positionRef) == AXValueGetTypeID(),
+              CFGetTypeID(sizeRef) == AXValueGetTypeID() else {
+            return 70
+        }
+        
+        var point = CGPoint.zero
+        var dockSize = CGSize.zero
+        
+        // Force cast is safe here because we checked the type IDs above
+        AXValueGetValue(positionRef as! AXValue, .cgPoint, &point)
+        AXValueGetValue(sizeRef as! AXValue, .cgSize, &dockSize)
+        
+        // Return dock height
+        return dockSize.height
+    }
+    
     enum DockServiceError: Error {
         case timeout
         case appNotFound

@@ -21,7 +21,7 @@ class WindowChooserView: NSView {
     private var thumbnailView: WindowThumbnailView?
     
     // Change from instance method to static method
-    private static func sortWindows(_ windows: [WindowInfo]) -> [WindowInfo] {
+    private static func sortWindows(_ windows: [WindowInfo], app: NSRunningApplication) -> [WindowInfo] {
         // First filter out small windows
         let filteredWindows = windows.filter { windowInfo in
             // Always include app elements
@@ -60,13 +60,26 @@ class WindowChooserView: NSView {
             return false
         }
         
-        // Then sort the filtered windows
-        return filteredWindows.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        // Get recent windows for this app
+        let recentWindows = WindowHistory.shared.getRecentWindows(for: app.bundleIdentifier ?? "")
+        let recentWindowIds = Set(recentWindows.compactMap { $0.cgWindowID })
+        
+        // Sort windows with recent ones first
+        return filteredWindows.sorted { win1, win2 in
+            let isRecent1 = recentWindowIds.contains(win1.cgWindowID ?? 0)
+            let isRecent2 = recentWindowIds.contains(win2.cgWindowID ?? 0)
+            
+            if isRecent1 != isRecent2 {
+                return isRecent1
+            }
+            
+            return win1.name.localizedCaseInsensitiveCompare(win2.name) == .orderedAscending
+        }
     }
     
     init(windows: [WindowInfo], appName: String, app: NSRunningApplication, iconCenter: NSPoint, callback: @escaping (AXUIElement, Bool) -> Void) {
-        // Use static method to filter and sort windows
-        self.options = WindowChooserView.sortWindows(windows)
+        // Use static method to filter and sort windows, passing the app
+        self.options = WindowChooserView.sortWindows(windows, app: app)
         self.callback = callback
         self.targetApp = app
         self.dockIconCenter = iconCenter
@@ -375,6 +388,9 @@ class WindowChooserView: NSView {
         Logger.debug("Button clicked - tag: \(sender.tag)")
         let windowInfo = options[sender.tag]
         Logger.debug("Selected window info - Name: \(windowInfo.name), ID: \(windowInfo.cgWindowID ?? 0)")
+        
+        // Add window to history when clicked
+        WindowHistory.shared.addWindow(windowInfo, for: targetApp)
         
         if windowInfo.cgWindowID != nil && windowInfo.window == nil {
             // For CGWindow entries, just activate the app
@@ -1370,7 +1386,7 @@ class WindowChooserView: NSView {
     
     func updateWindows(_ windows: [WindowInfo]) {
         // Use static method to filter and sort
-        self.options = WindowChooserView.sortWindows(windows)
+        self.options = WindowChooserView.sortWindows(windows, app: targetApp)
         
         // First, find the new topmost window
         topmostWindow = nil  // Reset first
