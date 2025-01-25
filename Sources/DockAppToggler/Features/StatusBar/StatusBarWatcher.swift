@@ -10,6 +10,7 @@ extension Notification.Name {
 class TooltipWindow {
     private var window: NSWindow?
     
+    
     func show(text: String, at location: NSPoint) {
         // Hide existing tooltip if any
         hide()
@@ -107,6 +108,7 @@ class TooltipWindow {
 
 @MainActor
 class StatusBarWatcher {
+    private var lastMouseMoveTime: TimeInterval = 0
     private var eventMonitor: Any?
     private var lastHoveredPid: pid_t = 0
     private var lastHoveredElement: AXUIElement?
@@ -229,6 +231,14 @@ class StatusBarWatcher {
     
     private func handleMouseMove(_ event: NSEvent) {
         guard isEnabled else { return }
+
+        // Add throttling to prevent too frequent updates
+        let currentTime = ProcessInfo.processInfo.systemUptime
+        if currentTime - lastMouseMoveTime < 0.05 { // ~60fps throttle
+            return
+        }
+        lastMouseMoveTime = currentTime
+        
         let mouseLocation = NSEvent.mouseLocation
         let menuBarHeight: CGFloat = 24.0
         

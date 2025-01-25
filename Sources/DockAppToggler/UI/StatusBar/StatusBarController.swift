@@ -69,7 +69,7 @@ class StatusBarController {
         
         setupMenu()
         updateAutostartState()
-        setupMouseEventMonitoring()
+        //setupMouseEventMonitoring()
     }
     
     private func setupMenu() {
@@ -196,35 +196,11 @@ class StatusBarController {
         NSApplication.restart(skipUpdateCheck: true)
     }
     
-    private func setupMouseEventMonitoring() {
-        mouseEventMonitor = NSEvent.addGlobalMonitorForEvents(
-            matching: [.mouseMoved, .leftMouseDown, .rightMouseDown],
-            handler: { [weak self] event in
-                Task { @MainActor in
-                    self?.handleMouseEvent(event)
-                }
-            }
-        ) as AnyObject
-    }
     
     deinit {
         // Since we're using nonisolated(unsafe), we need to be careful about thread safety
         if let monitor = mouseEventMonitor {
             NSEvent.removeMonitor(monitor)
-        }
-    }
-    
-    private func handleMouseEvent(_ event: NSEvent) {
-        guard statusItem.button?.isEnabled == true else { return }
-        switch event.type {
-        case .mouseMoved:
-            // Handle mouse movement
-            break
-        case .leftMouseDown, .rightMouseDown:
-            // Handle mouse clicks
-            break
-        default:
-            break
         }
     }
 } 

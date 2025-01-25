@@ -19,6 +19,8 @@ class WindowChooserView: NSView {
     private let dockIconCenter: NSPoint
     // Add new property to store thumbnail view
     private var thumbnailView: WindowThumbnailView?
+    // Add new property to track history mode
+    private let isHistoryMode: Bool
     
     // Change from instance method to static method
     private static func sortWindows(_ windows: [WindowInfo], app: NSRunningApplication) -> [WindowInfo] {
@@ -77,7 +79,10 @@ class WindowChooserView: NSView {
         }
     }
     
-    init(windows: [WindowInfo], appName: String, app: NSRunningApplication, iconCenter: NSPoint, callback: @escaping (AXUIElement, Bool) -> Void) {
+    init(windows: [WindowInfo], appName: String, app: NSRunningApplication, iconCenter: NSPoint, isHistory: Bool = false, callback: @escaping (AXUIElement, Bool) -> Void) {
+        // Store history mode
+        self.isHistoryMode = isHistory
+        
         // Use static method to filter and sort windows, passing the app
         self.options = WindowChooserView.sortWindows(windows, app: app)
         self.callback = callback
@@ -104,15 +109,17 @@ class WindowChooserView: NSView {
             height: Constants.UI.windowHeight(for: self.options.count)
         ))
         
-        setupTitle(appName)
+        setupTitle(isHistory ? "Recent Windows" : appName)
         setupButtons()
         
-        // Add to init method after super.init
-        self.thumbnailView = WindowThumbnailView(
-            targetApp: app,
-            dockIconCenter: iconCenter,
-            options: self.options  // Use filtered options
-        )
+        // Only create thumbnail view if not in history mode
+        if !isHistoryMode {
+            self.thumbnailView = WindowThumbnailView(
+                targetApp: app,
+                dockIconCenter: iconCenter,
+                options: self.options
+            )
+        }
     }
     
     required init?(coder: NSCoder) {
@@ -334,23 +341,12 @@ class WindowChooserView: NSView {
                     
                     self.addSubview(backgroundView, positioned: .below, relativeTo: nil)
                     
-                    // Show thumbnail for this window
-                    if button.tag < options.count {
+                    // Only show thumbnail if not in history mode
+                    if !isHistoryMode && button.tag < options.count {
                         let windowInfo = options[button.tag]
                         thumbnailView?.showThumbnail(for: windowInfo)
                     }
-                }/* else if event.trackingArea?.userInfo?["isControlButton"] as? Bool == true {
-                    // Control button highlight (minimize, close, etc.)
-                    let buttonHoverColor = isDark ? 
-                        NSColor(white: 0.4, alpha: 0.6) :  // Darker for control buttons
-                        NSColor(white: 0.7, alpha: 0.6)
-                    
-                    button.layer?.backgroundColor = buttonHoverColor.cgColor
-                }*/
-                
-                // Always brighten the button itself
-                //button.contentTintColor = Constants.UI.Theme.primaryTextColor
-                //button.alphaValue = 1.0
+                }
             }
         }
     }
@@ -368,18 +364,11 @@ class WindowChooserView: NSView {
                         }
                     }
                     
-                    // Hide thumbnail
-                    thumbnailView?.hideThumbnail()
-                } /* else if event.trackingArea?.userInfo?["isControlButton"] as? Bool == true {
-                    // Remove control button highlight
-                    button.layer?.backgroundColor = .clear
-                }*/
-                
-                // Always restore original button state
-                /*if options[button.tag].window != topmostWindow {
-                    button.contentTintColor = Constants.UI.Theme.secondaryTextColor
-                    button.alphaValue = 0.8
-                }*/
+                    // Only hide thumbnail if not in history mode
+                    if !isHistoryMode {
+                        thumbnailView?.hideThumbnail()
+                    }
+                }
             }
         }
     }

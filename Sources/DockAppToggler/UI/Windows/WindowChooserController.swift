@@ -32,96 +32,80 @@ class WindowChooserController: NSWindowController {
     private var menuTitle: String
     
     // Regular init for dock menu
-    init(at point: NSPoint, windows: [WindowInfo], app: NSRunningApplication, callback: @escaping (AXUIElement, Bool) -> Void) {
+    init(at point: CGPoint, 
+         windows: [WindowInfo], 
+         app: NSRunningApplication, 
+         isHistory: Bool = false,  // Add default parameter
+         callback: @escaping (AXUIElement, Bool) -> Void) {
+        
         self.app = app
         self.iconCenter = point
         self.callback = callback
         self.menuTitle = app.localizedName ?? "Unknown"
-        self.isHistoryMenu = false
+        self.isHistoryMenu = isHistory
         
-        let height = Constants.UI.windowHeight(for: windows.count)
-        let width = Constants.UI.windowWidth
+        super.init(window: nil)
         
-        // Get the main screen and its frame
-        guard let screen = NSScreen.main else {
-            fatalError("No main screen available")
-        }
+        let contentRect = NSRect(
+            x: 0,
+            y: 0,
+            width: Constants.UI.windowWidth,
+            height: Constants.UI.windowHeight(for: windows.count)
+        )
         
-        // Keep x position exactly at click point for perfect centering
-        let adjustedX = point.x - width/2
-        
-        // Position the window above the Dock with magnification consideration
-        let dockHeight = DockService.shared.getDockMagnificationSize()
-        let adjustedY = dockHeight + Constants.UI.arrowOffset - 4
-        
-        let frame = NSRect(x: adjustedX, 
-                          y: adjustedY, 
-                          width: width,
-                          height: height)
-        
+        // Create window with proper type specifications
         let window = NSWindow(
-            contentRect: frame,
-            styleMask: [],
-            backing: .buffered,
+            contentRect: contentRect,
+            styleMask: NSWindow.StyleMask.borderless,
+            backing: NSWindow.BackingStoreType.buffered,
             defer: false
         )
         
-        super.init(window: window)
+        // Configure window
+        window.backgroundColor = .clear
+        window.isOpaque = false
+        window.hasShadow = true
+        window.level = .popUpMenu
+        window.appearance = NSApp.effectiveAppearance
+        
+        self.window = window
+        
+        // First configure the window to set up visual effect view
         configureWindow()
-        setupVisualEffect(width: width, height: height)
-        setupChooserView(windows: windows)
-        setupTrackingArea()
-        animateAppearance()
-    }
-    
-    // New init for history menu
-    convenience init(historyAt point: CGPoint, 
-                    windows: [WindowInfo], 
-                    app: NSRunningApplication, 
-                    callback: @escaping (AXUIElement, Bool) -> Void) {
-        let dummyPoint = NSPoint(x: point.x, y: point.y)
-        self.init(at: dummyPoint, windows: windows, app: app, callback: callback)
         
-        // Set history menu properties
-        self.isHistoryMenu = true
-        self.menuTitle = "Recent Windows"
+        // Create and configure the chooser view
+        let chooserView = WindowChooserView(
+            windows: windows,
+            appName: app.localizedName ?? "Unknown",
+            app: app,
+            iconCenter: point,
+            isHistory: isHistory,
+            callback: callback
+        )
         
-        // Recreate chooser view with the correct title
-        if let contentView = window?.contentView?.subviews.first {
-            chooserView?.removeFromSuperview()
-            let newChooserView = WindowChooserView(
-                windows: windows,
-                appName: "Recent Windows",
-                app: app,
-                iconCenter: .zero,
-                callback: callback
-            )
-            contentView.addSubview(newChooserView)
-            newChooserView.frame = contentView.bounds
-            self.chooserView = newChooserView
+        // Add chooser view to the visual effect view instead of window's content view
+        if let visualEffect = self.visualEffectView {
+            visualEffect.addSubview(chooserView)
+            chooserView.frame = visualEffect.bounds
         }
         
-        // Override window configuration for history menu
-        if let window = window {
-            // Set fixed height for history menu
-            var frame = window.frame
-            frame.size.height = 300
-            
-            // Position at bottom of screen with negative offset to hide arrow
-            frame.origin = NSPoint(
-                x: point.x - frame.width / 2,
-                y: -10  // Negative offset to hide the bubble arrow
-            )
-            window.setFrame(frame, display: true)
-            
-            // Configure window appearance
-            window.level = NSWindow.Level.popUpMenu
-            window.collectionBehavior = NSWindow.CollectionBehavior([.transient, .canJoinAllSpaces])
-            
-            // Hide the bubble arrow for history menu
-            if let visualEffect = visualEffectView as? BubbleVisualEffectView {
-                visualEffect.showsArrow = false
-            }
+        self.chooserView = chooserView
+        
+        // Set up tracking area and animate
+        setupTrackingArea()
+        animateAppearance()
+        
+        // Position window for history menu
+        if isHistory {
+            guard let screen = NSScreen.main else { return }
+            let xPos = (screen.frame.width - window.frame.width) / 2
+            window.setFrameOrigin(NSPoint(x: xPos, y: 0))
+        } else {
+            // Position for regular dock menu
+            let dockHeight = DockService.shared.getDockMagnificationSize()
+            let adjustedX = point.x - contentRect.width/2
+            let adjustedY = dockHeight + Constants.UI.arrowOffset - 4
+            window.setFrameOrigin(NSPoint(x: adjustedX, y: adjustedY))
         }
     }
     
@@ -142,9 +126,9 @@ class WindowChooserController: NSWindowController {
         containerView.wantsLayer = true
         containerView.layer?.masksToBounds = false
         containerView.layer?.shadowColor = NSColor.black.cgColor
-        containerView.layer?.shadowOpacity = 0.15  // Adjusted shadow opacity
-        containerView.layer?.shadowRadius = 3.0    // Adjusted shadow radius
-        containerView.layer?.shadowOffset = .zero   // Center shadow
+        containerView.layer?.shadowOpacity = 0.15
+        containerView.layer?.shadowRadius = 3.0
+        containerView.layer?.shadowOffset = .zero
         
         // Create and configure the visual effect view with bubble arrow
         let visualEffect = BubbleVisualEffectView(frame: containerView.bounds)
@@ -152,6 +136,7 @@ class WindowChooserController: NSWindowController {
         visualEffect.state = .active
         visualEffect.wantsLayer = true
         visualEffect.layer?.masksToBounds = true
+        visualEffect.showsArrow = !isHistoryMenu  // Set arrow visibility based on history mode
         
         // Set up view hierarchy
         window.contentView = containerView
@@ -160,26 +145,6 @@ class WindowChooserController: NSWindowController {
         
         // Store the visual effect view for later use
         self.visualEffectView = visualEffect
-    }
-    
-    private func setupVisualEffect(width: CGFloat, height: CGFloat) {
-        // This method is no longer needed
-    }
-    
-    private func setupChooserView(windows: [WindowInfo]) {
-        guard let contentView = window?.contentView else { return }
-        
-        let chooserView = WindowChooserView(
-            windows: windows,
-            appName: menuTitle,
-            app: app,
-            iconCenter: isHistoryMenu ? .zero : iconCenter,
-            callback: callback
-        )
-        
-        contentView.addSubview(chooserView)
-        chooserView.frame = contentView.bounds
-        self.chooserView = chooserView
     }
     
     private func setupTrackingArea() {
@@ -313,6 +278,7 @@ class WindowChooserController: NSWindowController {
             appName: app.localizedName ?? "Unknown",
             app: app,
             iconCenter: point,
+            isHistory: isHistoryMenu,
             callback: callback
         )
         
@@ -435,6 +401,7 @@ class WindowChooserController: NSWindowController {
             appName: app.localizedName ?? "Unknown",
             app: app,
             iconCenter: iconCenter,
+            isHistory: isHistoryMenu,
             callback: callback
         )
         

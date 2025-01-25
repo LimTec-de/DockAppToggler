@@ -45,7 +45,7 @@ class WindowHistoryController: NSWindowController {
         Logger.debug("  - Configuring window")
         configureWindow()
         setupVisualEffect(width: width, height: height)
-        setupChooserView(windows: windows, app: app)
+        //setupChooserView(windows: windows, app: app)
         setupScreenTracking()
         animateAppearance()
         Logger.debug("WindowHistoryController initialization complete")
@@ -95,8 +95,8 @@ class WindowHistoryController: NSWindowController {
         self.visualEffectView = visualEffect
     }
     
-    private func setupChooserView(windows: [WindowInfo], app: NSRunningApplication) {
-        guard let contentView = window?.contentView else { return }
+    /*private func setupChooserView(windows: [WindowInfo], app: NSRunningApplication) {
+        /*guard let contentView = window?.contentView else { return }
         
         let chooserView = WindowChooserView(
             windows: windows,
@@ -108,8 +108,8 @@ class WindowHistoryController: NSWindowController {
         
         contentView.addSubview(chooserView)
         chooserView.frame = contentView.bounds
-        self.historyView = chooserView
-    }
+        self.historyView = chooserView*/
+    }*/
     
     private func setupScreenTracking() {
         guard let screen = NSScreen.main else { return }
@@ -170,9 +170,6 @@ class WindowHistoryController: NSWindowController {
         }
     }
     
-    override func mouseMoved(with event: NSEvent) {
-        // Keep window open while mouse is moving within bounds
-    }
     
     override func close() {
         Logger.debug("Closing history window")
