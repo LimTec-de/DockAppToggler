@@ -21,9 +21,13 @@ class WindowChooserView: NSView {
     private var thumbnailView: WindowThumbnailView?
     // Add new property to track history mode
     private let isHistoryMode: Bool
+    // Add new properties for icon image view and minimize/maximize buttons
+    private var iconImageView: NSImageView?
+    private var minimizeButton: NSButton?
+    private var maximizeButton: NSButton?
     
     // Change from instance method to static method
-    private static func sortWindows(_ windows: [WindowInfo], app: NSRunningApplication) -> [WindowInfo] {
+    private static func sortWindows(_ windows: [WindowInfo], app: NSRunningApplication, isHistory: Bool = false) -> [WindowInfo] {
         // First filter out small windows
         let filteredWindows = windows.filter { windowInfo in
             // Always include app elements
@@ -66,16 +70,27 @@ class WindowChooserView: NSView {
         let recentWindows = WindowHistory.shared.getRecentWindows(for: app.bundleIdentifier ?? "")
         let recentWindowIds = Set(recentWindows.compactMap { $0.cgWindowID })
         
-        // Sort windows with recent ones first
-        return filteredWindows.sorted { win1, win2 in
-            let isRecent1 = recentWindowIds.contains(win1.cgWindowID ?? 0)
-            let isRecent2 = recentWindowIds.contains(win2.cgWindowID ?? 0)
-            
-            if isRecent1 != isRecent2 {
-                return isRecent1
+        // Sort windows based on history mode
+        if isHistory {
+            // In history mode, sort purely by recency (newest first)
+            return filteredWindows.sorted { win1, win2 in
+                // Get indices from recent windows list for sorting
+                let index1 = recentWindows.firstIndex { $0.cgWindowID == win1.cgWindowID } ?? Int.max
+                let index2 = recentWindows.firstIndex { $0.cgWindowID == win2.cgWindowID } ?? Int.max
+                return index1 < index2
             }
-            
-            return win1.name.localizedCaseInsensitiveCompare(win2.name) == .orderedAscending
+        } else {
+            // In normal mode, sort with recent ones first, then alphabetically
+            return filteredWindows.sorted { win1, win2 in
+                let isRecent1 = recentWindowIds.contains(win1.cgWindowID ?? 0)
+                let isRecent2 = recentWindowIds.contains(win2.cgWindowID ?? 0)
+                
+                if isRecent1 != isRecent2 {
+                    return isRecent1
+                }
+                
+                return win1.name.localizedCaseInsensitiveCompare(win2.name) == .orderedAscending
+            }
         }
     }
     
@@ -83,8 +98,8 @@ class WindowChooserView: NSView {
         // Store history mode
         self.isHistoryMode = isHistory
         
-        // Use static method to filter and sort windows, passing the app
-        self.options = WindowChooserView.sortWindows(windows, app: app)
+        // Use static method to filter and sort windows, passing the app and history mode
+        self.options = WindowChooserView.sortWindows(windows, app: app, isHistory: isHistory)
         self.callback = callback
         self.targetApp = app
         self.dockIconCenter = iconCenter
@@ -112,8 +127,8 @@ class WindowChooserView: NSView {
         setupTitle(isHistory ? "Recent Windows" : appName)
         setupButtons()
         
-        // Only create thumbnail view if not in history mode
-        if !isHistoryMode {
+        // Create thumbnail view only for non-history mode
+        if !isHistory {
             self.thumbnailView = WindowThumbnailView(
                 targetApp: app,
                 dockIconCenter: iconCenter,
@@ -134,7 +149,13 @@ class WindowChooserView: NSView {
             height: Constants.UI.titleHeight
         ))
         
-        titleField.stringValue = appName
+        // Set title based on mode
+        if isHistoryMode {
+            titleField.stringValue = "Recent Windows"
+        } else {
+            titleField.stringValue = appName
+        }
+        
         titleField.isEditable = false
         titleField.isSelectable = false
         titleField.isBordered = false
@@ -161,13 +182,29 @@ class WindowChooserView: NSView {
             buttons.append(button)
             closeButtons.append(closeButton)
             
-            // Only add minimize and window control buttons for regular AX windows
+            // Add app icon only in history mode
+            if isHistoryMode {
+                addAppIcon(for: windowInfo, at: index, button: button)
+            }
+            
+            // Only add minimize button in normal mode, but always add window control buttons for regular windows
             if !windowInfo.isAppElement && windowInfo.cgWindowID == nil {
-                let hideButton = createHideButton(for: windowInfo, at: index)
-                addSubview(hideButton)
-                hideButtons.append(hideButton)
+                // Add minimize button only in normal mode
+                if !isHistoryMode {
+                    let hideButton = createHideButton(for: windowInfo, at: index)
+                    addSubview(hideButton)
+                    hideButtons.append(hideButton)
+                    
+                    // Update minimize button state
+                    if let minimizeButton = hideButtons.first(where: { $0.tag == index }) as? MinimizeButton {
+                        var minimizedValue: AnyObject?
+                        let isMinimized = AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success &&
+                                         (minimizedValue as? Bool == true)
+                        minimizeButton.updateMinimizedState(isMinimized)
+                    }
+                }
                 
-                // Create window control buttons only for actual windows
+                // Always create window control buttons for actual windows
                 let leftButton = createSideButton(for: windowInfo, at: index, isLeft: true)
                 let centerButton = createSideButton(for: windowInfo, at: index, isLeft: false, isCenter: true)
                 let rightButton = createSideButton(for: windowInfo, at: index, isLeft: false)
@@ -175,14 +212,6 @@ class WindowChooserView: NSView {
                 addSubview(leftButton)
                 addSubview(centerButton)
                 addSubview(rightButton)
-            }
-            
-            // Update minimize button state if it exists
-            if let minimizeButton = hideButtons.first(where: { $0.tag == index }) as? MinimizeButton {
-                var minimizedValue: AnyObject?
-                let isMinimized = AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success &&
-                                 (minimizedValue as? Bool == true)
-                minimizeButton.updateMinimizedState(isMinimized)
             }
         }
     }
@@ -193,6 +222,46 @@ class WindowChooserView: NSView {
         return windowInfo.cgWindowID != nil && windowInfo.window == nil
     }
     
+    private func addAppIcon(for windowInfo: WindowInfo, at index: Int, button: NSButton) {
+        let iconSize: CGFloat = 16
+        let iconY = frame.height - Constants.UI.titleHeight - CGFloat(index + 1) * Constants.UI.buttonSpacing - Constants.UI.verticalPadding + 
+            (Constants.UI.buttonHeight - iconSize) / 2
+        
+        // Position icon between close and minimize buttons
+        let iconImageView = NSImageView(frame: NSRect(
+            x: Constants.UI.windowPadding + 24,  // Same x position as minimize button
+            y: iconY,
+            width: iconSize,
+            height: iconSize
+        ))
+        
+        // Try to get app icon from running app
+        if let cgWindowID = windowInfo.cgWindowID,
+           let windowList = CGWindowListCopyWindowInfo([.optionIncludingWindow], cgWindowID) as? [[CFString: Any]],
+           let cgWindowInfo = windowList.first,
+           let ownerPID = cgWindowInfo[kCGWindowOwnerPID] as? pid_t,
+           let runningApp = NSRunningApplication(processIdentifier: ownerPID) {
+            iconImageView.image = runningApp.icon
+        } else {
+            // Fallback for AX windows
+            var pid: pid_t = 0
+            if AXUIElementGetPid(windowInfo.window, &pid) == .success,
+               let runningApp = NSRunningApplication(processIdentifier: pid) {
+                iconImageView.image = runningApp.icon
+            }
+        }
+        
+        // Configure icon view
+        iconImageView.imageScaling = .scaleProportionallyDown
+        iconImageView.wantsLayer = true
+        iconImageView.layer?.cornerRadius = 2
+        iconImageView.layer?.masksToBounds = true
+        
+        addSubview(iconImageView)
+        
+        // No need to adjust button position since we're using padding in the title
+    }
+    
     private func createButton(for windowInfo: WindowInfo, at index: Int) -> NSButton {
         let button = NSButton()
         
@@ -201,7 +270,7 @@ class WindowChooserView: NSView {
         let buttonX: CGFloat
         
         if windowInfo.isAppElement || windowInfo.cgWindowID != nil {
-            // For app elements and CGWindow entries, use full width and center position
+            // For app elements and CGWindow entries
             buttonWidth = Constants.UI.windowWidth - Constants.UI.windowPadding * 2
             buttonX = Constants.UI.windowPadding
         } else {
@@ -225,7 +294,7 @@ class WindowChooserView: NSView {
             rect: button.bounds,
             options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
             owner: button,
-            userInfo: ["isMenuButton": true]  // Mark this as a menu button for line hover handling
+            userInfo: ["isMenuButton": true]
         )
         button.addTrackingArea(trackingArea)
         
@@ -277,16 +346,27 @@ class WindowChooserView: NSView {
         
         let windowInfo = options[tag]
         
-        // Different alignment and padding based on window type
+        // Different alignment and padding based on window type and mode
         if windowInfo.isAppElement || windowInfo.cgWindowID != nil {
             // Center align for app elements and CGWindows
             button.alignment = .center
             button.title = String(truncatedTitle)
         } else {
-            // Left align for normal windows with padding for minimize button
+            // Left align for normal windows
             button.alignment = .left
-            let leftPadding = "      "  // 6 spaces for padding
-            button.title = leftPadding + String(truncatedTitle)
+            
+            // Clear any existing padding first
+            let baseTitle = String(truncatedTitle)
+            
+            if isHistoryMode {
+                // In history mode: space for app icon
+                let leftPadding = "      "  // 6 spaces for app icon
+                button.title = leftPadding + baseTitle
+            } else {
+                // In normal mode: space for minimize button
+                let leftPadding = "      "  // 6 spaces for minimize button
+                button.title = leftPadding + baseTitle
+            }
         }
         
         button.bezelStyle = .inline
@@ -341,10 +421,49 @@ class WindowChooserView: NSView {
                     
                     self.addSubview(backgroundView, positioned: .below, relativeTo: nil)
                     
-                    // Only show thumbnail if not in history mode
-                    if !isHistoryMode && button.tag < options.count {
+                    if button.tag < options.count {
                         let windowInfo = options[button.tag]
-                        thumbnailView?.showThumbnail(for: windowInfo)
+                        if isHistoryMode {
+                            // For history mode, create a new thumbnail view for the specific app
+                            // Get process ID from CGWindow info if available, otherwise try to get it from AX window
+                            if let cgWindowID = windowInfo.cgWindowID,
+                               let windowList = CGWindowListCopyWindowInfo([.optionIncludingWindow], cgWindowID) as? [[CFString: Any]],
+                               let cgWindowInfo = windowList.first,
+                               let ownerPID = cgWindowInfo[kCGWindowOwnerPID] as? pid_t,
+                               let runningApp = NSRunningApplication(processIdentifier: ownerPID) {
+                                
+                                let appSpecificThumbnailView = WindowThumbnailView(
+                                    targetApp: runningApp,
+                                    dockIconCenter: dockIconCenter,
+                                    options: [windowInfo]  // Use original windowInfo here
+                                )
+                                // Clean up existing thumbnail view if any
+                                thumbnailView?.cleanup()
+                                thumbnailView = appSpecificThumbnailView
+                                thumbnailView?.showThumbnail(for: windowInfo)
+                            } else {
+                                // Fallback for AX windows - try to get PID from AX element
+                                var pid: pid_t = 0
+                                if AXUIElementGetPid(windowInfo.window, &pid) == .success,
+                                   let runningApp = NSRunningApplication(processIdentifier: pid) {
+                                    
+                                    let appSpecificThumbnailView = WindowThumbnailView(
+                                        targetApp: runningApp,
+                                        dockIconCenter: dockIconCenter,
+                                        options: [windowInfo]  // Use original windowInfo here
+                                    )
+                                    // Clean up existing thumbnail view if any
+                                    thumbnailView?.cleanup()
+                                    thumbnailView = appSpecificThumbnailView
+                                    thumbnailView?.showThumbnail(for: windowInfo)
+                                }
+                            }
+                        } else {
+                            // Regular mode - use existing thumbnail view
+                            if !windowInfo.isAppElement {
+                                thumbnailView?.showThumbnail(for: windowInfo)
+                            }
+                        }
                     }
                 }
             }
@@ -364,8 +483,11 @@ class WindowChooserView: NSView {
                         }
                     }
                     
-                    // Only hide thumbnail if not in history mode
-                    if !isHistoryMode {
+                    // In history mode, clean up the temporary thumbnail view
+                    if isHistoryMode {
+                        thumbnailView?.cleanup()
+                        thumbnailView = nil
+                    } else {
                         thumbnailView?.hideThumbnail()
                     }
                 }
@@ -390,6 +512,14 @@ class WindowChooserView: NSView {
             topmostWindow = windowInfo.window
             updateButtonStates()
             
+            // Close window chooser after selection in history mode
+            if isHistoryMode {
+                if let windowController = self.window?.windowController as? WindowChooserController {
+                    windowController.close()
+                }
+                return
+            }
+            
             // Refresh menu after a small delay to let window state update
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
                 if let windowController = self?.window?.windowController as? WindowChooserController {
@@ -406,7 +536,7 @@ class WindowChooserView: NSView {
         
         // Get window controller reference
         let windowController = self.window?.windowController as? WindowChooserController
-
+        
         if windowInfo.isAppElement {
             handleAppElementClick()
         } else {
@@ -440,7 +570,13 @@ class WindowChooserView: NSView {
                             AXUIElementSetAttributeValue(otherWindow.window, kAXMinimizedAttribute as CFString, true as CFTypeRef)
                         }
                     }
-
+                    
+                    // Close window chooser after minimizing windows in history mode
+                    if self.isHistoryMode {
+                        windowController?.close()
+                        return
+                    }
+                    
                     // Update menu after minimizing windows
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
                         guard let self = self else { return }
@@ -451,11 +587,7 @@ class WindowChooserView: NSView {
             }
             
             if isMinimized {
-                // For minimized windows, we need to:
-                // 1. Unminimize
-                // 2. Wait for unminimize animation
-                // 3. Raise window
-                // 4. Handle double-click if needed
+                // For minimized windows, handle unminimize
                 AXUIElementSetAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
                 
                 // Wait for unminimize animation, then raise and handle double-click
@@ -470,49 +602,56 @@ class WindowChooserView: NSView {
                     
                     // Update minimize button state
                     if let hideButton = self.hideButtons.first(where: { $0.tag == sender.tag }) as? MinimizeButton {
-                        hideButton.updateMinimizedState(false)  // Window is now unminimized
+                        hideButton.updateMinimizedState(false)
                     }
                     
                     self.callback?(windowInfo.window, false)
                     
+                    // Close window chooser in history mode
+                    if self.isHistoryMode {
+                        windowController?.close()
+                        return
+                    }
+                    
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
                         handleDoubleClick()
-
-                        // Update menu after a short delay to reflect new window states
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak self] in
-                            guard let self = self else { return }
+                        
+                        // Update menu after a short delay
+                        if let self = self {
                             let updatedWindows = AccessibilityService.shared.listApplicationWindows(for: self.targetApp)
                             self.updateWindows(updatedWindows)
-                        }
-                        
-                        // Refresh menu after all operations are complete
-                        if let self = self,  // Unwrap self first
-                           let windowController = self.window?.windowController as? WindowChooserController {  // Then chain optionals
-                            windowController.refreshMenu()
+                            
+                            // Refresh menu after all operations
+                            if let windowController = self.window?.windowController as? WindowChooserController {
+                                windowController.refreshMenu()
+                            }
                         }
                     }
                 }
             } else {
-                // Set focus attributes
+                // Handle non-minimized windows
                 AXUIElementSetAttributeValue(windowInfo.window, kAXMainAttribute as CFString, true as CFTypeRef)
                 AXUIElementSetAttributeValue(windowInfo.window, kAXFocusedAttribute as CFString, true as CFTypeRef)
                 
-                // Update topmost window
                 topmostWindow = windowInfo.window
                 updateButtonStates()
                 
-                // Update minimize button state
                 if let hideButton = hideButtons.first(where: { $0.tag == sender.tag }) as? MinimizeButton {
-                    hideButton.updateMinimizedState(false)  // Window is now unminimized
+                    hideButton.updateMinimizedState(false)
                 }
                 
-                // Raise window
                 callback?(windowInfo.window, false)
+                
+                // Close window chooser in history mode
+                if isHistoryMode {
+                    windowController?.close()
+                    return
+                }
                 
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                     handleDoubleClick()
                     
-                    // Refresh menu after all operations are complete
+                    // Refresh menu after all operations
                     if let windowController = self.window?.windowController as? WindowChooserController {
                         windowController.refreshMenu()
                     }
@@ -642,7 +781,8 @@ class WindowChooserView: NSView {
         )
         button.addTrackingArea(trackingArea)
     }
-    
+
+        
     @objc private func hideButtonClicked(_ sender: NSButton) {
         let windowInfo = options[sender.tag]
         let windowController = self.window?.windowController as? WindowChooserController
@@ -676,6 +816,7 @@ class WindowChooserView: NSView {
             windowController?.updateWindows(updatedWindows, for: self.targetApp, at: self.dockIconCenter)
         }
     }
+
     
     deinit {
         // Capture values before async operation
@@ -1375,11 +1516,11 @@ class WindowChooserView: NSView {
     
     func updateWindows(_ windows: [WindowInfo]) {
         // Use static method to filter and sort
-        self.options = WindowChooserView.sortWindows(windows, app: targetApp)
+        self.options = WindowChooserView.sortWindows(windows, app: targetApp, isHistory: isHistoryMode)
         
         // First, find the new topmost window
         topmostWindow = nil  // Reset first
-        for windowInfo in self.options {  // Use sorted options
+        for windowInfo in self.options {
             var minimizedValue: AnyObject?
             let isMinimized = AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success &&
                              (minimizedValue as? Bool == true)
@@ -1396,53 +1537,36 @@ class WindowChooserView: NSView {
             windowController.updateWindowSize(to: newHeight)
         }
         
-        // Update buttons with sorted windows
-        for (index, windowInfo) in self.options.enumerated() {
-            // Get window state once for both button updates
-            var minimizedValue: AnyObject?
-            let isMinimized = AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success &&
-                             (minimizedValue as? Bool == true)
-            
-            // Update main button
-            if let button = buttons.first(where: { $0.tag == index }) {
-                // Update button title
-                let truncatedTitle = windowInfo.name.count > 60 ? 
-                    windowInfo.name.prefix(60) + "..." : 
-                    windowInfo.name
-                
-                if windowInfo.isAppElement || windowInfo.cgWindowID != nil {
-                    button.title = String(truncatedTitle)
-                } else {
-                    let leftPadding = "      "  // 6 spaces for padding
-                    button.title = leftPadding + String(truncatedTitle)
-                }
-                
-                // Update button state
-                if isMinimized {
-                    button.contentTintColor = Constants.UI.Theme.minimizedTextColor
-                } else if windowInfo.window == topmostWindow {
-                    button.contentTintColor = Constants.UI.Theme.primaryTextColor
-                } else {
-                    button.contentTintColor = Constants.UI.Theme.secondaryTextColor
-                }
-            }
-            
-            // Update minimize button state if it exists
-            if let minimizeButton = hideButtons.first(where: { $0.tag == index }) as? MinimizeButton {
-                minimizeButton.updateMinimizedState(isMinimized)
+        // Remove all existing buttons and subviews
+        buttons.forEach { $0.removeFromSuperview() }
+        hideButtons.forEach { $0.removeFromSuperview() }
+        closeButtons.forEach { $0.removeFromSuperview() }
+        buttons.removeAll()
+        hideButtons.removeAll()
+        closeButtons.removeAll()
+        
+        // Remove any app icons
+        subviews.forEach { view in
+            if view is NSImageView {
+                view.removeFromSuperview()
             }
         }
+        
+        // Recreate all buttons with updated windows
+        setupButtons()
         
         // Force layout update
         needsLayout = true
         window?.contentView?.needsLayout = true
         
         // Update thumbnail view options
-        thumbnailView = WindowThumbnailView(
-            targetApp: targetApp,
-            dockIconCenter: dockIconCenter, 
-            options: self.options
-        )
+        if !isHistoryMode {
+            thumbnailView = WindowThumbnailView(
+                targetApp: targetApp,
+                dockIconCenter: dockIconCenter,
+                options: self.options
+            )
+        }
     }
 
     // Add helper method to update a single window's state
@@ -1533,4 +1657,31 @@ class WindowChooserView: NSView {
             }
         }
     }
+
+    func configureForMode(_ mode: WindowChooserMode) {
+        switch mode {
+        case .normal:
+            titleField.stringValue = "Choose Window"
+            // Ensure we reset to showing minimize/maximize buttons
+            iconImageView?.isHidden = true
+            minimizeButton?.isHidden = false
+            maximizeButton?.isHidden = false
+            
+        case .history:
+            titleField.stringValue = "Recent Windows"
+            // Show icon instead of minimize/maximize buttons
+            iconImageView?.isHidden = false
+            minimizeButton?.isHidden = true
+            maximizeButton?.isHidden = true
+        }
+        
+        // Force layout update
+        self.needsLayout = true
+    }
+}
+
+// Add WindowChooserMode enum if it doesn't exist
+enum WindowChooserMode {
+    case normal
+    case history
 }

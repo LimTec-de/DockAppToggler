@@ -31,6 +31,8 @@ class WindowChooserController: NSWindowController {
     private var isHistoryMenu = false
     private var menuTitle: String
     
+    private var selectedWindow: WindowInfo?
+    
     // Regular init for dock menu
     init(at point: CGPoint, 
          windows: [WindowInfo], 
@@ -520,5 +522,30 @@ class WindowChooserController: NSWindowController {
         if allMinimized {
             close()
         }
+    }
+    
+    func highlightWindow(_ window: WindowInfo) {
+        selectedWindow = window
+        // Update UI to highlight the selected window
+        chooserView?.setNeedsDisplay(chooserView?.bounds ?? .zero)
+    }
+    
+    func showChooser(mode: WindowChooserMode = .normal) {
+        // Reset the view state before showing
+        if let chooserView = window?.contentView as? WindowChooserView {
+            chooserView.configureForMode(mode)
+        }
+        
+        guard let window = self.window else { return }
+        // Show the window chooser UI
+        let screen = NSScreen.main ?? NSScreen.screens[0]
+        let frame = NSRect(
+            x: (screen.frame.width - window.frame.width) / 2,
+            y: (screen.frame.height - window.frame.height) / 2,
+            width: window.frame.width,
+            height: window.frame.height
+        )
+        window.setFrame(frame, display: true)
+        window.orderFront(nil)
     }
 } 

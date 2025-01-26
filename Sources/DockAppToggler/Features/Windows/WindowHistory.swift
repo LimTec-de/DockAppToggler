@@ -57,6 +57,24 @@ class WindowHistory {
         Logger.debug("  - Window: \(window.name)")
         Logger.debug("  - ID: \(window.cgWindowID ?? 0)")
         
+        // Verify window belongs to the specified app
+        if let windowId = window.cgWindowID {
+            guard verifyWindowOwnership(windowId: windowId, app: app) else {
+                Logger.debug("  - Window ownership verification failed, skipping")
+                return
+            }
+        }
+        
+        // Remove this window from any other app's history first
+        for (otherBundleId, entries) in recentWindows {
+            if otherBundleId != bundleId {
+                if entries.contains(where: { $0.window.name == window.name }) {
+                    Logger.debug("  - Removing duplicate window entry from \(otherBundleId)")
+                    recentWindows[otherBundleId]?.removeAll(where: { $0.window.name == window.name })
+                }
+            }
+        }
+        
         // Create window info with bundle identifier
         let windowWithBundle = WindowInfo(
             window: window.window,
@@ -102,6 +120,26 @@ class WindowHistory {
         
         // Log current history state
         logCurrentHistory()
+    }
+    
+    /// Verify that a window belongs to the specified application
+    private func verifyWindowOwnership(windowId: CGWindowID, app: NSRunningApplication) -> Bool {
+        let windowList = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[CFString: Any]]
+        
+        guard let windowList = windowList else { return false }
+        
+        for windowInfo in windowList {
+            guard let windowNumber = windowInfo[kCGWindowNumber] as? CGWindowID,
+                  let ownerPID = windowInfo[kCGWindowOwnerPID] as? pid_t else {
+                continue
+            }
+            
+            if windowNumber == windowId {
+                return ownerPID == app.processIdentifier
+            }
+        }
+        
+        return false
     }
     
     /// Clear history for an app
