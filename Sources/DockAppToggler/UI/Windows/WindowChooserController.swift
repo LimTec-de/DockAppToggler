@@ -280,7 +280,7 @@ class WindowChooserController: NSWindowController {
             appName: app.localizedName ?? "Unknown",
             app: app,
             iconCenter: point,
-            isHistory: isHistoryMenu,
+            isHistory: false,  // Explicitly set to false for normal mode
             callback: callback
         )
         
@@ -350,7 +350,7 @@ class WindowChooserController: NSWindowController {
         if let windows = chooserView?.options {
             if needsWindowUpdate(windows: windows) {
                 // Update content without recreating window
-                chooserView?.updateWindows(windows)  // Remove extra app argument
+                chooserView?.updateWindows(windows, forceNormalMode: true)  // Force normal mode
                 
                 // Update window size
                 let newHeight = Constants.UI.windowHeight(for: windows.count)

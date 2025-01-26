@@ -19,8 +19,8 @@ class WindowChooserView: NSView {
     private let dockIconCenter: NSPoint
     // Add new property to store thumbnail view
     private var thumbnailView: WindowThumbnailView?
-    // Add new property to track history mode
-    private let isHistoryMode: Bool
+    // Change from let to var
+    private var isHistoryMode: Bool
     // Add new properties for icon image view and minimize/maximize buttons
     private var iconImageView: NSImageView?
     private var minimizeButton: NSButton?
@@ -124,6 +124,7 @@ class WindowChooserView: NSView {
             height: Constants.UI.windowHeight(for: self.options.count)
         ))
         
+        // Set title based on mode immediately
         setupTitle(isHistory ? "Recent Windows" : appName)
         setupButtons()
         
@@ -168,6 +169,21 @@ class WindowChooserView: NSView {
     }
     
     private func setupButtons() {
+        // Clear existing buttons first
+        buttons.forEach { $0.removeFromSuperview() }
+        hideButtons.forEach { $0.removeFromSuperview() }
+        closeButtons.forEach { $0.removeFromSuperview() }
+        buttons.removeAll()
+        hideButtons.removeAll()
+        closeButtons.removeAll()
+        
+        // Remove any existing app icons
+        subviews.forEach { view in
+            if view is NSImageView {
+                view.removeFromSuperview()
+            }
+        }
+        
         for (index, windowInfo) in options.enumerated() {
             Logger.debug("Creating button for window:")
             Logger.debug("  - Index: \(index)")
@@ -1514,7 +1530,15 @@ class WindowChooserView: NSView {
         )
     }
     
-    func updateWindows(_ windows: [WindowInfo]) {
+    func updateWindows(_ windows: [WindowInfo], forceNormalMode: Bool = false) {
+        // Reset history mode if needed
+        if forceNormalMode {
+            self.isHistoryMode = false
+            
+            // Also update title immediately
+            titleField.stringValue = targetApp.localizedName ?? "Unknown"
+        }
+        
         // Use static method to filter and sort
         self.options = WindowChooserView.sortWindows(windows, app: targetApp, isHistory: isHistoryMode)
         
@@ -1535,21 +1559,6 @@ class WindowChooserView: NSView {
         let newHeight = Constants.UI.windowHeight(for: self.options.count)
         if let windowController = self.window?.windowController as? WindowChooserController {
             windowController.updateWindowSize(to: newHeight)
-        }
-        
-        // Remove all existing buttons and subviews
-        buttons.forEach { $0.removeFromSuperview() }
-        hideButtons.forEach { $0.removeFromSuperview() }
-        closeButtons.forEach { $0.removeFromSuperview() }
-        buttons.removeAll()
-        hideButtons.removeAll()
-        closeButtons.removeAll()
-        
-        // Remove any app icons
-        subviews.forEach { view in
-            if view is NSImageView {
-                view.removeFromSuperview()
-            }
         }
         
         // Recreate all buttons with updated windows
