@@ -57,8 +57,12 @@ class KeyboardShortcutMonitor {
             // First Option+Tab press - show window chooser
             showWindowChooser()
         } else {
-            // Subsequent Tab presses - cycle through windows
-            cycleToNextWindow()
+            // Pass the key event to the window chooser view
+            if event.modifierFlags.contains(.shift) {
+                windowChooserController?.chooserView?.selectPreviousItem()
+            } else {
+                windowChooserController?.chooserView?.selectNextItem()
+            }
         }
     }
     
@@ -97,7 +101,7 @@ class KeyboardShortcutMonitor {
                 }
             }
         )
-        windowChooserController?.showChooser()
+        windowChooserController?.showChooser(mode: .history)
         highlightCurrentWindow()
     }
     

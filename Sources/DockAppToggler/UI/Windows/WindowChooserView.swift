@@ -1,5 +1,10 @@
 import AppKit
 
+// Add at the top of the file, before the class declaration
+protocol WindowChooserViewDelegate: AnyObject {
+    func windowChooserView(_ view: WindowChooserView, didSelectItem item: WindowInfo)
+}
+
 /// A custom view that displays a list of windows as buttons with hover effects
 /// A custom view that displays a list of windows as buttons with hover effects
 class WindowChooserView: NSView {
@@ -25,6 +30,30 @@ class WindowChooserView: NSView {
     private var iconImageView: NSImageView?
     private var minimizeButton: NSButton?
     private var maximizeButton: NSButton?
+    
+    private var selectedIndex: Int = 0
+    
+    // Add near other properties
+    weak var delegate: WindowChooserViewDelegate?
+    
+    override var acceptsFirstResponder: Bool { true }
+    
+    override func keyDown(with event: NSEvent) {
+        switch event.keyCode {
+        case 48: // Tab key
+            if event.modifierFlags.contains(.shift) {
+                selectPreviousItem()
+            } else {
+                selectNextItem()
+            }
+        case 36: // Return/Enter key
+            selectCurrentItem()
+        case 53: // Escape key
+            window?.close()
+        default:
+            super.keyDown(with: event)
+        }
+    }
     
     // Change from instance method to static method
     private static func sortWindows(_ windows: [WindowInfo], app: NSRunningApplication, isHistory: Bool = false) -> [WindowInfo] {
@@ -1686,6 +1715,40 @@ class WindowChooserView: NSView {
         
         // Force layout update
         self.needsLayout = true
+    }
+
+    // When window becomes key, make this view first responder
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        window?.makeFirstResponder(self)
+    }
+
+    func selectNextItem() {
+        selectedIndex = (selectedIndex + 1) % options.count
+        updateSelection()
+    }
+    
+    func selectPreviousItem() {
+        selectedIndex = (selectedIndex - 1 + options.count) % options.count
+        updateSelection()
+    }
+    
+    private func selectCurrentItem() {
+        guard selectedIndex >= 0 && selectedIndex < options.count else { return }
+        // Use existing buttonClicked method to handle selection
+        if let button = buttons.first(where: { $0.tag == selectedIndex }) {
+            buttonClicked(button)
+        }
+    }
+    
+    private func updateSelection() {
+        // Update visual selection state by refreshing buttons
+        buttons.enumerated().forEach { index, button in
+            button.contentTintColor = index == selectedIndex ? 
+                Constants.UI.Theme.buttonHighlightColor : 
+                Constants.UI.Theme.buttonSecondaryTextColor
+        }
+        needsDisplay = true
     }
 }
 

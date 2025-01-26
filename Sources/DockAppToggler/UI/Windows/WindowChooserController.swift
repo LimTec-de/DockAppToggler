@@ -548,4 +548,26 @@ class WindowChooserController: NSWindowController {
         window.setFrame(frame, display: true)
         window.orderFront(nil)
     }
+    
+    override func windowDidLoad() {
+        super.windowDidLoad()
+        
+        // Configure window
+        window?.isMovableByWindowBackground = true
+        window?.level = .floating
+        window?.backgroundColor = .clear
+        
+        // Set style mask to allow becoming key window
+        window?.styleMask.insert(.titled)  // This allows the window to become key
+        window?.acceptsMouseMovedEvents = true
+        
+        // Position window appropriately
+        if let screen = NSScreen.main {
+            let screenFrame = screen.frame
+            let windowFrame = window?.frame ?? .zero
+            let x = (screenFrame.width - windowFrame.width) / 2
+            let y = (screenFrame.height - windowFrame.height) / 2
+            window?.setFrameOrigin(NSPoint(x: x, y: y))
+        }
+    }
 } 
