@@ -173,7 +173,7 @@ class WindowChooserView: NSView {
                !windowInfo.isAppElement && windowInfo.cgWindowID == nil {
                 // Use DispatchQueue to ensure view is fully loaded
                 //DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-                    thumbnailView?.showThumbnail(for: windowInfo)
+                    thumbnailView?.showThumbnail(for: windowInfo, withTimer: true)
                 //}
             }
         }
@@ -518,7 +518,7 @@ class WindowChooserView: NSView {
                 
                 if isHistoryMode {
                     // For history mode, we already created the thumbnail view with the correct app in mouseEntered
-                    thumbnailView?.showThumbnail(for: windowInfo)
+                    thumbnailView?.showThumbnail(for: windowInfo, withTimer: false)
                 } else {
                     // Normal mode - use existing thumbnail logic
                     if !windowInfo.isAppElement {
@@ -543,7 +543,7 @@ class WindowChooserView: NSView {
                             }
                             
                             // Show thumbnail directly using the existing CGWindowID
-                            thumbnailView?.showThumbnail(for: windowInfo)
+                            thumbnailView?.showThumbnail(for: windowInfo, withTimer: false)
                         } else {
                             // If no CGWindowID, try to find it like in normal mode
                             Logger.debug("History mode - No CGWindowID, attempting to find window")
@@ -603,7 +603,7 @@ class WindowChooserView: NSView {
                                         )
                                     }
                                     
-                                    thumbnailView?.showThumbnail(for: updatedWindowInfo)
+                                    thumbnailView?.showThumbnail(for: updatedWindowInfo, withTimer: false)
                                 }
                             }
                         }
@@ -2011,7 +2011,7 @@ class WindowChooserView: NSView {
                         options: [updatedWindowInfo],
                         windowChooser: self.window?.windowController as? WindowChooserController
                     )
-                    thumbnailView?.showThumbnail(for: updatedWindowInfo)
+                    thumbnailView?.showThumbnail(for: updatedWindowInfo, withTimer: false)
                 } else {
                     // Fallback for AX windows
                     var pid: pid_t = 0
@@ -2023,7 +2023,7 @@ class WindowChooserView: NSView {
                             options: [windowInfo],
                             windowChooser: self.window?.windowController as? WindowChooserController
                         )
-                        thumbnailView?.showThumbnail(for: windowInfo)
+                        thumbnailView?.showThumbnail(for: windowInfo, withTimer: false)
                     }
                 }
             } else {
@@ -2037,7 +2037,7 @@ class WindowChooserView: NSView {
                             windowChooser: self.window?.windowController as? WindowChooserController
                         )
                     }
-                    thumbnailView?.showThumbnail(for: windowInfo)
+                    thumbnailView?.showThumbnail(for: windowInfo, withTimer: false)
                 }
             }
             

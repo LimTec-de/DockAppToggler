@@ -397,11 +397,12 @@ class WindowThumbnailView {
         return image
     }
     
-    private func displayThumbnail(_ thumbnail: NSImage, for windowInfo: WindowInfo) {
+    private func displayThumbnail(_ thumbnail: NSImage, for windowInfo: WindowInfo, setupTimer: Bool = true) {
         // If we're showing the app icon as temporary state, use a different visual style
         let isTemporary = thumbnail === targetApp.icon
         
         autoCloseTimer?.invalidate()
+        autoCloseTimer = nil
         
         // Store current imageView for fade transition
         let oldImageView = thumbnailView
@@ -441,7 +442,10 @@ class WindowThumbnailView {
             manageCacheSize()
         }
         
-        setupAutoCloseTimer(for: windowInfo)
+        // Only setup timer if requested
+        if setupTimer {
+            setupAutoCloseTimer(for: windowInfo)
+        }
     }
     
     private func createAndShowPanel(with thumbnail: NSImage, for windowInfo: WindowInfo, isLoading: Bool = false) {
@@ -662,7 +666,7 @@ class WindowThumbnailView {
         )
     }
     
-    func showThumbnail(for windowInfo: WindowInfo) {
+    func showThumbnail(for windowInfo: WindowInfo, withTimer: Bool = true) {
         Task { @MainActor in
             // Check if previews are enabled
             guard Self.previewsEnabled else {
@@ -698,7 +702,7 @@ class WindowThumbnailView {
             // Check cache first
             if let cached = Self.cachedThumbnails[cacheKey],
                cached.isValid(forHiddenApp: targetApp.isHidden) {
-                displayThumbnail(cached.image, for: windowInfo)
+                displayThumbnail(cached.image, for: windowInfo, setupTimer: withTimer)
                 return
             }
             
@@ -706,7 +710,7 @@ class WindowThumbnailView {
             
             // Show loading state immediately
             if let appIcon = targetApp.icon {
-                displayThumbnail(appIcon, for: windowInfo)
+                displayThumbnail(appIcon, for: windowInfo, setupTimer: withTimer)
             } else {
                 // If no app icon available, skip showing preview until real thumbnail is ready
                 return
@@ -751,7 +755,7 @@ class WindowThumbnailView {
                     image.unlockFocus()
                     
                     isThumbnailLoading = false
-                    displayThumbnail(image, for: windowInfo)
+                    displayThumbnail(image, for: windowInfo, setupTimer: withTimer)
                     return
                 }
             }
@@ -760,7 +764,7 @@ class WindowThumbnailView {
             
             // Fallback to regular window thumbnail creation if CGWindowID is not available
             if let thumbnail: NSImage = await createWindowThumbnail(for: windowInfo) {
-                displayThumbnail(thumbnail, for: windowInfo)
+                displayThumbnail(thumbnail, for: windowInfo, setupTimer: withTimer)
             } else {
                 isThumbnailLoading = false
 
@@ -880,10 +884,8 @@ class WindowThumbnailView {
     // Extract timer setup to a separate method
     private func setupAutoCloseTimer(for windowInfo: WindowInfo) {
         autoCloseTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
+            Task { @MainActor [weak self: WindowThumbnailView?] in
                 guard let self = self else { return }
-
-                //print("setupAutoCloseTimer")
 
                 let mouseLocation = NSEvent.mouseLocation
                 guard let screen = NSScreen.main else { return }
@@ -894,22 +896,33 @@ class WindowThumbnailView {
                 let dockResult = DockService.shared.findAppUnderCursor(at: dockMouseLocation)
                 let isOverCorrectDockIcon = dockResult?.app.bundleIdentifier == self.targetApp.bundleIdentifier
                 
-                // Check if mouse is over menu entry using passed reference
-                let isOverMenu = self.windowChooser?.window?.frame.contains(mouseLocation) ?? false
+                // Improved menu detection
+                var isOverMenu = false
+                if let chooserWindow = self.windowChooser?.window {
+                    // Convert screen coordinates to window base coordinates
+                    let windowFrame = chooserWindow.frame
+                    isOverMenu = NSPointInRect(mouseLocation, windowFrame)
+                    
+                    // Debug logging
+                    Logger.debug("""
+                        Menu detection:
+                        Mouse location: \(mouseLocation)
+                        Window frame: \(windowFrame)
+                        Is over menu: \(isOverMenu)
+                        """)
+                }
                 
                 // Only close if mouse is not over any relevant area
                 if !isOverCorrectDockIcon && !isOverMenu {
                     Logger.debug("Closing thumbnail - mouse outside all areas")
                     
                     self.hideThumbnail()
-                    self.hideThumbnail()
-
                     self.autoCloseTimer?.invalidate()
                     self.autoCloseTimer = nil
-                    
                 }
             }
         }
+        
     }
     
     func hideThumbnail() {
@@ -1081,6 +1094,57 @@ class WindowThumbnailView {
         }
         lastThumbnailCreationTime[windowID] = Date()
         return true
+    }
+    
+    // Add new method to show thumbnail without timer
+    @MainActor func showThumbnailWithoutTimer(for windowInfo: WindowInfo) {
+        Task { @MainActor in
+            // Check if previews are enabled
+            guard Self.previewsEnabled else {
+                Logger.debug("Window previews are disabled")
+                return
+            }
+            
+            // Check screen recording permission
+            guard Self.checkScreenRecordingPermission() else {
+                Logger.debug("No screen recording permission - cannot show thumbnail")
+                if let appIcon = targetApp.icon {
+                    displayFallbackPanel(with: appIcon, for: windowInfo)
+                }
+                return
+            }
+            
+            // First close any existing thumbnail
+            hideThumbnail()
+            
+            // Then close all other active preview windows
+            WindowThumbnailView.activePreviewWindows.forEach { panel in
+                panel.close()
+            }
+            WindowThumbnailView.activePreviewWindows.removeAll()
+            
+            // Skip thumbnails for app elements
+            guard !windowInfo.isAppElement else { return }
+            
+            let cacheKey = getCacheKey(for: windowInfo)
+            
+            // Check cache first
+            if let cached = Self.cachedThumbnails[cacheKey],
+               cached.isValid(forHiddenApp: targetApp.isHidden) {
+                displayThumbnail(cached.image, for: windowInfo)
+                return
+            }
+            
+            // Show loading state immediately
+            if let appIcon = targetApp.icon {
+                displayThumbnail(appIcon, for: windowInfo)
+            }
+            
+            // Create and display the actual thumbnail
+            if let thumbnail: NSImage = await createWindowThumbnail(for: windowInfo) {
+                displayThumbnail(thumbnail, for: windowInfo)
+            }
+        }
     }
 }
 
