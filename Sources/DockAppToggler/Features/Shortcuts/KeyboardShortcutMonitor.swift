@@ -293,25 +293,32 @@ class KeyboardShortcutMonitor {
     
     private func setupEventTap() {
         // Create event tap to intercept key events
-        let eventMask = (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.keyUp.rawValue)
+        let eventMask = (1 << CGEventType.keyDown.rawValue) | 
+                        (1 << CGEventType.keyUp.rawValue) |
+                        (1 << CGEventType.flagsChanged.rawValue)  // Add flags changed to catch modifier keys
         
         guard let eventTap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
+            tap: .cgAnnotatedSessionEventTap,  // Changed from cgSessionEventTap
             place: .headInsertEventTap,
             options: .defaultTap,
             eventsOfInterest: CGEventMask(eventMask),
             callback: { proxy, type, event, refcon in
-                let monitor = Unmanaged<KeyboardShortcutMonitor>.fromOpaque(refcon!).takeUnretainedValue()
+                guard let refcon = refcon else { return Unmanaged.passRetained(event) }
+                let monitor = Unmanaged<KeyboardShortcutMonitor>.fromOpaque(refcon).takeUnretainedValue()
                 return monitor.handleEventTap(proxy: proxy, type: type, event: event)
             },
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else {
-            // print("Failed to create event tap")
+            print("Failed to create event tap - check accessibility permissions")
             return
         }
         
         // Create a run loop source and add it to the current run loop
-        let runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0)
+        guard let runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0) else {
+            print("Failed to create run loop source")
+            return
+        }
+        
         CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
         
         // Enable the event tap
@@ -323,38 +330,53 @@ class KeyboardShortcutMonitor {
     private func handleEventTap(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         // Check if feature is enabled first
         guard isOptionTabEnabled else {
-            return Unmanaged.passRetained(event) // Pass through all events when disabled
+            return Unmanaged.passRetained(event)
+        }
+        
+        // Handle flags changed events to track option key state
+        if type == .flagsChanged {
+            if let nsEvent = NSEvent(cgEvent: event) {
+                let wasPressed = isOptionPressed
+                isOptionPressed = nsEvent.modifierFlags.contains(.option)
+                
+                // Handle option key release
+                if wasPressed && !isOptionPressed {
+                    Task { @MainActor in
+                        if let chooserView = windowChooserController?.chooserView {
+                            chooserView.selectCurrentItem()
+                            hideWindowChooser()
+                        } else {
+                            hideWindowChooser()
+                        }
+                    }
+                }
+            }
+            return Unmanaged.passRetained(event)
         }
         
         // Check if it's a tab key event
         if let nsEvent = NSEvent(cgEvent: event),
-           nsEvent.keyCode == 48 {
+           nsEvent.keyCode == 48 {  // Tab key
             
             // If option is pressed, we need to handle tab key events
             if isOptionPressed {
                 // If this is a key up event, reset tab state
                 if type == .keyUp {
                     isTabPressed = false
-                    return nil
+                    return nil  // Consume the event
                 }
                 
-                // If window chooser is active, let our app handle the tab key
-                if windowChooserController != nil {
-                    // print("🔍 Allowing tab for window chooser cycling")
-                    return Unmanaged.passRetained(event)
+                // For key down events
+                if type == .keyDown {
+                    Task { @MainActor in
+                        if windowChooserController == nil {
+                            showWindowChooser()
+                        } else {
+                            handleTabKey(nsEvent)
+                        }
+                    }
+                    return nil  // Consume the event
                 }
-                
-                // If window chooser is not shown yet and this is the first tab press,
-                // let it through so our app can handle it
-                if type == .keyDown && !isTabPressed {
-                    // print("🔍 Allowing initial option+tab combination")
-                    isTabPressed = true
-                    return Unmanaged.passRetained(event)
-                }
-                
-                // Block all other tab key events while option is pressed
-                // print("🔍 Blocking tab key event at system level")
-                return nil
             }
         }
         

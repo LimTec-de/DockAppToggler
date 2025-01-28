@@ -81,27 +81,25 @@ class StatusBarController {
     }
     
     private func setupMenu() {
-        // Get current state of window previews
-        let previewsEnabled = !WindowThumbnailView.arePreviewsDisabled()
-        
+        // Get current state of window previews, defaulting to disabled
+        let previewsEnabled = UserDefaults.standard.bool(forKey: "WindowPreviewsEnabled", defaultValue: false)
         
         // Add autostart toggle
         autostartMenuItem.target = self
         menu.addItem(autostartMenuItem)
         
-        // Add tooltips toggle
+        // Add tooltips toggle - default to enabled
         tooltipsMenuItem.target = self
-        tooltipsMenuItem.state = UserDefaults.standard.bool(forKey: "StatusBarTooltipsEnabled") ? .on : .off
+        tooltipsMenuItem.state = UserDefaults.standard.bool(forKey: "StatusBarTooltipsEnabled", defaultValue: true) ? .on : .off
         menu.addItem(tooltipsMenuItem)
         
-        // Add Option+Tab toggle
+        // Add Option+Tab toggle - default to enabled
         optionTabMenuItem.target = self
-        // Default to enabled if preference hasn't been set
         let optionTabEnabled = UserDefaults.standard.bool(forKey: "OptionTabEnabled", defaultValue: true)
         optionTabMenuItem.state = optionTabEnabled ? .on : .off
         menu.addItem(optionTabMenuItem)
         
-        // Create menu item with checkmark
+        // Create menu item with checkmark for window previews
         previewsMenuItem = NSMenuItem(
             title: "Window Previews",
             action: #selector(toggleWindowPreviews(_:)),
@@ -174,8 +172,10 @@ class StatusBarController {
             // Toggle previews
             WindowThumbnailView.togglePreviews()
             
-            // Update menu item state
-            sender.state = WindowThumbnailView.arePreviewsDisabled() ? .off : .on
+            // Update menu item state and save preference
+            let newState = !WindowThumbnailView.arePreviewsDisabled()
+            sender.state = newState ? .on : .off
+            UserDefaults.standard.set(newState, forKey: "WindowPreviewsEnabled")
         }
     }
     
