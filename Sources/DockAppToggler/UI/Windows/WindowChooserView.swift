@@ -166,6 +166,16 @@ class WindowChooserView: NSView {
                 options: self.options,
                 windowChooser: self.window?.windowController as? WindowChooserController
             )
+            
+            // Show initial preview of topmost window if available
+            if let topmostWindow = self.topmostWindow,
+               let windowInfo = self.options.first(where: { $0.window == topmostWindow }),
+               !windowInfo.isAppElement && windowInfo.cgWindowID == nil {
+                // Use DispatchQueue to ensure view is fully loaded
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                    self?.thumbnailView?.showThumbnail(for: windowInfo)
+                }
+            }
         }
     }
     
