@@ -23,7 +23,7 @@ class WindowChooserView: NSView {
     // Add property to store dock icon center
     private let dockIconCenter: NSPoint
     // Add new property to store thumbnail view
-    private var thumbnailView: WindowThumbnailView?
+    internal var thumbnailView: WindowThumbnailView?
     // Change from let to var
     private var isHistoryMode: Bool
     // Add new properties for icon image view and minimize/maximize buttons
@@ -172,9 +172,9 @@ class WindowChooserView: NSView {
                let windowInfo = self.options.first(where: { $0.window == topmostWindow }),
                !windowInfo.isAppElement && windowInfo.cgWindowID == nil {
                 // Use DispatchQueue to ensure view is fully loaded
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-                    self?.thumbnailView?.showThumbnail(for: windowInfo)
-                }
+                //DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                    thumbnailView?.showThumbnail(for: windowInfo)
+                //}
             }
         }
     }
@@ -514,63 +514,100 @@ class WindowChooserView: NSView {
             
             // Show thumbnail
             if button.tag < options.count {
-                let windowInfo = options[button.tag]  // Get the specific window info for this button
+                let windowInfo = options[button.tag]
                 
                 if isHistoryMode {
-                    // For history mode, create thumbnail for specific app
-                    if let cgWindowID = windowInfo.cgWindowID,
-                       let windowList = CGWindowListCopyWindowInfo([.optionIncludingWindow], cgWindowID) as? [[CFString: Any]],
-                       let cgWindowInfo = windowList.first,
-                       let ownerPID = cgWindowInfo[kCGWindowOwnerPID] as? pid_t,
-                       let runningApp = NSRunningApplication(processIdentifier: ownerPID) {
+                    // For history mode, we already created the thumbnail view with the correct app in mouseEntered
+                    thumbnailView?.showThumbnail(for: windowInfo)
+                } else {
+                    // Normal mode - use existing thumbnail logic
+                    if !windowInfo.isAppElement {
+                        Logger.debug("""
+                            Showing thumbnail for window:
+                            - Name: \(windowInfo.name)
+                            - CGWindowID: \(windowInfo.cgWindowID ?? 0)
+                            - Is App Element: \(windowInfo.isAppElement)
+                            """)
                         
-                        // print("  - Creating thumbnail view for app: \(runningApp.localizedName ?? "unknown")")
-                        let appSpecificThumbnailView = WindowThumbnailView(
-                            targetApp: runningApp,
-                            dockIconCenter: dockIconCenter,
-                            options: [windowInfo],
-                            windowChooser: self.window?.windowController as? WindowChooserController
-                        )
-                        
-                        // Clean up existing thumbnail
-                        thumbnailView?.cleanup()
-                        thumbnailView = appSpecificThumbnailView
-                        
-                        // Show new thumbnail immediately
-                        thumbnailView?.showThumbnail(for: windowInfo)
-                    } else {
-                        // Try AX window fallback
-                        var pid: pid_t = 0
-                        if AXUIElementGetPid(windowInfo.window, &pid) == .success,
-                           let runningApp = NSRunningApplication(processIdentifier: pid) {
+                        if let cgWindowID = windowInfo.cgWindowID {
+                            Logger.debug("History mode - Using window ID: \(cgWindowID)")
                             
-                            // print("  - Creating thumbnail view for AX window app: \(runningApp.localizedName ?? "unknown")")
-                            let appSpecificThumbnailView = WindowThumbnailView(
-                                targetApp: runningApp,
-                                dockIconCenter: dockIconCenter,
-                                options: [windowInfo],
-                                windowChooser: self.window?.windowController as? WindowChooserController
-                            )
-                            thumbnailView?.cleanup()
-                            thumbnailView = appSpecificThumbnailView
+                            // Create thumbnail view if needed
+                            if thumbnailView == nil {
+                                thumbnailView = WindowThumbnailView(
+                                    targetApp: targetApp,  // Use the current app, not looking up by PID
+                                    dockIconCenter: dockIconCenter,
+                                    options: [windowInfo],
+                                    windowChooser: self.window?.windowController as? WindowChooserController
+                                )
+                            }
+                            
+                            // Show thumbnail directly using the existing CGWindowID
                             thumbnailView?.showThumbnail(for: windowInfo)
+                        } else {
+                            // If no CGWindowID, try to find it like in normal mode
+                            Logger.debug("History mode - No CGWindowID, attempting to find window")
+                            var pid: pid_t = 0
+                            if AXUIElementGetPid(windowInfo.window, &pid) == .success {
+                                let windowList = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[CFString: Any]] ?? []
+                                let appWindows = windowList.filter { dict in
+                                    guard let windowPID = dict[kCGWindowOwnerPID] as? pid_t,
+                                          windowPID == pid,
+                                          let layer = dict[kCGWindowLayer] as? Int32,
+                                          layer == 0 else {
+                                        return false
+                                    }
+                                    return true
+                                }
+                                
+                                // Try to find matching window
+                                if let matchingWindow = appWindows.first(where: { dict in
+                                    guard let windowTitle = dict[kCGWindowName] as? String else {
+                                        return false
+                                    }
+                                    
+                                    // Use the same normalization function as before
+                                    func normalizeTitle(_ title: String) -> String {
+                                        let baseTitle = title
+                                            .replacingOccurrences(of: " - \(targetApp.localizedName ?? "")", with: "")
+                                            .replacingOccurrences(of: ".txt", with: "")
+                                            .trimmingCharacters(in: .whitespaces)
+                                        
+                                        if baseTitle.contains(" - ") {
+                                            return baseTitle.components(separatedBy: " - ")[0]
+                                                .trimmingCharacters(in: .whitespaces)
+                                        }
+                                        return baseTitle
+                                    }
+                                    
+                                    let normalizedTarget = normalizeTitle(windowInfo.name)
+                                    let normalizedCurrent = normalizeTitle(windowTitle)
+                                    
+                                    return normalizedTarget == normalizedCurrent
+                                }),
+                                let windowID = matchingWindow[kCGWindowNumber] as? CGWindowID {
+                                    // Create updated window info with the found ID
+                                    let updatedWindowInfo = WindowInfo(
+                                        window: windowInfo.window,
+                                        name: windowInfo.name,
+                                        cgWindowID: windowID,
+                                        isAppElement: windowInfo.isAppElement
+                                    )
+                                    
+                                    if thumbnailView == nil {
+                                        thumbnailView = WindowThumbnailView(
+                                            targetApp: targetApp,
+                                            dockIconCenter: dockIconCenter,
+                                            options: [updatedWindowInfo],
+                                            windowChooser: self.window?.windowController as? WindowChooserController
+                                        )
+                                    }
+                                    
+                                    thumbnailView?.showThumbnail(for: updatedWindowInfo)
+                                }
+                            }
                         }
                     }
-                } else if !windowInfo.isAppElement {
-                    // Create a single-window options array for this specific window
-                    let singleWindowOptions = [windowInfo]  // Only include the hovered window
-                    
-                    // Create new thumbnail view with just this window's options
-                    thumbnailView?.cleanup()  // Clean up existing view
-                    thumbnailView = WindowThumbnailView(
-                        targetApp: targetApp,
-                        dockIconCenter: dockIconCenter,
-                        options: singleWindowOptions,
-                        windowChooser: self.window?.windowController as? WindowChooserController
-                    )
-                    
-                    // Show thumbnail for this specific window
-                    thumbnailView?.showThumbnail(for: windowInfo)
                 }
             }
         }
@@ -580,6 +617,48 @@ class WindowChooserView: NSView {
         super.mouseEntered(with: event)
         if let button = event.trackingArea?.owner as? NSButton,
            event.trackingArea?.userInfo?["isMenuButton"] as? Bool == true {
+            
+            // Get the window info for this button
+            let windowInfo = options[button.tag]
+            
+            // In history mode, we need to find the correct app for each window
+            if isHistoryMode {
+                if let cgWindowID = windowInfo.cgWindowID,
+                   let windowList = CGWindowListCopyWindowInfo([.optionIncludingWindow], cgWindowID) as? [[CFString: Any]],
+                   let cgWindowInfo = windowList.first,
+                   let ownerPID = cgWindowInfo[kCGWindowOwnerPID] as? pid_t,
+                   let runningApp = NSRunningApplication(processIdentifier: ownerPID) {
+                    
+                    // Create a proper WindowInfo object from the CGWindow info
+                    let updatedWindowInfo = WindowInfo(
+                        window: windowInfo.window,
+                        name: windowInfo.name,
+                        cgWindowID: cgWindowID,
+                        isAppElement: windowInfo.isAppElement
+                    )
+                    
+                    // Create thumbnail view with the correct app and window info
+                    thumbnailView = WindowThumbnailView(
+                        targetApp: runningApp,
+                        dockIconCenter: dockIconCenter,
+                        options: [updatedWindowInfo],
+                        windowChooser: self.window?.windowController as? WindowChooserController
+                    )
+                } else {
+                    // Fallback for AX windows
+                    var pid: pid_t = 0
+                    if AXUIElementGetPid(windowInfo.window, &pid) == .success,
+                       let runningApp = NSRunningApplication(processIdentifier: pid) {
+                        thumbnailView = WindowThumbnailView(
+                            targetApp: runningApp,
+                            dockIconCenter: dockIconCenter,
+                            options: [windowInfo], // Use original windowInfo since it's already correct type
+                            windowChooser: self.window?.windowController as? WindowChooserController
+                        )
+                    }
+                }
+            }
+            
             applyHoverEffect(for: button)
         }
     }
@@ -597,11 +676,20 @@ class WindowChooserView: NSView {
                         }
                     }
                     
-                    // In history mode, clean up the temporary thumbnail view
-                    if isHistoryMode {
-                        thumbnailView?.cleanup()
-                        thumbnailView = nil
-                    } else {
+                    // Only hide thumbnail if mouse is not over any menu entry
+                    let mouseLocation = NSEvent.mouseLocation
+                    let isOverAnyButton = buttons.contains { button in
+                        guard let window = self.window else { return false }
+                        let buttonFrameInWindow = button.convert(button.bounds, to: nil)
+                        let buttonFrameInScreen = window.convertPoint(toScreen: buttonFrameInWindow.origin)
+                        let buttonScreenFrame = NSRect(
+                            origin: buttonFrameInScreen,
+                            size: buttonFrameInWindow.size
+                        )
+                        return buttonScreenFrame.contains(mouseLocation)
+                    }
+                    
+                    if !isOverAnyButton {
                         thumbnailView?.hideThumbnail()
                     }
                 }
@@ -942,9 +1030,15 @@ class WindowChooserView: NSView {
         let buttonsToClean = buttons
         let hideButtonsToClean = hideButtons
         let closeButtonsToClean = closeButtons
+        //let thumbnailViewToClean = thumbnailView
+
+        print("WindowChooserView deinit")
         
-        // Track destruction
-        // Remove: MemoryTracker.shared.track(self) { "destroyed" }
+        // Schedule cleanup on main actor
+        /*Task { @MainActor in
+            thumbnailViewToClean?.cleanup()
+        }
+        thumbnailView = nil*/
         
         // Clean up tracking areas on main actor
         Task { @MainActor in
@@ -1702,6 +1796,10 @@ class WindowChooserView: NSView {
     }
 
     func cleanup() {
+        // Cleanup thumbnail view
+        thumbnailView?.cleanup()
+        thumbnailView = nil
+
         // Remove tracking areas and clear event monitors
         buttons.forEach { button in
             button.trackingAreas.forEach { button.removeTrackingArea($0) }
@@ -1751,9 +1849,7 @@ class WindowChooserView: NSView {
         // Remove self from superview
         self.removeFromSuperview()
         
-        // Cleanup thumbnail view
-        thumbnailView?.cleanup()
-        thumbnailView = nil
+        
     }
 
     // Add new method to update button states
@@ -1884,20 +1980,68 @@ class WindowChooserView: NSView {
     }
     
     private func updateSelection() {
-        // print("🔍 updateSelection called")
-        
         // Guard against empty options
         guard !options.isEmpty else {
-            // print("  - ⚠️ No options available")
             return
         }
         
         if let selectedButton = buttons.first(where: { $0.tag == selectedIndex }) {
-            // print("  - Found button with tag: \(selectedIndex)")
+            // Get the window info for the selected item
+            let windowInfo = options[selectedIndex]
+            
+            // Update thumbnail based on mode
+            if isHistoryMode {
+                // For history mode, find the correct app and create thumbnail
+                if let cgWindowID = windowInfo.cgWindowID,
+                   let windowList = CGWindowListCopyWindowInfo([.optionIncludingWindow], cgWindowID) as? [[CFString: Any]],
+                   let cgWindowInfo = windowList.first,
+                   let ownerPID = cgWindowInfo[kCGWindowOwnerPID] as? pid_t,
+                   let runningApp = NSRunningApplication(processIdentifier: ownerPID) {
+                    
+                    let updatedWindowInfo = WindowInfo(
+                        window: windowInfo.window,
+                        name: windowInfo.name,
+                        cgWindowID: cgWindowID,
+                        isAppElement: windowInfo.isAppElement
+                    )
+                    
+                    thumbnailView = WindowThumbnailView(
+                        targetApp: runningApp,
+                        dockIconCenter: dockIconCenter,
+                        options: [updatedWindowInfo],
+                        windowChooser: self.window?.windowController as? WindowChooserController
+                    )
+                    thumbnailView?.showThumbnail(for: updatedWindowInfo)
+                } else {
+                    // Fallback for AX windows
+                    var pid: pid_t = 0
+                    if AXUIElementGetPid(windowInfo.window, &pid) == .success,
+                       let runningApp = NSRunningApplication(processIdentifier: pid) {
+                        thumbnailView = WindowThumbnailView(
+                            targetApp: runningApp,
+                            dockIconCenter: dockIconCenter,
+                            options: [windowInfo],
+                            windowChooser: self.window?.windowController as? WindowChooserController
+                        )
+                        thumbnailView?.showThumbnail(for: windowInfo)
+                    }
+                }
+            } else {
+                // Normal mode - use existing thumbnail logic
+                if !windowInfo.isAppElement {
+                    if thumbnailView == nil {
+                        thumbnailView = WindowThumbnailView(
+                            targetApp: targetApp,
+                            dockIconCenter: dockIconCenter,
+                            options: [windowInfo],
+                            windowChooser: self.window?.windowController as? WindowChooserController
+                        )
+                    }
+                    thumbnailView?.showThumbnail(for: windowInfo)
+                }
+            }
+            
             applyHoverEffect(for: selectedButton)
-        } else {
-            // print("  - ⚠️ No button found for index: \(selectedIndex)")
-            // print("  - Available button tags: \(buttons.map { $0.tag })")
         }
     }
 

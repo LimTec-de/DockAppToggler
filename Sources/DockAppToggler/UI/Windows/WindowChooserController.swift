@@ -193,6 +193,8 @@ class WindowChooserController: NSWindowController {
             contentView.removeTrackingArea(trackingArea)
         }
         trackingArea = nil
+
+        
         
         // Clean up view hierarchy immediately
         if let window = window {
@@ -216,6 +218,8 @@ class WindowChooserController: NSWindowController {
         cleanup()
         
         // Clear window reference
+        
+
         window?.close()
         window = nil
         
@@ -274,6 +278,7 @@ class WindowChooserController: NSWindowController {
     }
 
     func updateWindows(_ windows: [WindowInfo], for app: NSRunningApplication, at point: CGPoint) {
+
         // Update app reference
         self.app = app
         

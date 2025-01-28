@@ -6,6 +6,7 @@ struct WindowInfo: @unchecked Sendable {
     let window: AXUIElement
     let name: String
     let cgWindowID: CGWindowID?
+    let isCGWindowOnly: Bool?
     let isAppElement: Bool
     let bundleIdentifier: String?
     var position: CGPoint?
@@ -15,6 +16,7 @@ struct WindowInfo: @unchecked Sendable {
     init(window: AXUIElement, 
          name: String, 
          cgWindowID: CGWindowID? = nil,
+         isCGWindowOnly: Bool = false,
          isAppElement: Bool = false,
          bundleIdentifier: String? = nil,
          position: CGPoint? = nil,
@@ -23,6 +25,7 @@ struct WindowInfo: @unchecked Sendable {
         self.window = window
         self.name = name
         self.cgWindowID = cgWindowID
+        self.isCGWindowOnly = isCGWindowOnly
         self.isAppElement = isAppElement
         self.bundleIdentifier = bundleIdentifier
         self.position = position
