@@ -12,9 +12,9 @@ class WindowThumbnailView {
     private var currentWindowID: CGWindowID?
     
     // Add new CachedThumbnail struct
-    private struct CachedThumbnail {
-        let image: NSImage
-        let timestamp: Date
+    @MainActor private struct CachedThumbnail: Sendable {
+        let image: NSImage  // NSImage is not Sendable, but we'll only access it on MainActor
+        let timestamp: Date // Date is already Sendable
         
         // Increase timeouts
         static let hiddenAppCacheTimeout: TimeInterval = 7200  // 2 hours for hidden apps
@@ -63,6 +63,9 @@ class WindowThumbnailView {
     private let targetApp: NSRunningApplication
     private let titleHeight: CGFloat = 24
     private let options: [WindowInfo]
+    
+    // Add property to store window chooser reference
+    private weak var windowChooser: WindowChooserController?
     
     private var thumbnailSize: NSSize {
         guard let screen = NSScreen.main else {
@@ -136,10 +139,17 @@ class WindowThumbnailView {
     // Add near the top of the class after other static properties
     @MainActor private static var hasCheckedPermissions = false
     
-    init(targetApp: NSRunningApplication, dockIconCenter: NSPoint, options: [WindowInfo]) {
+    // Add near the top of the class
+    @MainActor private static var hasCheckedScreenRecordingPermission = false
+    
+    // Add property to track if thumbnail creation is in progress
+    private var isThumbnailLoading = false
+    
+    init(targetApp: NSRunningApplication, dockIconCenter: NSPoint, options: [WindowInfo], windowChooser: WindowChooserController?) {
         self.targetApp = targetApp
         self.dockIconCenter = dockIconCenter
         self.options = options
+        self.windowChooser = windowChooser
         
         self._thumbnailWindow = nil
         
@@ -170,8 +180,8 @@ class WindowThumbnailView {
                 // Skip app elements
                 guard !windowInfo.isAppElement else { continue }
                 
-                // Create thumbnail with existing logic
-                if let thumbnail = createWindowThumbnail(for: windowInfo) {
+                // Create thumbnail with existing logic - add await
+                if let thumbnail = await createWindowThumbnail(for: windowInfo) {
                     cachedCount += 1
                 }
                 
@@ -183,30 +193,13 @@ class WindowThumbnailView {
         Logger.debug("Completed initial thumbnail cache. Cached \(cachedCount) windows")
     }
     
-    private func shouldCreateNewThumbnail(for windowID: CGWindowID) -> Bool {
-        if let lastTime = Self.lastThumbnailCreationTime[windowID] {
-            let timeSinceLastCapture = Date().timeIntervalSince(lastTime)
-            if timeSinceLastCapture < Self.minimumThumbnailInterval {
-                return false
-            }
-        }
-        Self.lastThumbnailCreationTime[windowID] = Date()
-        return true
-    }
-    
-    private func createWindowThumbnail(for windowInfo: WindowInfo) -> NSImage? {
+    @MainActor
+    private func createWindowThumbnail(for windowInfo: WindowInfo) async -> NSImage? {
         let pid = targetApp.processIdentifier
         let cacheKey = WindowCacheKey(pid: pid, windowName: windowInfo.name)
         
-        // Check cache first with detailed logging
+        // Check cache first
         if let cached = Self.cachedThumbnails[cacheKey] {
-            Logger.debug("""
-                Checking thumbnail cache:
-                - Window: \(windowInfo.name)
-                - Cache timestamp: \(cached.timestamp)
-                - App hidden: \(targetApp.isHidden)
-                """)
-            
             if cached.isValid(forHiddenApp: targetApp.isHidden) {
                 Logger.debug("Using valid cached thumbnail")
                 return cached.image
@@ -216,172 +209,146 @@ class WindowThumbnailView {
             }
         }
         
-        // Special handling for Chrome
-        if targetApp.bundleIdentifier == "com.google.Chrome" {
-            // Get list of all windows
+        // Create a data task to handle the window capture
+        let imageData: CGImage? = await Task.detached { [targetApp = targetApp, windowInfo = windowInfo] () -> CGImage? in
+            // Special handling for Chrome
+            if targetApp.bundleIdentifier == "com.google.Chrome" {
+                // Get list of all windows
+                let windowList = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[CFString: Any]] ?? []
+                
+                Logger.debug("Chrome window matching:")
+                Logger.debug("Target window: '\(windowInfo.name)'")
+                
+                // Find Chrome windows that match our criteria
+                let chromeWindows = windowList.filter { windowDict in
+                    guard let windowPID = windowDict[kCGWindowOwnerPID] as? pid_t,
+                          windowPID == pid,
+                          let layer = windowDict[kCGWindowLayer] as? Int32,
+                          layer == 0,
+                          let bounds = windowDict[kCGWindowBounds] as? [String: Any],
+                          let width = bounds["Width"] as? CGFloat,
+                          let height = bounds["Height"] as? CGFloat,
+                          width > 100 && height > 100,
+                          let windowTitle = windowDict[kCGWindowName as CFString] as? String
+                    else {
+                        return false
+                    }
+                    
+                    // Log each window's title for debugging
+                    Logger.debug("Found Chrome window: '\(windowTitle)'")
+                    
+                    // More flexible title matching for Chrome
+                    let normalizedTargetTitle = windowInfo.name
+                        .replacingOccurrences(of: " - Google Chrome", with: "")
+                        .split(separator: " - ")
+                        .first?
+                        .trimmingCharacters(in: .whitespaces) ?? ""
+
+                    let normalizedWindowTitle = windowTitle
+                        .replacingOccurrences(of: " - Google Chrome", with: "")
+                        .split(separator: " - ")
+                        .first?
+                        .trimmingCharacters(in: .whitespaces) ?? ""
+
+                    Logger.debug("Comparing titles:")
+                    Logger.debug("  - Normalized target: '\(normalizedTargetTitle)'")
+                    Logger.debug("  - Normalized window: '\(normalizedWindowTitle)'")
+
+                    return normalizedWindowTitle == normalizedTargetTitle
+                }
+                
+                Logger.debug("Matched windows count: \(chromeWindows.count)")
+                
+                // Try to get thumbnail for the matching window
+                if let matchingWindow = chromeWindows.first,
+                   let windowID = matchingWindow[kCGWindowNumber] as? CGWindowID {
+                    
+                    // Check if we should create a new thumbnail
+                    let shouldCreate = await MainActor.run { Self.shouldCreateNewThumbnail(for: windowID) }
+                    if !shouldCreate {
+                        Logger.debug("Skipping thumbnail creation - too soon since last capture")
+                        return nil
+                    }
+                    
+                    let captureOptions: CGWindowImageOption = [
+                        .boundsIgnoreFraming,
+                        .nominalResolution,
+                        .bestResolution
+                    ]
+                    
+                    return CGWindowListCreateImage(
+                        .null,
+                        .optionIncludingWindow,
+                        windowID,
+                        captureOptions
+                    )
+                }
+            }
+            
+            // Regular window handling
             let windowList = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[CFString: Any]] ?? []
             
-            // Find Chrome windows that match our criteria
-            let chromeWindows = windowList.filter { windowDict in
-                guard let windowPID = windowDict[kCGWindowOwnerPID] as? pid_t,
-                      windowPID == pid,
-                      let layer = windowDict[kCGWindowLayer] as? Int32,
-                      layer == 0, // Main window layer
-                      let bounds = windowDict[kCGWindowBounds] as? [String: Any],
-                      let width = bounds["Width"] as? CGFloat,
-                      let height = bounds["Height"] as? CGFloat,
-                      width > 100 && height > 100 // Filter out small UI elements
-                else {
+            if let windowDict = windowList.first(where: { dict in
+                guard let windowPID = dict[kCGWindowOwnerPID] as? pid_t,
+                      windowPID == targetApp.processIdentifier,
+                      let windowTitle = dict[kCGWindowName] as? String,
+                      windowTitle == windowInfo.name else {
                     return false
                 }
                 return true
-            }
-            
-            // Sort windows by size (largest first) to get the main content window
-            let sortedWindows = chromeWindows.sorted { first, second in
-                guard let firstBounds = first[kCGWindowBounds] as? [String: Any],
-                      let secondBounds = second[kCGWindowBounds] as? [String: Any],
-                      let firstWidth = firstBounds["Width"] as? CGFloat,
-                      let firstHeight = firstBounds["Height"] as? CGFloat,
-                      let secondWidth = secondBounds["Width"] as? CGFloat,
-                      let secondHeight = secondBounds["Height"] as? CGFloat
-                else {
-                    return false
-                }
-                return (firstWidth * firstHeight) > (secondWidth * secondHeight)
-            }
-            
-            // Try to get thumbnail for the largest window
-            if let mainWindow = sortedWindows.first,
-               let windowID = mainWindow[kCGWindowNumber] as? CGWindowID {
-                Logger.debug("Found main Chrome window with ID: \(windowID)")
-
-
-                // Check if a valid cached thumbnail exists
-                if let cached = Self.cachedThumbnails[cacheKey],
-                cached.isValid(forHiddenApp: targetApp.isHidden) {
-                    Logger.debug("Using cached thumbnail for window ID: \(windowID)")
-                    return cached.image
-                }
+            }),
+               let windowID = windowDict[kCGWindowNumber] as? CGWindowID {
                 
                 // Check if we should create a new thumbnail
-                guard shouldCreateNewThumbnail(for: windowID) else {
+                let shouldCreate = await MainActor.run { Self.shouldCreateNewThumbnail(for: windowID) }
+                if !shouldCreate {
                     Logger.debug("Skipping thumbnail creation - too soon since last capture")
                     return nil
                 }
                 
-                // Add thumbnail capture options to reduce quality for better performance
                 let captureOptions: CGWindowImageOption = [
                     .boundsIgnoreFraming,
                     .nominalResolution,
-                    .bestResolution  // Use best resolution instead of retina
+                    .bestResolution
                 ]
                 
-                // Add scaling for the capture
-                let scaleFactor: CGFloat = 0.5  // Capture at half resolution
-                
-                if let windowImage = CGWindowListCreateImage(
+                return CGWindowListCreateImage(
                     .null,
                     .optionIncludingWindow,
                     windowID,
                     captureOptions
-                ) {
-                    // Scale down the image immediately after capture
-                    let scaledSize = NSSize(
-                        width: CGFloat(windowImage.width) * scaleFactor,
-                        height: CGFloat(windowImage.height) * scaleFactor
-                    )
-                    
-                    let image = NSImage(size: scaledSize)
-                    image.lockFocus()
-                    NSGraphicsContext.current?.imageInterpolation = .medium  // Use medium quality interpolation
-                    let rect = NSRect(origin: .zero, size: scaledSize)
-                    NSImage(cgImage: windowImage, size: .zero).draw(in: rect)
-                    image.unlockFocus()
-                    
-                    // Cache the scaled image
-                    Self.cachedThumbnails[cacheKey] = CachedThumbnail(
-                        image: image,
-                        timestamp: Date()
-                    )
-                    Logger.debug("Created and cached Chrome thumbnail for window ID: \(windowID)")
-                    
-                    return image
-                }
+                )
             }
             
-            Logger.debug("Failed to create Chrome thumbnail")
             return nil
-        }
+        }.value
         
-        // Regular window handling
-        let windowList = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[CFString: Any]] ?? []
+        // Convert CGImage to NSImage on the main actor
+        guard let cgImage = imageData else { return nil }
         
-        let matchingWindow = windowList.first { windowDict in
-            guard let windowPID = windowDict[kCGWindowOwnerPID] as? pid_t,
-                  windowPID == pid,
-                  let windowTitle = windowDict[kCGWindowName] as? String,
-                  windowTitle == windowInfo.name else {
-                return false
-            }
-            return true
-        }
+        let scaleFactor: CGFloat = 0.5
+        let scaledSize = NSSize(
+            width: CGFloat(cgImage.width) * scaleFactor,
+            height: CGFloat(cgImage.height) * scaleFactor
+        )
         
-        if let windowDict = matchingWindow,
-           let windowID = windowDict[kCGWindowNumber] as? CGWindowID {
-            Logger.debug("Found matching window with ID: \(windowID)")
-            
-            // Check if we should create a new thumbnail
-            guard shouldCreateNewThumbnail(for: windowID) else {
-                Logger.debug("Skipping thumbnail creation - too soon since last capture")
-                return nil
-            }
-            
-            // Add thumbnail capture options to reduce quality for better performance
-            let captureOptions: CGWindowImageOption = [
-                .boundsIgnoreFraming,
-                .nominalResolution,
-                .bestResolution  // Use best resolution instead of retina
-            ]
-            
-            // Add scaling for the capture
-            let scaleFactor: CGFloat = 0.5  // Capture at half resolution
-            
-            if let windowImage = CGWindowListCreateImage(
-                .null,
-                .optionIncludingWindow,
-                windowID,
-                captureOptions
-            ) {
-                // Scale down the image immediately after capture
-                let scaledSize = NSSize(
-                    width: CGFloat(windowImage.width) * scaleFactor,
-                    height: CGFloat(windowImage.height) * scaleFactor
-                )
-                
-                let image = NSImage(size: scaledSize)
-                image.lockFocus()
-                NSGraphicsContext.current?.imageInterpolation = .medium  // Use medium quality interpolation
-                let rect = NSRect(origin: .zero, size: scaledSize)
-                NSImage(cgImage: windowImage, size: .zero).draw(in: rect)
-                image.unlockFocus()
-                
-                // Cache the scaled image
-                Self.cachedThumbnails[cacheKey] = CachedThumbnail(
-                    image: image,
-                    timestamp: Date()
-                )
-                Logger.debug("Created and cached new thumbnail for window: \(windowInfo.name)")
-                
-                return image
-            }
-        }
+        let image = NSImage(size: scaledSize)
+        image.lockFocus()
+        NSGraphicsContext.current?.imageInterpolation = .medium
+        let rect = NSRect(origin: .zero, size: scaledSize)
+        NSImage(cgImage: cgImage, size: .zero).draw(in: rect)
+        image.unlockFocus()
         
-        Logger.debug("Failed to create thumbnail for: \(windowInfo.name)")
-        return nil
+        // Cache the scaled image
+        Self.cachedThumbnails[cacheKey] = CachedThumbnail(
+            image: image,
+            timestamp: Date()
+        )
+        
+        return image
     }
     
-    private func createAndShowPanel(with thumbnail: NSImage, for windowInfo: WindowInfo) {
+    private func createAndShowPanel(with thumbnail: NSImage, for windowInfo: WindowInfo, isLoading: Bool = false) {
         let shadowPadding: CGFloat = 80
         let contentMargin: CGFloat = 20
         let titleTopMargin: CGFloat = 2
@@ -528,108 +495,160 @@ class WindowThumbnailView {
             panel.makeKey()
             WindowThumbnailView.activePreviewWindows.insert(panel)
         }
+
+        if isLoading {
+            // Center the app icon and make it larger
+            imageView.frame = NSRect(
+                x: (thumbnailSize.width - 128) / 2,
+                y: (thumbnailSize.height - 128) / 2,
+                width: 128,
+                height: 128
+            )
+            imageView.imageScaling = .scaleProportionallyUpOrDown
+            imageView.alphaValue = 0.7  // Make it slightly transparent
+            
+            // Add spinner below the icon
+            let spinner = NSProgressIndicator(frame: NSRect(x: 0, y: 0, width: 32, height: 32))
+            spinner.style = .spinning
+            spinner.startAnimation(nil)
+            spinner.frame = NSRect(
+                x: (thumbnailSize.width - spinner.frame.width) / 2,
+                y: (thumbnailSize.height - spinner.frame.height) / 2 - 80,  // Position below icon
+                width: spinner.frame.width,
+                height: spinner.frame.height
+            )
+            contentContainer.addSubview(spinner)
+        } else {
+            // Normal thumbnail display
+            imageView.frame = NSRect(origin: .zero, size: thumbnailSize)
+            imageView.imageScaling = .scaleProportionallyDown
+            imageView.alphaValue = 1.0
+            
+            // Remove spinner if it exists
+            contentContainer.subviews.filter { $0 is NSProgressIndicator }.forEach { $0.removeFromSuperview() }
+        }
     }
     
     func showThumbnail(for windowInfo: WindowInfo) {
-        // Check if previews are enabled
-        guard Self.previewsEnabled else {
-            Logger.debug("Window previews are disabled")
-            return
-        }
-        
-        // Check screen recording permission
-        guard Self.checkScreenRecordingPermission() else {
-            Logger.debug("No screen recording permission - cannot show thumbnail")
-            // Show fallback with app icon since we can't capture screen
-            if let appIcon = targetApp.icon {
-                displayFallbackPanel(with: appIcon, for: windowInfo)
-            }
-            return
-        }
-        
-        // First close any existing thumbnail
-        hideThumbnail()
-        
-        // Then close all other active preview windows
-        WindowThumbnailView.activePreviewWindows.forEach { panel in
-            panel.close()
-        }
-        WindowThumbnailView.activePreviewWindows.removeAll()
-        
-        // Skip thumbnails for app elements
-        guard !windowInfo.isAppElement else { return }
-        
-        let pid = targetApp.processIdentifier
-        let cacheKey = WindowCacheKey(pid: pid, windowName: windowInfo.name)
-        
-        // Check cache first
-        if let cached = Self.cachedThumbnails[cacheKey],
-           cached.isValid(forHiddenApp: targetApp.isHidden) {
-            //Logger.debug("Using cached thumbnail for window: \(windowInfo.name)")
-            displayThumbnail(cached.image, for: windowInfo)
-            return
-        }
-        
-        // If app is hidden, try app thumbnail
-        if targetApp.isHidden {
-            if let bundleID = targetApp.bundleIdentifier,
-               let appThumbnail = Self.appThumbnails[bundleID],
-               appThumbnail.isValid {
-                //Logger.debug("Using cached app thumbnail for hidden app: \(bundleID)")
-                displayThumbnail(appThumbnail.image, for: windowInfo)
+        Task { @MainActor in
+            // Check if previews are enabled
+            guard Self.previewsEnabled else {
+                Logger.debug("Window previews are disabled")
                 return
             }
-        }
-        
-        // Create new thumbnail
-        //Logger.debug("Creating new thumbnail for: \(windowInfo.name)")
-        if let thumbnail = createWindowThumbnail(for: windowInfo) {
-            displayThumbnail(thumbnail, for: windowInfo)
-        } else {
-            //Logger.debug("Failed to create thumbnail, showing app icon fallback for: \(windowInfo.name)")
+            
+            // Check screen recording permission
+            guard Self.checkScreenRecordingPermission() else {
+                Logger.debug("No screen recording permission - cannot show thumbnail")
+                if let appIcon = targetApp.icon {
+                    displayFallbackPanel(with: appIcon, for: windowInfo)
+                }
+                return
+            }
+            
+            // First close any existing thumbnail
+            hideThumbnail()
+            
+            // Then close all other active preview windows
+            WindowThumbnailView.activePreviewWindows.forEach { panel in
+                panel.close()
+            }
+            WindowThumbnailView.activePreviewWindows.removeAll()
+            
+            // Skip thumbnails for app elements
+            guard !windowInfo.isAppElement else { return }
+            
+            let pid = targetApp.processIdentifier
+            let cacheKey = WindowCacheKey(pid: pid, windowName: windowInfo.name)
+            
+            // Check cache first
+            if let cached = Self.cachedThumbnails[cacheKey],
+               cached.isValid(forHiddenApp: targetApp.isHidden) {
+                displayThumbnail(cached.image, for: windowInfo)
+                return
+            }
+            
+            // Show loading state immediately
             if let appIcon = targetApp.icon {
-                displayFallbackPanel(with: appIcon, for: windowInfo)
+                displayThumbnail(appIcon, for: windowInfo)
+            } else {
+                // If no app icon available, skip showing preview until real thumbnail is ready
+                return
+            }
+            isThumbnailLoading = true
+            
+            // Get the specific window using CGWindowID if available
+            if let windowID = windowInfo.cgWindowID {
+                // Create thumbnail for the specific window ID
+                let imageData: CGImage? = await Task.detached {
+                    let captureOptions: CGWindowImageOption = [
+                        .boundsIgnoreFraming,
+                        .nominalResolution,
+                        .bestResolution
+                    ]
+                    
+                    return CGWindowListCreateImage(
+                        .null,
+                        .optionIncludingWindow,
+                        windowID,
+                        captureOptions
+                    )
+                }.value
+                
+                if let cgImage = imageData {
+                    let scaleFactor: CGFloat = 0.5
+                    let scaledSize = NSSize(
+                        width: CGFloat(cgImage.width) * scaleFactor,
+                        height: CGFloat(cgImage.height) * scaleFactor
+                    )
+                    
+                    let image = NSImage(size: scaledSize)
+                    image.lockFocus()
+                    NSGraphicsContext.current?.imageInterpolation = .medium
+                    let rect = NSRect(origin: .zero, size: scaledSize)
+                    NSImage(cgImage: cgImage, size: .zero).draw(in: rect)
+                    image.unlockFocus()
+                    
+                    isThumbnailLoading = false
+                    displayThumbnail(image, for: windowInfo)
+                    return
+                }
+            }
+            
+            // Fallback to regular window thumbnail creation if CGWindowID is not available
+            if let thumbnail = await createWindowThumbnail(for: windowInfo) {
+                isThumbnailLoading = false
+                displayThumbnail(thumbnail, for: windowInfo)
+            } else {
+                isThumbnailLoading = false
+                if let appIcon = targetApp.icon {
+                    displayFallbackPanel(with: appIcon, for: windowInfo)
+                }
             }
         }
     }
     
     private func displayThumbnail(_ thumbnail: NSImage, for windowInfo: WindowInfo) {
+        // If we're showing the app icon as temporary state, use a different visual style
+        let isTemporary = thumbnail === targetApp.icon
+        
         autoCloseTimer?.invalidate()
-        createAndShowPanel(with: thumbnail, for: windowInfo)
+        createAndShowPanel(with: thumbnail, for: windowInfo, isLoading: isTemporary)
         
-        let pid = targetApp.processIdentifier
-        let cacheKey = WindowCacheKey(pid: pid, windowName: windowInfo.name)
-        
-        // Store in static cache
-        Self.cachedThumbnails[cacheKey] = CachedThumbnail(
-            image: thumbnail,
-            timestamp: Date()
-        )
-        /*Logger.debug("""
-            Cached thumbnail:
-            - Window: \(windowInfo.name)
-            - PID: \(pid)
-            - Cache count: \(Self.cachedThumbnails.count)
-            """)*/
-        
-        // Cache app thumbnail if it doesn't exist or is invalid
-        if let bundleID = targetApp.bundleIdentifier {
-            if let existing = Self.appThumbnails[bundleID], !existing.isValid {
-                Self.appThumbnails.removeValue(forKey: bundleID)
-            }
+        // Only cache if not showing temporary state
+        if !isTemporary {
+            let pid = targetApp.processIdentifier
+            let cacheKey = WindowCacheKey(pid: pid, windowName: windowInfo.name)
             
-            if Self.appThumbnails[bundleID] == nil {
-                Self.appThumbnails[bundleID] = AppThumbnail(
-                    image: thumbnail,
-                    timestamp: Date(),
-                    appBundleIdentifier: bundleID
-                )
-                //Logger.debug("Cached app thumbnail for \(bundleID)")
-            }
+            Self.cachedThumbnails[cacheKey] = CachedThumbnail(
+                image: thumbnail,
+                timestamp: Date()
+            )
+            
+            manageCacheSize()
         }
         
-        // Manage cache size
-        manageCacheSize()
+        setupAutoCloseTimer(for: windowInfo)
     }
     
     private func displayFallbackPanel(with icon: NSImage, for windowInfo: WindowInfo) {
@@ -746,12 +765,19 @@ class WindowThumbnailView {
                 let flippedY = screen.frame.height - mouseLocation.y
                 let dockMouseLocation = CGPoint(x: mouseLocation.x, y: flippedY)
                 
+                // Check if mouse is over thumbnail
                 let isOverThumbnail = self._thumbnailWindow?.frame.contains(mouseLocation) ?? false
+                
+                // Check if mouse is over dock icon
                 let dockResult = DockService.shared.findAppUnderCursor(at: dockMouseLocation)
                 let isOverCorrectDockIcon = dockResult?.app.bundleIdentifier == self.targetApp.bundleIdentifier
                 
-                if !isOverThumbnail && !isOverCorrectDockIcon {
-                    Logger.debug("Closing thumbnail - mouse outside both areas")
+                // Check if mouse is over menu entry using passed reference
+                let isOverMenu = self.windowChooser?.window?.frame.contains(mouseLocation) ?? false
+                
+                // Only close if mouse is not over any relevant area
+                if !isOverThumbnail && !isOverCorrectDockIcon && !isOverMenu {
+                    Logger.debug("Closing thumbnail - mouse outside all areas")
                     self.hideThumbnail()
                     self.autoCloseTimer?.invalidate()
                     self.autoCloseTimer = nil
@@ -889,11 +915,11 @@ class WindowThumbnailView {
     // Add after togglePreviews() method
     @MainActor static func checkScreenRecordingPermission() -> Bool {
         // Skip if already checked
-        if hasCheckedPermissions {
+        if hasCheckedScreenRecordingPermission {
             return CGPreflightScreenCaptureAccess()
         }
         
-        hasCheckedPermissions = true
+        hasCheckedScreenRecordingPermission = true
         
         // Check if we have screen recording permission
         if !CGPreflightScreenCaptureAccess() {
@@ -909,6 +935,18 @@ class WindowThumbnailView {
             return hasPermission
         }
         
+        return true
+    }
+    
+    // Make shouldCreateNewThumbnail static since it's used in detached tasks
+    @MainActor private static func shouldCreateNewThumbnail(for windowID: CGWindowID) -> Bool {
+        if let lastTime = lastThumbnailCreationTime[windowID] {
+            let timeSinceLastCapture = Date().timeIntervalSince(lastTime)
+            if timeSinceLastCapture < minimumThumbnailInterval {
+                return false
+            }
+        }
+        lastThumbnailCreationTime[windowID] = Date()
         return true
     }
 }

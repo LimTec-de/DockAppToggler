@@ -162,7 +162,8 @@ class WindowChooserView: NSView {
             self.thumbnailView = WindowThumbnailView(
                 targetApp: app,
                 dockIconCenter: iconCenter,
-                options: self.options
+                options: self.options,
+                windowChooser: self.window?.windowController as? WindowChooserController
             )
         }
     }
@@ -503,8 +504,7 @@ class WindowChooserView: NSView {
             
             // Show thumbnail
             if button.tag < options.count {
-                let windowInfo = options[button.tag]
-                // print("  - Showing thumbnail for window: \(windowInfo.name)")
+                let windowInfo = options[button.tag]  // Get the specific window info for this button
                 
                 if isHistoryMode {
                     // For history mode, create thumbnail for specific app
@@ -518,7 +518,8 @@ class WindowChooserView: NSView {
                         let appSpecificThumbnailView = WindowThumbnailView(
                             targetApp: runningApp,
                             dockIconCenter: dockIconCenter,
-                            options: [windowInfo]
+                            options: [windowInfo],
+                            windowChooser: self.window?.windowController as? WindowChooserController
                         )
                         
                         // Clean up existing thumbnail
@@ -537,7 +538,8 @@ class WindowChooserView: NSView {
                             let appSpecificThumbnailView = WindowThumbnailView(
                                 targetApp: runningApp,
                                 dockIconCenter: dockIconCenter,
-                                options: [windowInfo]
+                                options: [windowInfo],
+                                windowChooser: self.window?.windowController as? WindowChooserController
                             )
                             thumbnailView?.cleanup()
                             thumbnailView = appSpecificThumbnailView
@@ -545,6 +547,19 @@ class WindowChooserView: NSView {
                         }
                     }
                 } else if !windowInfo.isAppElement {
+                    // Create a single-window options array for this specific window
+                    let singleWindowOptions = [windowInfo]  // Only include the hovered window
+                    
+                    // Create new thumbnail view with just this window's options
+                    thumbnailView?.cleanup()  // Clean up existing view
+                    thumbnailView = WindowThumbnailView(
+                        targetApp: targetApp,
+                        dockIconCenter: dockIconCenter,
+                        options: singleWindowOptions,
+                        windowChooser: self.window?.windowController as? WindowChooserController
+                    )
+                    
+                    // Show thumbnail for this specific window
                     thumbnailView?.showThumbnail(for: windowInfo)
                 }
             }
@@ -1650,7 +1665,8 @@ class WindowChooserView: NSView {
             thumbnailView = WindowThumbnailView(
                 targetApp: targetApp,
                 dockIconCenter: dockIconCenter,
-                options: self.options
+                options: self.options,
+                windowChooser: self.window?.windowController as? WindowChooserController
             )
         }
     }

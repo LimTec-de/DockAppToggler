@@ -861,10 +861,11 @@ class DockWatcher: NSObject, NSMenuDelegate {
                 
                 if !windows.isEmpty {
                     // Create thumbnail view only if needed
-                    currentThumbnailView = WindowThumbnailView(
+                    let thumbnailView = WindowThumbnailView(
                         targetApp: app,
                         dockIconCenter: iconCenter,
-                        options: windows
+                        options: windows,
+                        windowChooser: nil  // Pass nil since this is from DockWatcher and not related to WindowChooser
                     )
                     
                     // Find active window efficiently
