@@ -13,7 +13,7 @@ class WindowHistoryController: NSWindowController {
     
     // Add throttled mouse movement handling
     private var lastMouseMovementTime: TimeInterval = 0
-    private let mouseMovementThrottle: TimeInterval = 1.0/30.0 // 30fps max
+    private let mouseMovementThrottle: TimeInterval = 0.1 // 30fps max
     
     init(windows: [WindowInfo], app: NSRunningApplication, callback: @escaping (AXUIElement, Bool) -> Void) {
         Logger.debug("Initializing WindowHistoryController...")

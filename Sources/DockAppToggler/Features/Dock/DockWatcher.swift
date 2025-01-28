@@ -853,7 +853,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
                         await AccessibilityService.shared.listApplicationWindows(for: app)
                     }.value
                     
-                    print("windows: \(windows)")
+                    //print("windows: \(windows)")
 
                     // Update cache
                     lastProcessedApp = app

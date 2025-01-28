@@ -23,7 +23,7 @@ class WindowHistory {
     
     // Nonisolated copy for cleanup
     private var cleanupTimerRef: SendableTimerRef?
-    private let timerInterval: TimeInterval = 2.0 // Check every 2 seconds
+    private let timerInterval: TimeInterval = 3.0 // Check every 5 seconds
     
     // Store window info and timestamp
     private struct HistoryEntry: Sendable {
@@ -34,6 +34,9 @@ class WindowHistory {
     
     // Store recent windows with timestamps, grouped by app
     private var recentWindows: [String: [HistoryEntry]] = [:]
+    
+    // Track last processed application
+    private var lastProcessedApp: NSRunningApplication?
     
     private init() {
         setupActiveWindowTimer()
@@ -59,6 +62,15 @@ class WindowHistory {
         guard let frontApp = NSWorkspace.shared.frontmostApplication else {
             return
         }
+        
+        // Skip if same as last processed app
+        if let lastApp = lastProcessedApp,
+           lastApp.processIdentifier == frontApp.processIdentifier {
+            return
+        }
+        
+        // Update last processed app
+        lastProcessedApp = frontApp
         
         // Get the frontmost window using Accessibility API
         let appElement = AXUIElementCreateApplication(frontApp.processIdentifier)

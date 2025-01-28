@@ -27,6 +27,18 @@ class DockService {
     }
     
     func findAppUnderCursor(at point: CGPoint) -> (app: NSRunningApplication, url: URL, iconCenter: CGPoint)? {
+        // Early return if point is not near dock
+        let screen = NSScreen.main ?? NSScreen.screens[0]
+        let dockHeight = getDockHeight()
+        let magnificationHeight = getDockMagnificationSize()
+        let maxDockHeight = max(dockHeight, magnificationHeight)
+        
+        // Check if point is within dock area (adding some padding for magnification)
+        let dockAreaY = screen.frame.maxY - maxDockHeight - 20 // 20px padding
+        if point.y < dockAreaY {
+            return nil
+        }
+
         let systemWide = AXUIElementCreateSystemWide()
         var elementUntyped: AXUIElement?
         

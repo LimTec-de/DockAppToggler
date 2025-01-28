@@ -882,14 +882,13 @@ class WindowThumbnailView {
         autoCloseTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self = self else { return }
-                
+
+                //print("setupAutoCloseTimer")
+
                 let mouseLocation = NSEvent.mouseLocation
                 guard let screen = NSScreen.main else { return }
                 let flippedY = screen.frame.height - mouseLocation.y
                 let dockMouseLocation = CGPoint(x: mouseLocation.x, y: flippedY)
-                
-                // Check if mouse is over thumbnail
-               // let isOverThumbnail = self._thumbnailWindow?.frame.contains(mouseLocation) ?? false
                 
                 // Check if mouse is over dock icon
                 let dockResult = DockService.shared.findAppUnderCursor(at: dockMouseLocation)
@@ -901,10 +900,13 @@ class WindowThumbnailView {
                 // Only close if mouse is not over any relevant area
                 if !isOverCorrectDockIcon && !isOverMenu {
                     Logger.debug("Closing thumbnail - mouse outside all areas")
+                    
                     self.hideThumbnail()
                     self.hideThumbnail()
+
                     self.autoCloseTimer?.invalidate()
                     self.autoCloseTimer = nil
+                    
                 }
             }
         }
