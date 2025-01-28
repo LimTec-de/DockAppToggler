@@ -317,7 +317,7 @@ class AccessibilityService {
             return nil
         }
         
-        let windowID = number.uint32Value
+        let _ = number.uint32Value  // Explicitly ignore
         let windowName = windowTitle
         //Logger.success("Adding window: '\(windowName)' ID: \(windowID)")
         return WindowInfo(window: window, name: windowName)
@@ -336,7 +336,7 @@ class AccessibilityService {
         }
         
         guard index < matchingWindows.count,
-              let windowID = matchingWindows[index][kCGWindowNumber] as? CGWindowID else {
+              let _ = matchingWindows[index][kCGWindowNumber] as? CGWindowID else {
             return nil
         }
         

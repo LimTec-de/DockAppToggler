@@ -2,6 +2,7 @@ import AppKit
 import Carbon
 import Cocoa
 import ApplicationServices
+import UserNotifications
 
 /// A custom window controller that manages the window chooser interface
 @MainActor
@@ -241,7 +242,7 @@ class WindowChooserController: NSWindowController {
         
         // Ensure cleanup runs on main thread synchronously
         if !Thread.isMainThread {
-            DispatchQueue.main.sync {
+            _ = DispatchQueue.main.sync {
                 Task { @MainActor in
                     cleanup()
                 }
@@ -501,10 +502,21 @@ class WindowChooserController: NSWindowController {
     }
     
     private func showErrorNotification(_ message: String) {
-        let notification = NSUserNotification()
-        notification.title = "DockAppToggler"
-        notification.informativeText = message
-        NSUserNotificationCenter.default.deliver(notification)
+        let content = UNMutableNotificationContent()
+        content.title = "DockAppToggler"
+        content.body = message
+        
+        let request = UNNotificationRequest(
+            identifier: UUID().uuidString,
+            content: content,
+            trigger: nil
+        )
+        
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error = error {
+                Logger.error("Failed to show notification: \(error)")
+            }
+        }
     }
     
     private func refreshMenuState() {

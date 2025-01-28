@@ -195,15 +195,13 @@ class KeyboardShortcutMonitor {
             callback: { [weak self] element, isMinimized in
                 // Handle window selection
                 Task { @MainActor in
-                    if element != nil {
-                        var pid: pid_t = 0
-                        if AXUIElementGetPid(element, &pid) == .success,
-                           let app = NSRunningApplication(processIdentifier: pid) {
-                            app.activate(options: .activateIgnoringOtherApps)
-                            let _ = AXUIElementPerformAction(element, "AXRaise" as CFString)
-                        } else {
-                            AXUIElementPerformAction(element, "AXRaise" as CFString)
-                        }
+                    var pid: pid_t = 0
+                    if AXUIElementGetPid(element, &pid) == .success,
+                       let app = NSRunningApplication(processIdentifier: pid) {
+                        app.activate(options: .activateIgnoringOtherApps)
+                        let _ = AXUIElementPerformAction(element, "AXRaise" as CFString)
+                    } else {
+                        AXUIElementPerformAction(element, "AXRaise" as CFString)
                     }
                     self?.hideWindowChooser()
                 }

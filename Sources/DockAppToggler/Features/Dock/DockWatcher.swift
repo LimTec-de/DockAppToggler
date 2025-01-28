@@ -861,7 +861,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
                 
                 if !windows.isEmpty {
                     // Create thumbnail view only if needed
-                    let thumbnailView = WindowThumbnailView(
+                    let _ = WindowThumbnailView(
                         targetApp: app,
                         dockIconCenter: iconCenter,
                         options: windows,
@@ -1233,7 +1233,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
             return
         }
         
-        guard let screen = NSScreen.main else {
+        guard NSScreen.main != nil else {
             Logger.debug("  - No main screen available")
             return
         }

@@ -181,7 +181,7 @@ class WindowThumbnailView {
                 guard !windowInfo.isAppElement else { continue }
                 
                 // Create thumbnail with existing logic - add await
-                if let thumbnail = await createWindowThumbnail(for: windowInfo) {
+                if await createWindowThumbnail(for: windowInfo) != nil {
                     cachedCount += 1
                 }
                 
@@ -367,7 +367,7 @@ class WindowThumbnailView {
         if let existingPanel = _thumbnailWindow {
             // Reuse existing panel and views
             panel = existingPanel
-            containerView = panel.contentView! as! NSView
+            containerView = panel.contentView!
             contentContainer = containerView.subviews[0]
             imageView = contentContainer.subviews[0] as! NSImageView
             titleLabel = contentContainer.subviews[1] as! NSTextField
@@ -633,8 +633,7 @@ class WindowThumbnailView {
             }
             
             // Fallback to regular window thumbnail creation if CGWindowID is not available
-            if let thumbnail = await createWindowThumbnail(for: windowInfo) {
-                isThumbnailLoading = false
+            if let thumbnail: NSImage = await createWindowThumbnail(for: windowInfo) {
                 displayThumbnail(thumbnail, for: windowInfo)
             } else {
                 isThumbnailLoading = false

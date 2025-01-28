@@ -65,7 +65,8 @@ class WindowChooserView: NSView {
             }
             
             // For regular windows, check size
-            if windowInfo.window != nil {
+            var pid: pid_t = 0
+            if AXUIElementGetPid(windowInfo.window, &pid) == .success {
                 var sizeValue: AnyObject?
                 var size = CGSize.zero
                 
@@ -264,8 +265,7 @@ class WindowChooserView: NSView {
     
     // Add helper function to check if it's a CGWindow entry
     private func isCGWindowEntry(_ windowInfo: WindowInfo) -> Bool {
-        // A CGWindow entry will have a cgWindowID but no AXUIElement window
-        return windowInfo.cgWindowID != nil && windowInfo.window == nil
+        return windowInfo.cgWindowID != nil && windowInfo.isAppElement
     }
     
     private func addAppIcon(for windowInfo: WindowInfo, at index: Int, button: NSButton) {
@@ -611,7 +611,8 @@ class WindowChooserView: NSView {
         // Add window to history when clicked
         WindowHistory.shared.addWindow(windowInfo, for: targetApp)
         
-        if windowInfo.cgWindowID != nil && windowInfo.window == nil {
+        var pid: pid_t = 0
+        if windowInfo.cgWindowID != nil && AXUIElementGetPid(windowInfo.window, &pid) != .success {
             // For CGWindow entries, just activate the app
             targetApp.activate(options: [.activateIgnoringOtherApps])
             callback?(windowInfo.window, false)  // This will trigger the window raise through CGWindow
@@ -1564,34 +1565,14 @@ class WindowChooserView: NSView {
             targetApp.terminate()
             windowController?.close()
             
-        } else if windowInfo.cgWindowID != nil && windowInfo.window == nil {
-            // For CGWindow entries, use CGWindow-based closing
-            AccessibilityService.shared.closeWindow(windowInfo: windowInfo, for: targetApp)
-            
-            // Update after a short delay
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-                guard let self = self else { return }
-                let updatedWindows = AccessibilityService.shared.listApplicationWindows(for: self.targetApp)
-                
-                if !updatedWindows.isEmpty {
-                    // Refresh the menu with updated windows
-                    windowController?.updateWindows(updatedWindows, for: self.targetApp, at: self.dockIconCenter)
-                } else {
-                    windowController?.close()
-                }
-            }
-            
         } else {
-            // For regular AX windows
-            let window = windowInfo.window
-            
-            var closeButtonRef: CFTypeRef?
-            if AXUIElementCopyAttributeValue(window, kAXCloseButtonAttribute as CFString, &closeButtonRef) == .success,
-               CFGetTypeID(closeButtonRef!) == AXUIElementGetTypeID() {
-                let closeButton = closeButtonRef as! AXUIElement
-                AXUIElementPerformAction(closeButton, kAXPressAction as CFString)
+            // Add pid declaration here
+            var pid: pid_t = 0
+            if windowInfo.cgWindowID != nil && AXUIElementGetPid(windowInfo.window, &pid) != .success {
+                // For CGWindow entries, use CGWindow-based closing
+                AccessibilityService.shared.closeWindow(windowInfo: windowInfo, for: targetApp)
                 
-                // Update after window closes
+                // Update after a short delay
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
                     guard let self = self else { return }
                     let updatedWindows = AccessibilityService.shared.listApplicationWindows(for: self.targetApp)
@@ -1601,6 +1582,30 @@ class WindowChooserView: NSView {
                         windowController?.updateWindows(updatedWindows, for: self.targetApp, at: self.dockIconCenter)
                     } else {
                         windowController?.close()
+                    }
+                }
+                
+            } else {
+                // For regular AX windows
+                let window = windowInfo.window
+                
+                var closeButtonRef: CFTypeRef?
+                if AXUIElementCopyAttributeValue(window, kAXCloseButtonAttribute as CFString, &closeButtonRef) == .success,
+                   CFGetTypeID(closeButtonRef!) == AXUIElementGetTypeID() {
+                    let closeButton = closeButtonRef as! AXUIElement
+                    AXUIElementPerformAction(closeButton, kAXPressAction as CFString)
+                    
+                    // Update after window closes
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                        guard let self = self else { return }
+                        let updatedWindows = AccessibilityService.shared.listApplicationWindows(for: self.targetApp)
+                        
+                        if !updatedWindows.isEmpty {
+                            // Refresh the menu with updated windows
+                            windowController?.updateWindows(updatedWindows, for: self.targetApp, at: self.dockIconCenter)
+                        } else {
+                            windowController?.close()
+                        }
                     }
                 }
             }
@@ -1843,8 +1848,7 @@ class WindowChooserView: NSView {
         
         // Get the app for this window
         var pid: pid_t = 0
-        if windowInfo.window != nil,  // Check if window exists
-           AXUIElementGetPid(windowInfo.window, &pid) == .success,
+        if AXUIElementGetPid(windowInfo.window, &pid) == .success,
            let app = NSRunningApplication(processIdentifier: pid) {
             // print("  - Found app: \(app.localizedName ?? "unknown")")
             
