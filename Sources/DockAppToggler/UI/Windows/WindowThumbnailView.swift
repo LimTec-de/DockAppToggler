@@ -496,16 +496,25 @@ class WindowThumbnailView {
             WindowThumbnailView.activePreviewWindows.insert(panel)
         }
 
+        // Update imageView frame to account for title space
+        let imageViewFrame = NSRect(
+            x: contentMargin,
+            y: contentMargin,  // Keep bottom margin
+            width: thumbnailSize.width - (contentMargin * 2),
+            height: thumbnailSize.height - (contentMargin * 2) - titleHeight - 8  // Add 8px extra padding below title
+        )
+        
         if isLoading {
-            // Center the app icon and make it larger
+            // Center the app icon
+            let iconSize: CGFloat = 128
             imageView.frame = NSRect(
-                x: (thumbnailSize.width - 128) / 2,
-                y: (thumbnailSize.height - 128) / 2,
-                width: 128,
-                height: 128
+                x: (thumbnailSize.width - iconSize) / 2,
+                y: (thumbnailSize.height - iconSize - titleHeight) / 2,  // Center vertically in remaining space
+                width: iconSize,
+                height: iconSize
             )
             imageView.imageScaling = .scaleProportionallyUpOrDown
-            imageView.alphaValue = 0.7  // Make it slightly transparent
+            imageView.alphaValue = 0.7
             
             // Add spinner below the icon
             let spinner = NSProgressIndicator(frame: NSRect(x: 0, y: 0, width: 32, height: 32))
@@ -513,20 +522,28 @@ class WindowThumbnailView {
             spinner.startAnimation(nil)
             spinner.frame = NSRect(
                 x: (thumbnailSize.width - spinner.frame.width) / 2,
-                y: (thumbnailSize.height - spinner.frame.height) / 2 - 80,  // Position below icon
+                y: imageView.frame.minY - 48,  // Position below icon with some spacing
                 width: spinner.frame.width,
                 height: spinner.frame.height
             )
             contentContainer.addSubview(spinner)
         } else {
             // Normal thumbnail display
-            imageView.frame = NSRect(origin: .zero, size: thumbnailSize)
+            imageView.frame = imageViewFrame
             imageView.imageScaling = .scaleProportionallyDown
             imageView.alphaValue = 1.0
             
             // Remove spinner if it exists
             contentContainer.subviews.filter { $0 is NSProgressIndicator }.forEach { $0.removeFromSuperview() }
         }
+
+        // Update title label position to be at the top
+        titleLabel.frame = NSRect(
+            x: contentMargin,
+            y: thumbnailSize.height - titleHeight - 4,  // 4px from top
+            width: thumbnailSize.width - (contentMargin * 2),
+            height: titleHeight
+        )
     }
     
     func showThumbnail(for windowInfo: WindowInfo) {

@@ -146,7 +146,7 @@ class KeyboardShortcutMonitor {
     private func showWindowChooser() {
         currentWindowIndex = 0
         
-        // Create and show backdrop window as a panel
+        // Create backdrop window
         let backdropWindow = NSPanel(
             contentRect: NSScreen.main?.frame ?? .zero,
             styleMask: [.borderless],
@@ -154,29 +154,7 @@ class KeyboardShortcutMonitor {
             defer: false
         )
         
-        // Remove any existing local monitor before creating a new one
-        if let monitor = localEventMonitor {
-            NSEvent.removeMonitor(monitor)
-            localEventMonitor = nil
-        }
-        
-        // Set up local event monitor for tab key events with more aggressive event consumption
-        localEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] event in
-            if event.keyCode == 48 { // Tab key
-                // print("🔍 Consuming window chooser tab key event")
-                if event.type == .keyDown {
-                    if event.modifierFlags.contains(.shift) {
-                        self?.windowChooserController?.chooserView?.selectPreviousItem()
-                    } else {
-                        self?.windowChooserController?.chooserView?.selectNextItem()
-                    }
-                }
-                return nil // Consume all tab key events
-            }
-            return event
-        }
-        
-        // Create and configure the key capture view
+        // Configure backdrop window with minimal event handling
         let contentView = KeyCaptureView()
         contentView.keyDownHandler = { [weak self] event in
             if event.keyCode == 48 { // Tab key
@@ -193,20 +171,22 @@ class KeyboardShortcutMonitor {
         backdropWindow.backgroundColor = NSColor.black.withAlphaComponent(0.2)
         backdropWindow.isOpaque = false
         backdropWindow.level = .modalPanel
-        backdropWindow.ignoresMouseEvents = false  // Allow mouse events for focus
+        backdropWindow.ignoresMouseEvents = true
         backdropWindow.isMovable = false
+        backdropWindow.acceptsMouseMovedEvents = false
         
-        // Force the panel to become key window
+        // Ensure window becomes key and visible
         (backdropWindow as NSPanel).becomesKeyOnlyIfNeeded = false
-        backdropWindow.makeKeyAndOrderFront(nil)
+        backdropWindow.orderFront(nil)
         backdropWindow.makeKey()
         
-        // Ensure the window stays in focus and the content view becomes first responder
+        // Ensure proper focus
         NSApp.activate(ignoringOtherApps: true)
         contentView.window?.makeFirstResponder(contentView)
         
         self.backdropWindow = backdropWindow
         
+        // Create window chooser controller
         windowChooserController = WindowChooserController(
             at: .zero,
             windows: WindowHistory.shared.getAllRecentWindows(),
@@ -215,31 +195,16 @@ class KeyboardShortcutMonitor {
             callback: { [weak self] element, isMinimized in
                 // Handle window selection
                 Task { @MainActor in
-                    // print("🔍 Window selection callback")
-                    if element != nil {  // Changed from if let to simple nil check
-                        // print("  - Raising window")
-                        
-                        // Get the app first
+                    if element != nil {
                         var pid: pid_t = 0
                         if AXUIElementGetPid(element, &pid) == .success,
                            let app = NSRunningApplication(processIdentifier: pid) {
-                            // print("  - Found app: \(app.localizedName ?? "unknown")")
-                            
-                            // First activate the app
                             app.activate(options: .activateIgnoringOtherApps)
-                            
-                            // Then raise the window
-                            let raiseResult = AXUIElementPerformAction(element, "AXRaise" as CFString)
-                            // print("  - Raise result: \(raiseResult)")
+                            let _ = AXUIElementPerformAction(element, "AXRaise" as CFString)
                         } else {
-                            // print("  - ⚠️ Failed to get app, trying direct window raise")
                             AXUIElementPerformAction(element, "AXRaise" as CFString)
                         }
-                    } else {
-                        // print("  - ⚠️ No window element provided")
                     }
-                    
-                    // Hide backdrop window after selection
                     self?.hideWindowChooser()
                 }
             }

@@ -123,6 +123,9 @@ class WindowChooserController: NSWindowController {
         window.level = .popUpMenu
         window.appearance = NSApp.effectiveAppearance
         
+        // Disable mouse moved events by default
+        window.acceptsMouseMovedEvents = false
+        
         // Create container view for shadow
         let containerView = NSView(frame: window.contentView!.bounds)
         containerView.wantsLayer = true
@@ -138,23 +141,22 @@ class WindowChooserController: NSWindowController {
         visualEffect.state = .active
         visualEffect.wantsLayer = true
         visualEffect.layer?.masksToBounds = true
-        visualEffect.showsArrow = !isHistoryMenu  // Set arrow visibility based on history mode
+        visualEffect.showsArrow = !isHistoryMenu
         
-        // Set up view hierarchy
         window.contentView = containerView
         containerView.addSubview(visualEffect)
         visualEffect.frame = containerView.bounds
         
-        // Store the visual effect view for later use
         self.visualEffectView = visualEffect
     }
     
     private func setupTrackingArea() {
         guard let window = window, let contentView = window.contentView else { return }
         
+        // Only track mouse enter/exit events, not movement
         trackingArea = NSTrackingArea(
             rect: contentView.bounds,
-            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
             owner: self,
             userInfo: nil
         )

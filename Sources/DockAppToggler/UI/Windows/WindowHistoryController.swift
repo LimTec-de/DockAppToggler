@@ -11,6 +11,10 @@ class WindowHistoryController: NSWindowController {
     private var screenTrackingArea: NSTrackingArea?
     private var screenView: NSView?
     
+    // Add throttled mouse movement handling
+    private var lastMouseMovementTime: TimeInterval = 0
+    private let mouseMovementThrottle: TimeInterval = 1.0/30.0 // 30fps max
+    
     init(windows: [WindowInfo], app: NSRunningApplication, callback: @escaping (AXUIElement, Bool) -> Void) {
         Logger.debug("Initializing WindowHistoryController...")
         self.callback = callback
@@ -60,22 +64,23 @@ class WindowHistoryController: NSWindowController {
         window.backgroundColor = .clear
         window.isOpaque = false
         window.hasShadow = true
-        // Set window level to be below thumbnails
-        window.level = .modalPanel // Changed to .modalPanel to be below thumbnails
+        window.level = .modalPanel
         window.appearance = NSApp.effectiveAppearance
         window.isMovable = false
         window.isMovableByWindowBackground = false
         window.collectionBehavior = [.transient, .canJoinAllSpaces]
         
-        // Add rounded corners
+        // Disable mouse moved events
+        window.acceptsMouseMovedEvents = false
+        
         window.contentView?.wantsLayer = true
         window.contentView?.layer?.cornerRadius = 10
         window.contentView?.layer?.masksToBounds = true
         
-        // Setup tracking for the entire window
+        // Only track mouse enter/exit
         let trackingArea = NSTrackingArea(
             rect: window.contentView?.bounds ?? .zero,
-            options: [.mouseEnteredAndExited, .activeAlways, .mouseMoved],
+            options: [.mouseEnteredAndExited, .activeInKeyWindow],
             owner: self,
             userInfo: nil
         )
@@ -115,34 +120,36 @@ class WindowHistoryController: NSWindowController {
     private func setupScreenTracking() {
         guard let screen = NSScreen.main else { return }
         
-        // Create a transparent window for tracking
+        // Create a minimal tracking window
         let trackingWindow = NSWindow(
-            contentRect: screen.frame,
+            contentRect: NSRect(x: 0, y: 0, width: screen.frame.width, height: 50), // Only track bottom area
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
         )
         trackingWindow.backgroundColor = .clear
         trackingWindow.isOpaque = false
-        trackingWindow.level = .popUpMenu - 1  // Just below our menu
+        trackingWindow.level = .popUpMenu - 1
         trackingWindow.ignoresMouseEvents = false
         trackingWindow.collectionBehavior = [.transient, .canJoinAllSpaces]
         
-        // Create a view to track mouse
-        let view = NSView(frame: screen.frame)
+        // Create minimal tracking view
+        let view = NSView(frame: trackingWindow.frame)
         trackingWindow.contentView = view
         self.screenView = view
         
-        // Setup tracking area for the entire screen
+        // Only track mouse enter/exit in bottom area
         let trackingArea = NSTrackingArea(
             rect: view.bounds,
-            options: [.mouseEnteredAndExited, .activeAlways],
+            options: [.mouseEnteredAndExited, .activeInKeyWindow],
             owner: self,
             userInfo: nil
         )
         view.addTrackingArea(trackingArea)
         self.screenTrackingArea = trackingArea
         
+        // Position at bottom of screen
+        trackingWindow.setFrameOrigin(NSPoint(x: 0, y: 0))
         trackingWindow.orderFront(nil)
         self.trackingWindow = trackingWindow
     }
@@ -161,16 +168,12 @@ class WindowHistoryController: NSWindowController {
     }
     
     override func mouseExited(with event: NSEvent) {
-        Logger.debug("Mouse exited tracking area")
+        // Only check if mouse moved up significantly
         let location = NSEvent.mouseLocation
-        
-        // Close if mouse is not in our window and moved up
-        if location.y > 2 && !window!.frame.contains(location) {
-            Logger.debug("  - Mouse moved away, closing")
+        if location.y > 100 { // Increased threshold
             close()
         }
     }
-    
     
     override func close() {
         Logger.debug("Closing history window")
