@@ -25,13 +25,13 @@ class WindowThumbnailView {
             let age = Date().timeIntervalSince(timestamp)
             let isValid = age < timeout
             
-            Logger.debug("""
+            /*Logger.debug("""
                 Cache validity check:
                 - Hidden app: \(forHiddenApp)
                 - Cache age: \(String(format: "%.1f", age))s
                 - Timeout: \(String(format: "%.1f", timeout))s
                 - Valid: \(isValid)
-                """)
+                """)*/
             
             return isValid
         }
@@ -132,6 +132,9 @@ class WindowThumbnailView {
     
     // Add near top of class
     private static let maxCacheSize = 50  // Maximum number of cached thumbnails
+    
+    // Add near the top of the class after other static properties
+    @MainActor private static var hasCheckedPermissions = false
     
     init(targetApp: NSRunningApplication, dockIconCenter: NSPoint, options: [WindowInfo]) {
         self.targetApp = targetApp
@@ -439,13 +442,7 @@ class WindowThumbnailView {
             )
             
             // Configure panel
-            panel.level = NSWindow.Level.floating + 1
-            panel.backgroundColor = NSColor.clear
-            panel.isOpaque = false
-            panel.hasShadow = true
-            panel.ignoresMouseEvents = true
-            panel.isMovable = false
-            panel.hidesOnDeactivate = false
+            configurePanel(panel)
             
             // Create views
             containerView = NSView(frame: NSRect(origin: .zero, size: panelSize))
@@ -534,17 +531,19 @@ class WindowThumbnailView {
     }
     
     func showThumbnail(for windowInfo: WindowInfo) {
-        Logger.debug("""
-            Starting showThumbnail:
-            - Window: \(windowInfo.name)
-            - Current cache size: \(Self.cachedThumbnails.count)
-            - Cache clears: \(Self.cacheClears)
-            - App: \(targetApp.localizedName ?? "unknown")
-            """)
-        
         // Check if previews are enabled
         guard Self.previewsEnabled else {
             Logger.debug("Window previews are disabled")
+            return
+        }
+        
+        // Check screen recording permission
+        guard Self.checkScreenRecordingPermission() else {
+            Logger.debug("No screen recording permission - cannot show thumbnail")
+            // Show fallback with app icon since we can't capture screen
+            if let appIcon = targetApp.icon {
+                displayFallbackPanel(with: appIcon, for: windowInfo)
+            }
             return
         }
         
@@ -566,7 +565,7 @@ class WindowThumbnailView {
         // Check cache first
         if let cached = Self.cachedThumbnails[cacheKey],
            cached.isValid(forHiddenApp: targetApp.isHidden) {
-            Logger.debug("Using cached thumbnail for window: \(windowInfo.name)")
+            //Logger.debug("Using cached thumbnail for window: \(windowInfo.name)")
             displayThumbnail(cached.image, for: windowInfo)
             return
         }
@@ -576,18 +575,18 @@ class WindowThumbnailView {
             if let bundleID = targetApp.bundleIdentifier,
                let appThumbnail = Self.appThumbnails[bundleID],
                appThumbnail.isValid {
-                Logger.debug("Using cached app thumbnail for hidden app: \(bundleID)")
+                //Logger.debug("Using cached app thumbnail for hidden app: \(bundleID)")
                 displayThumbnail(appThumbnail.image, for: windowInfo)
                 return
             }
         }
         
         // Create new thumbnail
-        Logger.debug("Creating new thumbnail for: \(windowInfo.name)")
+        //Logger.debug("Creating new thumbnail for: \(windowInfo.name)")
         if let thumbnail = createWindowThumbnail(for: windowInfo) {
             displayThumbnail(thumbnail, for: windowInfo)
         } else {
-            Logger.debug("Failed to create thumbnail, showing app icon fallback for: \(windowInfo.name)")
+            //Logger.debug("Failed to create thumbnail, showing app icon fallback for: \(windowInfo.name)")
             if let appIcon = targetApp.icon {
                 displayFallbackPanel(with: appIcon, for: windowInfo)
             }
@@ -606,12 +605,12 @@ class WindowThumbnailView {
             image: thumbnail,
             timestamp: Date()
         )
-        Logger.debug("""
+        /*Logger.debug("""
             Cached thumbnail:
             - Window: \(windowInfo.name)
             - PID: \(pid)
             - Cache count: \(Self.cachedThumbnails.count)
-            """)
+            """)*/
         
         // Cache app thumbnail if it doesn't exist or is invalid
         if let bundleID = targetApp.bundleIdentifier {
@@ -625,7 +624,7 @@ class WindowThumbnailView {
                     timestamp: Date(),
                     appBundleIdentifier: bundleID
                 )
-                Logger.debug("Cached app thumbnail for \(bundleID)")
+                //Logger.debug("Cached app thumbnail for \(bundleID)")
             }
         }
         
@@ -650,13 +649,7 @@ class WindowThumbnailView {
         )
         
         // Configure panel same as normal thumbnail
-        panel.level = NSWindow.Level.floating + 1
-        panel.backgroundColor = NSColor.clear
-        panel.isOpaque = false
-        panel.hasShadow = true
-        panel.ignoresMouseEvents = true
-        panel.isMovable = false
-        panel.hidesOnDeactivate = false
+        configurePanel(panel)
         
         // Create views
         let containerView = NSView(frame: NSRect(origin: .zero, size: panelSize))
@@ -785,12 +778,12 @@ class WindowThumbnailView {
                 image: currentImage,
                 timestamp: Date()
             )
-            Logger.debug("""
+            /*Logger.debug("""
                 Stored thumbnail in cache:
                 - Window: \(windowName)
                 - PID: \(pid)
                 - Cache count: \(Self.cachedThumbnails.count)
-                """)
+                """)*/
         }
         
         WindowThumbnailView.activePreviewWindows.remove(panel)
@@ -880,6 +873,43 @@ class WindowThumbnailView {
             
             Logger.debug("Cache cleaned: removed \(entriesToRemove.count) old thumbnails")
         }
+    }
+    
+    private func configurePanel(_ panel: NSPanel) {
+        // Configure panel
+        panel.level = .popUpMenu // Higher than .modalPanel
+        panel.backgroundColor = NSColor.clear
+        panel.isOpaque = false
+        panel.hasShadow = true
+        panel.ignoresMouseEvents = true
+        panel.isMovable = false
+        panel.hidesOnDeactivate = false
+    }
+    
+    // Add after togglePreviews() method
+    @MainActor static func checkScreenRecordingPermission() -> Bool {
+        // Skip if already checked
+        if hasCheckedPermissions {
+            return CGPreflightScreenCaptureAccess()
+        }
+        
+        hasCheckedPermissions = true
+        
+        // Check if we have screen recording permission
+        if !CGPreflightScreenCaptureAccess() {
+            Logger.debug("Requesting screen recording permission")
+            
+            // Request permission
+            CGRequestScreenCaptureAccess()
+            
+            // Check result after request
+            let hasPermission = CGPreflightScreenCaptureAccess()
+            Logger.debug("Screen recording permission status: \(hasPermission)")
+            
+            return hasPermission
+        }
+        
+        return true
     }
 }
 

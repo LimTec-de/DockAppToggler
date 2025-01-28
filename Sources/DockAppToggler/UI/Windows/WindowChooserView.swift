@@ -214,10 +214,10 @@ class WindowChooserView: NSView {
         }
         
         for (index, windowInfo) in options.enumerated() {
-            Logger.debug("Creating button for window:")
+            /*Logger.debug("Creating button for window:")
             Logger.debug("  - Index: \(index)")
             Logger.debug("  - Name: \(windowInfo.name)")
-            Logger.debug("  - ID: \(windowInfo.cgWindowID ?? 0)")
+            Logger.debug("  - ID: \(windowInfo.cgWindowID ?? 0)")*/
             
             let button = createButton(for: windowInfo, at: index)
             let closeButton = createCloseButton(for: windowInfo, at: index)
@@ -446,72 +446,116 @@ class WindowChooserView: NSView {
         button.layer?.masksToBounds = true
     }
     
-    override func mouseEntered(with event: NSEvent) {
-        if let button = event.trackingArea?.owner as? NSButton {
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.1  // Quick fade in
+    private func applyHoverEffect(for button: NSButton) {
+        // print("🔍 applyHoverEffect called for button with tag: \(button.tag)")
+        
+        // First clear any existing hover effects
+        self.subviews.forEach { view in
+            let identifier = view.accessibilityIdentifier()
+            if identifier.starts(with: "hover-background-") {
+                // print("  - Removing existing hover effect: \(identifier)")
+                view.removeFromSuperview()
+            }
+        }
+        
+        // Create hover effect
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.1
+            
+            let isDark = self.effectiveAppearance.isDarkMode
+            // print("  - Dark mode: \(isDark)")
+            
+            let hoverColor = isDark ? 
+                NSColor(white: 0.3, alpha: 0.8) :
+                NSColor(white: 0.8, alpha: 0.8)
+            
+            let backgroundView = NSView(frame: NSRect(
+                x: 0,
+                y: button.frame.minY,
+                width: self.bounds.width,
+                height: button.frame.height
+            ))
+            // print("  - Creating background view at y: \(button.frame.minY), height: \(button.frame.height)")
+            
+            backgroundView.wantsLayer = true
+            backgroundView.layer?.backgroundColor = hoverColor.cgColor
+            backgroundView.layer?.cornerRadius = 4
+            backgroundView.layer?.masksToBounds = true
+            backgroundView.setAccessibilityIdentifier("hover-background-\(button.tag)")
+            
+            self.addSubview(backgroundView, positioned: .below, relativeTo: button)
+            // print("  - Added background view to hierarchy")
+            
+            // Update button color based on window state
+            if let windowInfo = options[safe: button.tag] {
+                var minimizedValue: AnyObject?
+                let isMinimized = AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success &&
+                                 (minimizedValue as? Bool == true)
                 
-                let isDark = self.effectiveAppearance.isDarkMode
-                
-                if event.trackingArea?.userInfo?["isMenuButton"] as? Bool == true {
-                    // Full line highlight
-                    let hoverColor = isDark ? 
-                        NSColor(white: 0.3, alpha: 0.4) :  // Darker background in dark mode
-                        NSColor(white: 0.8, alpha: 0.4)    // Lighter background in light mode
-                    
-                    let backgroundView = NSView(frame: NSRect(x: 0, y: button.frame.minY, width: self.bounds.width, height: button.frame.height))
-                    backgroundView.wantsLayer = true
-                    backgroundView.layer?.backgroundColor = hoverColor.cgColor
-                    backgroundView.setAccessibilityIdentifier("hover-background-\(button.tag)")
-                    
-                    self.addSubview(backgroundView, positioned: .below, relativeTo: nil)
-                    
-                    if button.tag < options.count {
-                        let windowInfo = options[button.tag]
-                        if isHistoryMode {
-                            // For history mode, create a new thumbnail view for the specific app
-                            // Get process ID from CGWindow info if available, otherwise try to get it from AX window
-                            if let cgWindowID = windowInfo.cgWindowID,
-                               let windowList = CGWindowListCopyWindowInfo([.optionIncludingWindow], cgWindowID) as? [[CFString: Any]],
-                               let cgWindowInfo = windowList.first,
-                               let ownerPID = cgWindowInfo[kCGWindowOwnerPID] as? pid_t,
-                               let runningApp = NSRunningApplication(processIdentifier: ownerPID) {
-                                
-                                let appSpecificThumbnailView = WindowThumbnailView(
-                                    targetApp: runningApp,
-                                    dockIconCenter: dockIconCenter,
-                                    options: [windowInfo]  // Use original windowInfo here
-                                )
-                                // Clean up existing thumbnail view if any
-                                thumbnailView?.cleanup()
-                                thumbnailView = appSpecificThumbnailView
-                                thumbnailView?.showThumbnail(for: windowInfo)
-                            } else {
-                                // Fallback for AX windows - try to get PID from AX element
-                                var pid: pid_t = 0
-                                if AXUIElementGetPid(windowInfo.window, &pid) == .success,
-                                   let runningApp = NSRunningApplication(processIdentifier: pid) {
-                                    
-                                    let appSpecificThumbnailView = WindowThumbnailView(
-                                        targetApp: runningApp,
-                                        dockIconCenter: dockIconCenter,
-                                        options: [windowInfo]  // Use original windowInfo here
-                                    )
-                                    // Clean up existing thumbnail view if any
-                                    thumbnailView?.cleanup()
-                                    thumbnailView = appSpecificThumbnailView
-                                    thumbnailView?.showThumbnail(for: windowInfo)
-                                }
-                            }
-                        } else {
-                            // Regular mode - use existing thumbnail view
-                            if !windowInfo.isAppElement {
-                                thumbnailView?.showThumbnail(for: windowInfo)
-                            }
-                        }
-                    }
+                if isMinimized {
+                    button.contentTintColor = Constants.UI.Theme.minimizedTextColor
+                } else if windowInfo.window == topmostWindow {
+                    button.contentTintColor = Constants.UI.Theme.primaryTextColor
+                } else {
+                    button.contentTintColor = Constants.UI.Theme.secondaryTextColor
                 }
             }
+            
+            // Show thumbnail
+            if button.tag < options.count {
+                let windowInfo = options[button.tag]
+                // print("  - Showing thumbnail for window: \(windowInfo.name)")
+                
+                if isHistoryMode {
+                    // For history mode, create thumbnail for specific app
+                    if let cgWindowID = windowInfo.cgWindowID,
+                       let windowList = CGWindowListCopyWindowInfo([.optionIncludingWindow], cgWindowID) as? [[CFString: Any]],
+                       let cgWindowInfo = windowList.first,
+                       let ownerPID = cgWindowInfo[kCGWindowOwnerPID] as? pid_t,
+                       let runningApp = NSRunningApplication(processIdentifier: ownerPID) {
+                        
+                        // print("  - Creating thumbnail view for app: \(runningApp.localizedName ?? "unknown")")
+                        let appSpecificThumbnailView = WindowThumbnailView(
+                            targetApp: runningApp,
+                            dockIconCenter: dockIconCenter,
+                            options: [windowInfo]
+                        )
+                        
+                        // Clean up existing thumbnail
+                        thumbnailView?.cleanup()
+                        thumbnailView = appSpecificThumbnailView
+                        
+                        // Show new thumbnail immediately
+                        thumbnailView?.showThumbnail(for: windowInfo)
+                    } else {
+                        // Try AX window fallback
+                        var pid: pid_t = 0
+                        if AXUIElementGetPid(windowInfo.window, &pid) == .success,
+                           let runningApp = NSRunningApplication(processIdentifier: pid) {
+                            
+                            // print("  - Creating thumbnail view for AX window app: \(runningApp.localizedName ?? "unknown")")
+                            let appSpecificThumbnailView = WindowThumbnailView(
+                                targetApp: runningApp,
+                                dockIconCenter: dockIconCenter,
+                                options: [windowInfo]
+                            )
+                            thumbnailView?.cleanup()
+                            thumbnailView = appSpecificThumbnailView
+                            thumbnailView?.showThumbnail(for: windowInfo)
+                        }
+                    }
+                } else if !windowInfo.isAppElement {
+                    thumbnailView?.showThumbnail(for: windowInfo)
+                }
+            }
+        }
+    }
+    
+    override func mouseEntered(with event: NSEvent) {
+        super.mouseEntered(with: event)
+        if let button = event.trackingArea?.owner as? NSButton,
+           event.trackingArea?.userInfo?["isMenuButton"] as? Bool == true {
+            applyHoverEffect(for: button)
         }
     }
     
@@ -544,6 +588,10 @@ class WindowChooserView: NSView {
         Logger.debug("Button clicked - tag: \(sender.tag)")
         let windowInfo = options[sender.tag]
         Logger.debug("Selected window info - Name: \(windowInfo.name), ID: \(windowInfo.cgWindowID ?? 0)")
+        
+        // Hide thumbnail immediately
+        thumbnailView?.cleanup()
+        thumbnailView = nil
         
         // Add window to history when clicked
         WindowHistory.shared.addWindow(windowInfo, for: targetApp)
@@ -706,17 +754,17 @@ class WindowChooserView: NSView {
     }
     
     private func handleAppElementClick() {
-        Logger.debug("Processing click for app: \(targetApp.localizedName ?? "Unknown")")
+        // print("Processing click for app: \(targetApp.localizedName ?? "Unknown")")
         
         let hasVisibleWindows = hasVisibleWindows(for: targetApp)
         
         if targetApp.isActive && hasVisibleWindows {
-            Logger.debug("App is active with visible windows, hiding")
+            // print("App is active with visible windows, hiding")
             AccessibilityService.shared.hideAllWindows(for: targetApp)
             targetApp.hide()
             closeWindowChooser()
         } else {
-            Logger.debug("App needs activation")
+            // print("App needs activation")
             // Keep window chooser alive during app launch
             let currentWindowChooser = self.window?.windowController as? WindowChooserController
             
@@ -1721,34 +1769,113 @@ class WindowChooserView: NSView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         window?.makeFirstResponder(self)
+        
+        // Ensure view is layer-backed
+        self.wantsLayer = true
+        self.layer?.backgroundColor = NSColor.clear.cgColor
     }
 
     func selectNextItem() {
+        // print("🔍 selectNextItem called")
+        // print("  - Current index: \(selectedIndex)")
+        // print("  - Options count: \(options.count)")
+        // print("  - Buttons count: \(buttons.count)")
+        
+        // Guard against empty options
+        guard !options.isEmpty else {
+            // print("  - ⚠️ No options available")
+            return
+        }
+        
         selectedIndex = (selectedIndex + 1) % options.count
+        // print("  - New index: \(selectedIndex)")
         updateSelection()
     }
     
     func selectPreviousItem() {
+        // print("🔍 selectPreviousItem called")
+        // print("  - Current index: \(selectedIndex)")
+        // print("  - Options count: \(options.count)")
+        // print("  - Buttons count: \(buttons.count)")
+        
+        // Guard against empty options
+        guard !options.isEmpty else {
+            // print("  - ⚠️ No options available")
+            return
+        }
+        
         selectedIndex = (selectedIndex - 1 + options.count) % options.count
+        // print("  - New index: \(selectedIndex)")
         updateSelection()
     }
     
-    private func selectCurrentItem() {
+    func selectCurrentItem() {
         guard selectedIndex >= 0 && selectedIndex < options.count else { return }
-        // Use existing buttonClicked method to handle selection
-        if let button = buttons.first(where: { $0.tag == selectedIndex }) {
-            buttonClicked(button)
+        // print("🔍 selectCurrentItem called for index: \(selectedIndex)")
+        
+        let windowInfo = options[selectedIndex]
+        // print("  - Selected window: \(windowInfo.name)")
+        // print("  - Window element: \(windowInfo.window != nil ? "exists" : "nil")")
+        // print("  - CGWindowID: \(windowInfo.cgWindowID ?? 0)")
+        
+        // Hide thumbnail immediately
+        thumbnailView?.cleanup()
+        thumbnailView = nil
+        
+        // Add window to history
+        WindowHistory.shared.addWindow(windowInfo, for: targetApp)
+        
+        // Get the app for this window
+        var pid: pid_t = 0
+        if windowInfo.window != nil,  // Check if window exists
+           AXUIElementGetPid(windowInfo.window, &pid) == .success,
+           let app = NSRunningApplication(processIdentifier: pid) {
+            // print("  - Found app: \(app.localizedName ?? "unknown")")
+            
+            // First activate the app
+            app.activate(options: .activateIgnoringOtherApps)
+            
+            // Then raise the window
+            // print("  - Raising window")
+            AXUIElementPerformAction(windowInfo.window, "AXRaise" as CFString)
+            
+            // Call the callback after activation
+            callback?(windowInfo.window, false)
+        } else {
+            // print("  - Falling back to CGWindow activation")
+            // Fallback to CGWindow-based activation
+            targetApp.activate(options: .activateIgnoringOtherApps)
+            callback?(windowInfo.window, false)
         }
+        
+        // Update topmost window and refresh menu
+        topmostWindow = windowInfo.window
+        updateButtonStates()
     }
     
     private func updateSelection() {
-        // Update visual selection state by refreshing buttons
-        buttons.enumerated().forEach { index, button in
-            button.contentTintColor = index == selectedIndex ? 
-                Constants.UI.Theme.buttonHighlightColor : 
-                Constants.UI.Theme.buttonSecondaryTextColor
+        // print("🔍 updateSelection called")
+        
+        // Guard against empty options
+        guard !options.isEmpty else {
+            // print("  - ⚠️ No options available")
+            return
         }
-        needsDisplay = true
+        
+        if let selectedButton = buttons.first(where: { $0.tag == selectedIndex }) {
+            // print("  - Found button with tag: \(selectedIndex)")
+            applyHoverEffect(for: selectedButton)
+        } else {
+            // print("  - ⚠️ No button found for index: \(selectedIndex)")
+            // print("  - Available button tags: \(buttons.map { $0.tag })")
+        }
+    }
+
+    func updateWindowHeight() {
+        let newHeight = Constants.UI.windowHeight(for: self.options.count)
+        if let windowController = self.window?.windowController as? WindowChooserController {
+            windowController.updateWindowSize(to: newHeight)
+        }
     }
 }
 

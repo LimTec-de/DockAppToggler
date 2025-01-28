@@ -10,6 +10,7 @@ class StatusBarController {
     private weak var updaterController: SPUStandardUpdaterController?
     private let autostartMenuItem: NSMenuItem
     private let tooltipsMenuItem: NSMenuItem
+    private let optionTabMenuItem: NSMenuItem
     
     // Use nonisolated(unsafe) for the monitor since we need to modify it
     private nonisolated(unsafe) var mouseEventMonitor: AnyObject?
@@ -36,6 +37,13 @@ class StatusBarController {
         tooltipsMenuItem = NSMenuItem(
             title: "Tray Tooltips",
             action: #selector(toggleTooltips),
+            keyEquivalent: ""
+        )
+        
+        // Create Option+Tab menu item
+        optionTabMenuItem = NSMenuItem(
+            title: "Option+Tab Switching",
+            action: #selector(toggleOptionTab),
             keyEquivalent: ""
         )
         
@@ -85,6 +93,13 @@ class StatusBarController {
         tooltipsMenuItem.target = self
         tooltipsMenuItem.state = UserDefaults.standard.bool(forKey: "StatusBarTooltipsEnabled") ? .on : .off
         menu.addItem(tooltipsMenuItem)
+        
+        // Add Option+Tab toggle
+        optionTabMenuItem.target = self
+        // Default to enabled if preference hasn't been set
+        let optionTabEnabled = UserDefaults.standard.bool(forKey: "OptionTabEnabled", defaultValue: true)
+        optionTabMenuItem.state = optionTabEnabled ? .on : .off
+        menu.addItem(optionTabMenuItem)
         
         // Create menu item with checkmark
         previewsMenuItem = NSMenuItem(
@@ -173,6 +188,15 @@ class StatusBarController {
         NotificationCenter.default.post(name: .statusBarTooltipsStateChanged, object: nil)
     }
     
+    @objc private func toggleOptionTab() {
+        let newState = optionTabMenuItem.state == .off
+        UserDefaults.standard.set(newState, forKey: "OptionTabEnabled")
+        optionTabMenuItem.state = newState ? .on : .off
+        
+        // Post notification for any listeners that need to know about the change
+        NotificationCenter.default.post(name: .optionTabStateChanged, object: nil, userInfo: ["enabled": newState])
+    }
+    
     @objc private func statusBarButtonClicked(_ sender: NSStatusBarButton) {
         // Update menu item state before showing menu
         if let previewsItem = previewsMenuItem {
@@ -202,5 +226,21 @@ class StatusBarController {
         if let monitor = mouseEventMonitor {
             NSEvent.removeMonitor(monitor)
         }
+    }
+}
+
+// Add extension for the notification name
+extension Notification.Name {
+    static let optionTabStateChanged = Notification.Name("optionTabStateChanged")
+}
+
+// Add extension for UserDefaults to handle default values
+extension UserDefaults {
+    func bool(forKey key: String, defaultValue: Bool) -> Bool {
+        if object(forKey: key) == nil {
+            set(defaultValue, forKey: key)
+            return defaultValue
+        }
+        return bool(forKey: key)
     }
 } 

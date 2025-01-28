@@ -162,17 +162,17 @@ class AccessibilityService {
             return windowID
         })
         
-        Logger.debug("Found \(cgWindowIDs.count) CGWindows for \(cleanAppName):")
-        for window in cgWindows {
+        //Logger.debug("Found \(cgWindowIDs.count) CGWindows for \(cleanAppName):")
+        /*for window in cgWindows {
             Logger.debug("  - ID: \(window.id), Name: \(window.name ?? "unnamed"), Bounds: \(window.bounds)")
-        }
+        }*/
         
         // Get windows using Accessibility API
         var windowsRef: CFTypeRef?
         if AXUIElementCopyAttributeValue(axApp, Constants.Accessibility.windowsKey, &windowsRef) == .success,
            let windowArray = windowsRef as? [AXUIElement] {
             
-            Logger.debug("Found \(windowArray.count) AX windows for \(cleanAppName)")
+            //Logger.debug("Found \(windowArray.count) AX windows for \(cleanAppName)")
             
             for window in windowArray {
                 var titleValue: AnyObject?

@@ -60,7 +60,8 @@ class WindowHistoryController: NSWindowController {
         window.backgroundColor = .clear
         window.isOpaque = false
         window.hasShadow = true
-        window.level = .popUpMenu // Make it appear above the dock
+        // Set window level to be below thumbnails
+        window.level = .modalPanel // Changed to .modalPanel to be below thumbnails
         window.appearance = NSApp.effectiveAppearance
         window.isMovable = false
         window.isMovableByWindowBackground = false

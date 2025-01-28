@@ -9,9 +9,9 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.9.28</string>
+    <string>1.9.29</string>
     <key>CFBundleVersion</key>
-    <string>1.9.28</string>
+    <string>1.9.29</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>LSUIElement</key>
@@ -19,7 +19,7 @@
     <key>CFBundleIconFile</key>
     <string>icon.icns</string>
     <key>NSAppleEventsUsageDescription</key>
-    <string>DockAppToggler needs to control other applications to manage windows.</string>
+    <string>DockAppToggler needs to monitor keyboard events to handle Option+Tab functionality.</string>
     <key>NSSystemAdministrationUsageDescription</key>
     <string>DockAppToggler needs accessibility permissions to manage windows.</string>
     <key>NSHighResolutionCapable</key>
@@ -34,5 +34,11 @@
     <true/>
     <key>SUScheduledCheckInterval</key>
     <integer>86400</integer>
+    <key>com.apple.security.temporary-exception.apple-events</key>
+    <true/>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>DockAppToggler needs screen recording permission to show window previews when hovering over dock icons.</string>
+    <key>NSInputMonitoringUsageDescription</key>
+    <string>DockAppToggler needs input monitoring permission to support keyboard shortcuts.</string>
 </dict>
 </plist> 

@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 
 /// Manages history of recently used windows
 @MainActor
@@ -8,6 +9,21 @@ class WindowHistory {
     
     // Maximum number of windows to track per app
     private let maxHistorySize = 5
+    
+    // Timer for capturing active window
+    @MainActor private var activeWindowTimer: Timer?
+    
+    // Wrapper to make Timer reference Sendable
+    private class SendableTimerRef: @unchecked Sendable {
+        let timer: Timer
+        init(_ timer: Timer) {
+            self.timer = timer
+        }
+    }
+    
+    // Nonisolated copy for cleanup
+    private var cleanupTimerRef: SendableTimerRef?
+    private let timerInterval: TimeInterval = 2.0 // Check every 2 seconds
     
     // Store window info and timestamp
     private struct HistoryEntry: Sendable {
@@ -19,33 +35,104 @@ class WindowHistory {
     // Store recent windows with timestamps, grouped by app
     private var recentWindows: [String: [HistoryEntry]] = [:]
     
-    private init() {}
+    private init() {
+        setupActiveWindowTimer()
+    }
+    
+    deinit {
+        cleanupTimerRef?.timer.invalidate()
+    }
+    
+    private func setupActiveWindowTimer() {
+        Logger.debug("Setting up active window timer")
+        let timer = Timer.scheduledTimer(withTimeInterval: timerInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.captureActiveWindow()
+            }
+        }
+        activeWindowTimer = timer
+        cleanupTimerRef = SendableTimerRef(timer)  // Store in Sendable wrapper
+    }
+    
+    private func captureActiveWindow() {
+        // Get frontmost app
+        guard let frontApp = NSWorkspace.shared.frontmostApplication else {
+            return
+        }
+        
+        // Get the frontmost window using Accessibility API
+        let appElement = AXUIElementCreateApplication(frontApp.processIdentifier)
+        
+        var windowRef: CFTypeRef?
+        let result = AXUIElementCopyAttributeValue(
+            appElement,
+            kAXFocusedWindowAttribute as CFString,
+            &windowRef
+        )
+        
+        guard result == .success,
+              let windowRef = windowRef,
+              CFGetTypeID(windowRef) == AXUIElementGetTypeID() else {
+            return
+        }
+        
+        let windowElement = windowRef as! AXUIElement
+        
+        // Get window name
+        var nameRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            windowElement,
+            kAXTitleAttribute as CFString,
+            &nameRef
+        ) == .success,
+        let windowName = nameRef as? String else {
+            return
+        }
+        
+        // Create WindowInfo and add to history
+        let windowInfo = WindowInfo(
+            window: windowElement,
+            name: windowName,
+            cgWindowID: nil,
+            isAppElement: false
+        )
+        
+        addWindow(windowInfo, for: frontApp)
+    }
     
     /// Get recent windows for an app
     func getRecentWindows(for bundleIdentifier: String) -> [WindowInfo] {
-        Logger.debug("Getting recent windows for app: \(bundleIdentifier)")
+        //Logger.debug("Getting recent windows for app: \(bundleIdentifier)")
+        
+        // Clean up non-existent windows first
+        cleanupNonExistentWindows(for: bundleIdentifier)
+        
         let windows = recentWindows[bundleIdentifier]?
-            .sorted { $0.timestamp > $1.timestamp } // Sort by most recent first
+            .sorted { $0.timestamp > $1.timestamp }
             .map { $0.window } ?? []
         
-        Logger.debug("  - Found \(windows.count) recent windows")
+        //Logger.debug("  - Found \(windows.count) valid recent windows")
         return windows
     }
     
     /// Get all recent windows across all apps
     func getAllRecentWindows() -> [WindowInfo] {
-        Logger.debug("Getting all recent windows")
+        //Logger.debug("Getting all recent windows")
+        
+        // Clean up non-existent windows for all apps
+        for bundleId in recentWindows.keys {
+            cleanupNonExistentWindows(for: bundleId)
+        }
+        
         let allWindows = recentWindows.values
             .flatMap { $0 }
             .sorted { $0.timestamp > $1.timestamp }
             .map { $0.window }
+            .prefix(maxHistorySize) // Limit to same max size as per-app history
         
-        Logger.debug("  - Found \(allWindows.count) total recent windows")
-        for (index, window) in allWindows.enumerated() {
-            Logger.debug("    \(index + 1). \(window.name)")
-        }
+        //Logger.debug("  - Found \(allWindows.count) valid recent windows")
         
-        return allWindows
+        return Array(allWindows)
     }
     
     /// Add a window to history
@@ -65,12 +152,12 @@ class WindowHistory {
             }
         }
         
-        // Remove this window from any other app's history first
+        // Remove this window from any other app's history first by checking AX element equality
         for (otherBundleId, entries) in recentWindows {
             if otherBundleId != bundleId {
-                if entries.contains(where: { $0.window.name == window.name }) {
+                if entries.contains(where: { isEqualAXElement($0.window.window, window.window) }) {
                     Logger.debug("  - Removing duplicate window entry from \(otherBundleId)")
-                    recentWindows[otherBundleId]?.removeAll(where: { $0.window.name == window.name })
+                    recentWindows[otherBundleId]?.removeAll(where: { isEqualAXElement($0.window.window, window.window) })
                 }
             }
         }
@@ -87,8 +174,8 @@ class WindowHistory {
         // Get or create array for this app
         var appWindows = recentWindows[bundleId] ?? []
         
-        // Check if window with same title already exists
-        if let existingIndex = appWindows.firstIndex(where: { $0.window.name == window.name }) {
+        // Check if window already exists by comparing AX elements
+        if let existingIndex = appWindows.firstIndex(where: { isEqualAXElement($0.window.window, window.window) }) {
             // Update timestamp of existing entry instead of adding duplicate
             let updatedEntry = HistoryEntry(
                 window: windowWithBundle,
@@ -171,5 +258,68 @@ class WindowHistory {
                 Logger.debug("    \(index + 1). \(entry.window.name) (added \(String(format: "%.1f", timeAgo))s ago)")
             }
         }
+    }
+    
+    /// Remove windows that no longer exist from history
+    private func cleanupNonExistentWindows(for bundleIdentifier: String) {
+        guard var entries = recentWindows[bundleIdentifier] else { return }
+        
+        let countBefore = entries.count
+        entries.removeAll { entry in
+            // Check if window still exists using its AXUIElement
+            var windowRef: CFTypeRef?
+            let status = AXUIElementCopyAttributeValue(
+                entry.window.window,
+                kAXRoleAttribute as CFString,
+                &windowRef
+            )
+            
+            // Verify we got a valid window reference and it's a window
+            let exists = status == .success && 
+                        windowRef != nil && 
+                        (windowRef as? String) == "AXWindow"
+            
+            if !exists {
+                Logger.debug("  - Removing non-existent window: \(entry.window.name)")
+            }
+            return !exists
+        }
+        
+        if entries.count < countBefore {
+            Logger.debug("  - Removed \(countBefore - entries.count) non-existent windows")
+            recentWindows[bundleIdentifier] = entries
+        }
+    }
+    
+    /// Helper function to compare AXUIElement references
+    private func isEqualAXElement(_ element1: AXUIElement, _ element2: AXUIElement) -> Bool {
+        // First try direct pointer comparison
+        if CFEqual(element1, element2) {
+            return true
+        }
+        
+        // If direct comparison fails, try comparing window IDs if available
+        var windowID1: CFTypeRef?
+        var windowID2: CFTypeRef?
+        
+        let success1 = AXUIElementCopyAttributeValue(
+            element1,
+            "AXWindowID" as CFString,
+            &windowID1
+        ) == .success
+        
+        let success2 = AXUIElementCopyAttributeValue(
+            element2,
+            "AXWindowID" as CFString,
+            &windowID2
+        ) == .success
+        
+        if success1 && success2,
+           let id1 = (windowID1 as? NSNumber)?.uint32Value,
+           let id2 = (windowID2 as? NSNumber)?.uint32Value {
+            return id1 == id2
+        }
+        
+        return false
     }
 } 

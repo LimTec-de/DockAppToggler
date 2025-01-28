@@ -13,56 +13,128 @@ class KeyboardShortcutMonitor {
     private var isTabPressed = false   // Track tab key state
     private var windowChooserController: WindowChooserController?
     private var currentWindowIndex = 0
+    private var backdropWindow: NSWindow?
+    private var localEventMonitor: Any?  // Add this property
+    private var optionKeyLocalMonitor: Any?  // Add this property
+    private var eventTap: CFMachPort? {
+        willSet {
+            // Cleanup old event tap before assigning new one
+            if let tap = eventTap {
+                CGEvent.tapEnable(tap: tap, enable: false)
+            }
+        }
+    }
+    
+    private var isOptionTabEnabled: Bool {
+        UserDefaults.standard.bool(forKey: "OptionTabEnabled", defaultValue: true)
+    }
     
     private init() {
+        setupEventTap()
         setupMonitors()
+        
+        // Add observer for option tab setting changes
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleOptionTabSettingChanged(_:)),
+            name: .optionTabStateChanged,
+            object: nil
+        )
     }
     
     private func setupMonitors() {
-        // Monitor option key press and release
-        optionKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.flagsChanged]) { [weak self] event in
-            self?.handleOptionKey(event)
+        // Set up option key monitors
+        setupOptionKeyMonitors()
+        
+        // Monitor tab key press globally
+        tabKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
+            if event.keyCode == 48 && self?.isOptionPressed == true {
+                // print("🔍 Consuming global tab key event")
+                self?.handleTabKey(event)
+            }
         }
         
-        // Monitor tab key press
-        tabKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
-            self?.handleTabKey(event)
+        // Monitor tab key press locally to consume events
+        localEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] event in
+            // If option is pressed and it's a tab key, consume all tab events
+            if event.keyCode == 48 && self?.isOptionPressed == true {
+                // print("🔍 Consuming local tab key event")
+                if event.type == .keyDown {
+                    self?.handleTabKey(event)
+                }
+                return nil  // Consume both keyDown and keyUp events
+            }
+            return event  // Pass through other events
         }
         
         // Monitor tab key release
         tabKeyUpMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyUp]) { [weak self] event in
-            self?.handleTabKeyUp(event)
+            if event.keyCode == 48 && self?.isOptionPressed == true {
+                // print("🔍 Consuming global tab key up event")
+                self?.handleTabKeyUp(event)
+            }
+        }
+    }
+    
+    private func setupOptionKeyMonitors() {
+        // print("🔍 Setting up option key monitors")
+        // Monitor option key press and release globally (when app is not active)
+        optionKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.flagsChanged]) { [weak self] event in
+            // print("🔍 Global flag changed event received")
+            self?.handleOptionKey(event)
+        }
+        
+        // Monitor option key press and release locally (when app is active)
+        optionKeyLocalMonitor = NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged]) { [weak self] event in
+            // print("🔍 Local flag changed event received")
+            self?.handleOptionKey(event)
+            return event
         }
     }
     
     private func handleOptionKey(_ event: NSEvent) {
-        isOptionPressed = event.modifierFlags.contains(.option)
+        // Check if feature is enabled before processing option key
+        guard isOptionTabEnabled else { return }
         
-        // Only hide when option is released
-        if !isOptionPressed {
-            hideWindowChooser()
+        let wasPressed = isOptionPressed
+        let isNowPressed = event.modifierFlags.contains(.option)
+        
+        isOptionPressed = isNowPressed
+        
+        if wasPressed && !isNowPressed {
+            if let chooserView = windowChooserController?.chooserView {
+                chooserView.selectCurrentItem()
+                hideWindowChooser()
+            } else {
+                hideWindowChooser()
+            }
         }
     }
     
     private func handleTabKey(_ event: NSEvent) {
-        guard isOptionPressed,
+        // Check if feature is enabled before processing tab key
+        guard isOptionTabEnabled,
+              isOptionPressed,
               event.keyCode == 48 // Tab key code
         else {
             return
         }
         
-        isTabPressed = true
-        
         if windowChooserController == nil {
-            // First Option+Tab press - show window chooser
+            // print("  - Creating new window chooser")
             showWindowChooser()
-        } else {
-            // Pass the key event to the window chooser view
+        } else if let chooserView = windowChooserController?.chooserView,
+                  !chooserView.options.isEmpty {
+            // print("  - Cycling through windows")
             if event.modifierFlags.contains(.shift) {
-                windowChooserController?.chooserView?.selectPreviousItem()
+                // print("  - Selecting previous item")
+                chooserView.selectPreviousItem()
             } else {
-                windowChooserController?.chooserView?.selectNextItem()
+                // print("  - Selecting next item")
+                chooserView.selectNextItem()
             }
+        } else {
+            // print("  - ⚠️ No windows available for cycling")
         }
     }
     
@@ -73,41 +145,134 @@ class KeyboardShortcutMonitor {
     
     private func showWindowChooser() {
         currentWindowIndex = 0
+        
+        // Create and show backdrop window as a panel
+        let backdropWindow = NSPanel(
+            contentRect: NSScreen.main?.frame ?? .zero,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        
+        // Remove any existing local monitor before creating a new one
+        if let monitor = localEventMonitor {
+            NSEvent.removeMonitor(monitor)
+            localEventMonitor = nil
+        }
+        
+        // Set up local event monitor for tab key events with more aggressive event consumption
+        localEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] event in
+            if event.keyCode == 48 { // Tab key
+                // print("🔍 Consuming window chooser tab key event")
+                if event.type == .keyDown {
+                    if event.modifierFlags.contains(.shift) {
+                        self?.windowChooserController?.chooserView?.selectPreviousItem()
+                    } else {
+                        self?.windowChooserController?.chooserView?.selectNextItem()
+                    }
+                }
+                return nil // Consume all tab key events
+            }
+            return event
+        }
+        
+        // Create and configure the key capture view
+        let contentView = KeyCaptureView()
+        contentView.keyDownHandler = { [weak self] event in
+            if event.keyCode == 48 { // Tab key
+                if event.modifierFlags.contains(.shift) {
+                    self?.windowChooserController?.chooserView?.selectPreviousItem()
+                } else {
+                    self?.windowChooserController?.chooserView?.selectNextItem()
+                }
+            }
+        }
+        
+        // Configure backdrop window
+        backdropWindow.contentView = contentView
+        backdropWindow.backgroundColor = NSColor.black.withAlphaComponent(0.2)
+        backdropWindow.isOpaque = false
+        backdropWindow.level = .modalPanel
+        backdropWindow.ignoresMouseEvents = false  // Allow mouse events for focus
+        backdropWindow.isMovable = false
+        
+        // Force the panel to become key window
+        (backdropWindow as NSPanel).becomesKeyOnlyIfNeeded = false
+        backdropWindow.makeKeyAndOrderFront(nil)
+        backdropWindow.makeKey()
+        
+        // Ensure the window stays in focus and the content view becomes first responder
+        NSApp.activate(ignoringOtherApps: true)
+        contentView.window?.makeFirstResponder(contentView)
+        
+        self.backdropWindow = backdropWindow
+        
         windowChooserController = WindowChooserController(
-            at: .zero,  // We'll position it in the center
+            at: .zero,
             windows: WindowHistory.shared.getAllRecentWindows(),
             app: NSRunningApplication.current,
             isHistory: true,
-            callback: { element, isMinimized in
+            callback: { [weak self] element, isMinimized in
                 // Handle window selection
                 Task { @MainActor in
-                    // Raise window to front
-                    AXUIElementPerformAction(element, "AXRaise" as CFString)
-                    
-                    // Get the app that owns this window
-                    var appElement: AnyObject?
-                    AXUIElementCopyAttributeValue(element, "AXApplication" as CFString, &appElement)
-                    
-                    if let appElement = appElement,
-                       CFGetTypeID(appElement as CFTypeRef) == AXUIElementGetTypeID() {
+                    // print("🔍 Window selection callback")
+                    if element != nil {  // Changed from if let to simple nil check
+                        // print("  - Raising window")
+                        
+                        // Get the app first
                         var pid: pid_t = 0
-                        let result = AXUIElementGetPid(appElement as! AXUIElement, &pid)
-                        if result == .success,
+                        if AXUIElementGetPid(element, &pid) == .success,
                            let app = NSRunningApplication(processIdentifier: pid) {
-                            // Activate the app
+                            // print("  - Found app: \(app.localizedName ?? "unknown")")
+                            
+                            // First activate the app
                             app.activate(options: .activateIgnoringOtherApps)
+                            
+                            // Then raise the window
+                            let raiseResult = AXUIElementPerformAction(element, "AXRaise" as CFString)
+                            // print("  - Raise result: \(raiseResult)")
+                        } else {
+                            // print("  - ⚠️ Failed to get app, trying direct window raise")
+                            AXUIElementPerformAction(element, "AXRaise" as CFString)
                         }
+                    } else {
+                        // print("  - ⚠️ No window element provided")
                     }
+                    
+                    // Hide backdrop window after selection
+                    self?.hideWindowChooser()
                 }
             }
         )
+        
         windowChooserController?.showChooser(mode: .history)
         highlightCurrentWindow()
     }
     
     private func hideWindowChooser() {
+        // print("🔍 Hiding window chooser")
+        // Remove monitors
+        if let monitor = optionKeyLocalMonitor {
+            NSEvent.removeMonitor(monitor)
+            optionKeyLocalMonitor = nil
+        }
+        if let monitor = localEventMonitor {
+            NSEvent.removeMonitor(monitor)
+            localEventMonitor = nil
+        }
+        
+        // Reset all state
+        isOptionPressed = false
+        isTabPressed = false
+        
+        // Close windows
         windowChooserController?.close()
         windowChooserController = nil
+        backdropWindow?.close()
+        backdropWindow = nil
+        
+        // Re-initialize monitors
+        setupOptionKeyMonitors()
     }
     
     private func cycleToNextWindow() {
@@ -124,5 +289,147 @@ class KeyboardShortcutMonitor {
         
         let selectedWindow = windows[currentWindowIndex]
         windowChooserController?.highlightWindow(selectedWindow)
+    }
+    
+    private func setupEventTap() {
+        // Create event tap to intercept key events
+        let eventMask = (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.keyUp.rawValue)
+        
+        guard let eventTap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: CGEventMask(eventMask),
+            callback: { proxy, type, event, refcon in
+                let monitor = Unmanaged<KeyboardShortcutMonitor>.fromOpaque(refcon!).takeUnretainedValue()
+                return monitor.handleEventTap(proxy: proxy, type: type, event: event)
+            },
+            userInfo: Unmanaged.passUnretained(self).toOpaque()
+        ) else {
+            // print("Failed to create event tap")
+            return
+        }
+        
+        // Create a run loop source and add it to the current run loop
+        let runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0)
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
+        
+        // Enable the event tap
+        CGEvent.tapEnable(tap: eventTap, enable: true)
+        
+        self.eventTap = eventTap
+    }
+    
+    private func handleEventTap(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        // Check if feature is enabled first
+        guard isOptionTabEnabled else {
+            return Unmanaged.passRetained(event) // Pass through all events when disabled
+        }
+        
+        // Check if it's a tab key event
+        if let nsEvent = NSEvent(cgEvent: event),
+           nsEvent.keyCode == 48 {
+            
+            // If option is pressed, we need to handle tab key events
+            if isOptionPressed {
+                // If this is a key up event, reset tab state
+                if type == .keyUp {
+                    isTabPressed = false
+                    return nil
+                }
+                
+                // If window chooser is active, let our app handle the tab key
+                if windowChooserController != nil {
+                    // print("🔍 Allowing tab for window chooser cycling")
+                    return Unmanaged.passRetained(event)
+                }
+                
+                // If window chooser is not shown yet and this is the first tab press,
+                // let it through so our app can handle it
+                if type == .keyDown && !isTabPressed {
+                    // print("🔍 Allowing initial option+tab combination")
+                    isTabPressed = true
+                    return Unmanaged.passRetained(event)
+                }
+                
+                // Block all other tab key events while option is pressed
+                // print("🔍 Blocking tab key event at system level")
+                return nil
+            }
+        }
+        
+        // Pass through all other events
+        return Unmanaged.passRetained(event)
+    }
+    
+    private nonisolated func cleanup() {
+        DispatchQueue.main.sync {
+            // Cleanup monitors
+            if let monitor = optionKeyMonitor {
+                NSEvent.removeMonitor(monitor)
+                optionKeyMonitor = nil
+            }
+            if let monitor = tabKeyMonitor {
+                NSEvent.removeMonitor(monitor)
+                tabKeyMonitor = nil
+            }
+            if let monitor = tabKeyUpMonitor {
+                NSEvent.removeMonitor(monitor)
+                tabKeyUpMonitor = nil
+            }
+            if let monitor = localEventMonitor {
+                NSEvent.removeMonitor(monitor)
+                localEventMonitor = nil
+            }
+            if let monitor = optionKeyLocalMonitor {
+                NSEvent.removeMonitor(monitor)
+                optionKeyLocalMonitor = nil
+            }
+            
+            // Cleanup event tap
+            if let tap = eventTap {
+                CGEvent.tapEnable(tap: tap, enable: false)
+                eventTap = nil
+            }
+        }
+    }
+    
+    deinit {
+        cleanup()
+        NotificationCenter.default.removeObserver(self)
+    }
+    
+    func handleKeyEvent(_ event: NSEvent) -> Bool {
+        // First check if Option+Tab is enabled
+        guard isOptionTabEnabled else {
+            return false // Let the system handle the event
+        }
+        
+        // ... rest of existing handleKeyEvent implementation ...
+        return true
+    }
+    
+    @objc private func handleOptionTabSettingChanged(_ notification: Notification) {
+        if let enabled = notification.userInfo?["enabled"] as? Bool {
+            if enabled {
+                // Restart the app when the feature is enabled
+                StatusBarController.performRestart()
+            } else {
+                // Clean up when disabled
+                hideWindowChooser()
+                isOptionPressed = false
+                isTabPressed = false
+            }
+        }
+    }
+}
+
+private class KeyCaptureView: NSView {
+    var keyDownHandler: ((NSEvent) -> Void)?
+    
+    override var acceptsFirstResponder: Bool { true }
+    
+    override func keyDown(with event: NSEvent) {
+        keyDownHandler?(event)
     }
 } 

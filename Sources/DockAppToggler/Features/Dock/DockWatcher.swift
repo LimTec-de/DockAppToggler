@@ -1217,7 +1217,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
     }
     
     private func checkMouseForHistory() {
-        Logger.debug("Checking mouse for history menu...")
+        //Logger.debug("Checking mouse for history menu...")
         
         let mouseLocation = NSEvent.mouseLocation
         
@@ -1239,7 +1239,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
         
         // Check if mouse is at bottom of screen
         let distanceFromBottom = mouseLocation.y
-        Logger.debug("  - Mouse distance from bottom: \(distanceFromBottom)")
+        //Logger.debug("  - Mouse distance from bottom: \(distanceFromBottom)")
         
         // Show menu if mouse is very close to bottom
         if distanceFromBottom < 2 {

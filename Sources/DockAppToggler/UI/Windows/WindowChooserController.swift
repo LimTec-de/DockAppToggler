@@ -541,7 +541,7 @@ class WindowChooserController: NSWindowController {
         let screen = NSScreen.main ?? NSScreen.screens[0]
         let frame = NSRect(
             x: (screen.frame.width - window.frame.width) / 2,
-            y: (screen.frame.height - window.frame.height) / 2,
+            y: (screen.frame.height - window.frame.height) / 2 + 200,
             width: window.frame.width,
             height: window.frame.height
         )
