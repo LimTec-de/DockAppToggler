@@ -199,6 +199,9 @@ class WindowThumbnailView {
     // Add property to track if thumbnail creation is in progress
     private var isThumbnailLoading = false
     
+    // Add property to track frontmost window
+    private var frontmostWindow: AXUIElement?
+    
     init(targetApp: NSRunningApplication, dockIconCenter: NSPoint, options: [WindowInfo], windowChooser: WindowChooserController?) {
         self.targetApp = targetApp
         self.dockIconCenter = dockIconCenter
@@ -486,7 +489,7 @@ class WindowThumbnailView {
                 timestamp: Date()
             )
             
-            manageCacheSize()
+            //manageCacheSize()
         }
         
         // Only setup timer if requested
@@ -939,78 +942,81 @@ class WindowThumbnailView {
     }*/
     
     func hideThumbnail(removePanel: Bool = false) {
-        print("hideThumbnail")
+        Logger.debug("Hiding thumbnail window")
 
         // Cancel any existing timer
-        //autoCloseTimer?.invalidate()
-        //autoCloseTimer = nil
+        autoCloseTimer?.invalidate()
+        autoCloseTimer = nil
         
-        guard let panel = _thumbnailWindow else { return }
-        
-        // Store the current thumbnail in cache before closing
+        // Store current thumbnail in cache before closing
         if let imageView = thumbnailView,
            let currentImage = imageView.image,
-           let windowInfo = options.first {  // Use first window info
+           let windowInfo = options.first {
             let cacheKey = getCacheKey(for: windowInfo)
             
-            // Only update cache if we have a valid image
+            // Only cache if not showing app icon
             if currentImage != targetApp.icon {
                 Self.cachedThumbnails[cacheKey] = CachedThumbnail(
                     image: currentImage,
                     timestamp: Date()
                 )
+                
+                // Also update app thumbnail if this is the frontmost window
+                if let bundleId = targetApp.bundleIdentifier,
+                   windowInfo.window == frontmostWindow {
+                    Self.appThumbnails[bundleId] = AppThumbnail(
+                        image: currentImage,
+                        timestamp: Date(),
+                        appBundleIdentifier: bundleId
+                    )
+                }
             }
         }
         
-        //WindowThumbnailView.activePreviewWindows.remove(panel)
-
-        WindowThumbnailView.activePreviewWindows.forEach { panel in
+        // Close all active preview windows
+        // Take a snapshot of active windows to avoid mutation during iteration
+        let windowsToClose = WindowThumbnailView.activePreviewWindows
+        
+        for panel in windowsToClose {
+            // Ensure window is closed on main thread
             panel.orderOut(nil)
+            panel.close()
+            WindowThumbnailView.activePreviewWindows.remove(panel)
         }
-        //WindowThumbnailView.activePreviewWindows.removeAll()
-        // Then close all other active preview windows
-            /*WindowThumbnailView.activePreviewWindows.forEach { panel in
-                panel.close()
-            }
-            WindowThumbnailView.activePreviewWindows.removeAll()*/
         
-        //panel.close()
+        // Clear instance variables
         self._thumbnailWindow = nil
         self.thumbnailView = nil
-        currentWindowID = nil
+        self.currentWindowID = nil
     }
     
     func cleanup() {
-        Logger.debug("""
-            Starting cleanup:
-            - Cache size before: \(Self.cachedThumbnails.count)
-            - Hidden app: \(targetApp.isHidden)
-            """)
-
-        //WindowThumbnailView.activePreviewWindows.remove(panel)
-
-
-        // Then close all other active preview windows
-        WindowThumbnailView.activePreviewWindows.forEach { panel in
-            panel.close()
-        }
-        WindowThumbnailView.activePreviewWindows.removeAll()
+        Logger.debug("Starting thumbnail view cleanup")
         
+        // Cancel timer first
         autoCloseTimer?.invalidate()
         autoCloseTimer = nil
-        hideThumbnail()
         
-        // Clean expired cache entries with better logging
-        let oldCount = Self.cachedThumbnails.count
+        // Close all preview windows
+        let windowsToClose = WindowThumbnailView.activePreviewWindows
+        for panel in windowsToClose {
+            panel.orderOut(nil)
+            panel.close()
+            WindowThumbnailView.activePreviewWindows.remove(panel)
+        }
+        
+        // Clear instance variables
+        self._thumbnailWindow = nil
+        self.thumbnailView = nil
+        self.currentWindowID = nil
+        
+        // Clean expired cache entries
         var newCache: [WindowCacheKey: CachedThumbnail] = [:]
+        let oldCount = Self.cachedThumbnails.count
         
         for (key, cached) in Self.cachedThumbnails {
-            let isValid = cached.isValid(forHiddenApp: targetApp.isHidden)
-            if isValid {
-                // Only keep valid entries, and ensure no duplicates
+            if cached.isValid(forHiddenApp: targetApp.isHidden) {
                 newCache[key] = cached
-            } else {
-                Logger.debug("Removing expired cache for window: \(key.windowName)")
             }
         }
         
@@ -1018,22 +1024,21 @@ class WindowThumbnailView {
         
         // Clean expired app thumbnails
         let oldAppCount = Self.appThumbnails.count
-        Self.appThumbnails = Self.appThumbnails.filter { bundleID, thumbnail in
-            let isValid = thumbnail.isValid
-            if !isValid {
-                Logger.debug("Removing expired app thumbnail for: \(bundleID)")
-            }
-            return isValid
+        Self.appThumbnails = Self.appThumbnails.filter { _, thumbnail in
+            thumbnail.isValid
         }
         
-        // Clean up the key cache
+        // Clean up other caches
         Self.windowKeyCache.removeAll()
+        Self.lastThumbnailCreationTime.removeAll()
         
         Logger.debug("""
             Cleanup completed:
-            - Cache entries removed: \(oldCount - Self.cachedThumbnails.count)
-            - App thumbnails removed: \(oldAppCount - Self.appThumbnails.count)
-            - Final cache size: \(Self.cachedThumbnails.count)
+            - Removed \(oldCount - newCache.count) expired thumbnails
+            - Removed \(oldAppCount - Self.appThumbnails.count) expired app thumbnails
+            - Cleared window key cache
+            - Cleared thumbnail timing cache
+            - Final cache size: \(newCache.count)
             """)
     }
     
@@ -1185,6 +1190,27 @@ class WindowThumbnailView {
     
     func updateTargetApp(_ newApp: NSRunningApplication) {
         self.targetApp = newApp
+    }
+    
+    // Add a new method to force close all thumbnails but preserve cache
+    @MainActor static func forceCloseAllThumbnails() {
+        Logger.debug("Force closing all thumbnail windows")
+        
+        // Take a snapshot of active windows
+        let windowsToClose = activePreviewWindows
+        
+        for panel in windowsToClose {
+            panel.orderOut(nil)
+            panel.close()
+            activePreviewWindows.remove(panel)
+        }
+        
+        // Don't clear caches here - they will be cleaned up naturally through expiration
+    }
+    
+    // Add method to update frontmost window
+    func updateFrontmostWindow(_ window: AXUIElement) {
+        self.frontmostWindow = window
     }
 }
 

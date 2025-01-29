@@ -928,7 +928,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
                 // Hide window chooser efficiently
                 if let chooser = windowChooser {
                     autoreleasepool {
-                        chooser.chooserView?.thumbnailView?.hideThumbnail()
+                        //chooser.chooserView?.thumbnailView?.hideThumbnail()
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak chooser] in
                            
                             

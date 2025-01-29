@@ -697,11 +697,15 @@ class WindowChooserView: NSView {
     
     @objc private func buttonClicked(_ sender: NSButton) {
         Logger.debug("Button clicked - tag: \(sender.tag)")
+        
+        // Hide thumbnail immediately and force close
+        thumbnailView?.hideThumbnail(removePanel: true)
+        Task { @MainActor in
+            WindowThumbnailView.forceCloseAllThumbnails()
+        }
+        
         let windowInfo = options[sender.tag]
         Logger.debug("Selected window info - Name: \(windowInfo.name), ID: \(windowInfo.cgWindowID ?? 0)")
-        
-        // Hide thumbnail immediately
-        thumbnailView?.hideThumbnail(removePanel: true)
         
         // Add window to history when clicked
         WindowHistory.shared.addWindow(windowInfo, for: targetApp)
@@ -1024,22 +1028,22 @@ class WindowChooserView: NSView {
 
     
     deinit {
+        print("WindowChooserView deinit")
+        
         // Capture values before async operation
+        let thumbnailViewToClean = thumbnailView
         let buttonsToClean = buttons
         let hideButtonsToClean = hideButtons
         let closeButtonsToClean = closeButtons
-        let thumbnailViewToClean = thumbnailView
-
-        print("WindowChooserView deinit")
         
-        // Schedule cleanup on main actor
+        // Force close all thumbnails
         Task { @MainActor in
-            thumbnailViewToClean?.cleanup()
-        }
-        thumbnailView = nil
-        
-        // Clean up tracking areas on main actor
-        Task { @MainActor in
+            WindowThumbnailView.forceCloseAllThumbnails()
+            
+            // Clean up thumbnail view
+            await thumbnailViewToClean?.cleanup()
+            
+            // Clean up tracking areas
             let allButtons = buttonsToClean + hideButtonsToClean + closeButtonsToClean
             for button in allButtons {
                 for area in button.trackingAreas {
@@ -1047,6 +1051,9 @@ class WindowChooserView: NSView {
                 }
             }
         }
+        
+        // Clear reference
+        thumbnailView = nil
     }
 
     private func createCustomBadgeIcon(baseSymbol: String, badgeNumber: String, config: NSImage.SymbolConfiguration) -> NSImage? {
