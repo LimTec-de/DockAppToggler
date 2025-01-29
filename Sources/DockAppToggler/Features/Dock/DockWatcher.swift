@@ -319,6 +319,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
             // Clear window chooser
             if let chooser = windowChooser {
                 chooser.prepareForReuse()
+                chooser.chooserView?.thumbnailView?.hideThumbnail()
                 windowChooser = nil
             }
             
@@ -461,6 +462,9 @@ class DockWatcher: NSObject, NSMenuDelegate {
     }
 
     nonisolated private func cleanup() {
+
+        print("cleanup dockwatcher")
+
         // Move timer cleanup to MainActor
         Task { @MainActor in
             _memoryCleanupTimer?.invalidate()
@@ -733,6 +737,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
             // Clean up existing chooser properly
             if let existingChooser = windowChooser,
                 existingChooser.window != nil {
+                
                 existingChooser.prepareForReuse()
                 existingChooser.close()
                 windowChooser = nil

@@ -1029,15 +1029,16 @@ class WindowChooserView: NSView {
         let buttonsToClean = buttons
         let hideButtonsToClean = hideButtons
         let closeButtonsToClean = closeButtons
-        //let thumbnailViewToClean = thumbnailView
+        let thumbnailViewToClean = thumbnailView
 
         print("WindowChooserView deinit")
         
+        
         // Schedule cleanup on main actor
-        /*Task { @MainActor in
+        Task { @MainActor in
             thumbnailViewToClean?.cleanup()
         }
-        thumbnailView = nil*/
+        thumbnailView = nil
         
         // Clean up tracking areas on main actor
         Task { @MainActor in
