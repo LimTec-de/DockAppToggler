@@ -202,6 +202,9 @@ class WindowThumbnailView {
     // Add property to track frontmost window
     private var frontmostWindow: AXUIElement?
     
+    // Add near the top of the class with other properties
+    @MainActor private var previewWindowBlocked: Bool = false
+    
     init(targetApp: NSRunningApplication, dockIconCenter: NSPoint, options: [WindowInfo], windowChooser: WindowChooserController?) {
         self.targetApp = targetApp
         self.dockIconCenter = dockIconCenter
@@ -265,7 +268,7 @@ class WindowThumbnailView {
             }
         }
 
-        
+        previewWindowBlocked = true
         
         // Create a data task to handle the window capture
         let imageData: CGImage? = await Task.detached { [targetApp = targetApp, windowInfo = windowInfo] () -> CGImage? in
@@ -418,6 +421,8 @@ class WindowThumbnailView {
             timestamp: Date()
         )
         
+
+        previewWindowBlocked = false
         return image
     }
     
@@ -944,6 +949,26 @@ class WindowThumbnailView {
     func hideThumbnail(removePanel: Bool = false) {
         Logger.debug("Hiding thumbnail window")
 
+        // If preview window is blocked, wait until unblocked
+        if previewWindowBlocked {
+            Task { @MainActor in
+                // Wait for a short time and check again
+                try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 second delay
+                while previewWindowBlocked {
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                }
+                // Once unblocked, proceed with hiding
+                await hideThumbnailImpl(removePanel: removePanel)
+            }
+            return
+        }
+        
+        // If not blocked, proceed immediately
+        hideThumbnailImpl(removePanel: removePanel)
+    }
+    
+    // Extract implementation to separate method
+    @MainActor private func hideThumbnailImpl(removePanel: Bool) {
         // Cancel any existing timer
         autoCloseTimer?.invalidate()
         autoCloseTimer = nil
