@@ -572,6 +572,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
                                 
                                 // Hide both window chooser and thumbnail
                                 watcher.windowChooser?.chooserView?.thumbnailView?.hideThumbnail()
+                                //watcher.windowChooser?.chooserView?.cleanup()
                                 watcher.windowChooser?.window?.orderOut(nil)
                                 //watcher.currentThumbnailView?.hideThumbnail()
                                 
@@ -911,7 +912,9 @@ class DockWatcher: NSObject, NSMenuDelegate {
                 lastProcessedTime = 0
                 
                 // Hide window chooser immediately if not over its area
-                windowChooser?.window?.orderOut(nil)
+                windowChooser?.chooserView?.thumbnailView?.hideThumbnail()
+                //windowChooser?.chooserView?.thumbnailView?.cleanup()
+                //windowChooser?.window?.orderOut(nil)
                 
                 // Start cleanup timer
                 cleanupTimer?.invalidate()

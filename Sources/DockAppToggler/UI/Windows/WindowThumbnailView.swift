@@ -444,7 +444,7 @@ class WindowThumbnailView {
         
         // Only setup timer if requested
         if setupTimer {
-            setupAutoCloseTimer(for: windowInfo)
+            //setupAutoCloseTimer(for: windowInfo)
         }
     }
     
@@ -814,7 +814,7 @@ class WindowThumbnailView {
         contentContainer.layer?.shadowOffset = CGSize(width: 0, height: -15)
 
         // Set up the same auto-close timer as regular thumbnails
-        setupAutoCloseTimer(for: windowInfo)
+        //setupAutoCloseTimer(for: windowInfo)
         
         // Create icon view with centered position considering margins
         let iconSize = NSSize(width: 128, height: 128)
@@ -882,48 +882,36 @@ class WindowThumbnailView {
     }
     
     // Extract timer setup to a separate method
-    private func setupAutoCloseTimer(for windowInfo: WindowInfo) {
+    /*private func setupAutoCloseTimer(for windowInfo: WindowInfo) {
         autoCloseTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self: WindowThumbnailView?] in
-                guard let self = self else { return }
-
-                let mouseLocation = NSEvent.mouseLocation
-                guard let screen = NSScreen.main else { return }
-                let flippedY = screen.frame.height - mouseLocation.y
-                let dockMouseLocation = CGPoint(x: mouseLocation.x, y: flippedY)
-                
-                // Check if mouse is over dock icon
-                let dockResult = DockService.shared.findAppUnderCursor(at: dockMouseLocation)
-                let isOverCorrectDockIcon = dockResult?.app.bundleIdentifier == self.targetApp.bundleIdentifier
-                
-                // Improved menu detection
-                var isOverMenu = false
-                if let chooserWindow = self.windowChooser?.window {
-                    // Convert screen coordinates to window base coordinates
-                    let windowFrame = chooserWindow.frame
-                    isOverMenu = NSPointInRect(mouseLocation, windowFrame)
+            Task { @MainActor in  // Remove weak self from Task - it's already captured by timer
+                if let self = self {  // Use if let instead of guard
+                    let mouseLocation = NSEvent.mouseLocation
+                    guard let screen = NSScreen.main else { return }
+                    let flippedY = screen.frame.height - mouseLocation.y
+                    let dockMouseLocation = CGPoint(x: mouseLocation.x, y: flippedY)
                     
-                    // Debug logging
-                    Logger.debug("""
-                        Menu detection:
-                        Mouse location: \(mouseLocation)
-                        Window frame: \(windowFrame)
-                        Is over menu: \(isOverMenu)
-                        """)
-                }
-                
-                // Only close if mouse is not over any relevant area
-                if !isOverCorrectDockIcon && !isOverMenu {
-                    Logger.debug("Closing thumbnail - mouse outside all areas")
+                    // Check if mouse is over dock icon
+                    let dockResult = DockService.shared.findAppUnderCursor(at: dockMouseLocation)
+                    let isOverCorrectDockIcon = dockResult?.app.bundleIdentifier == self.targetApp.bundleIdentifier
                     
-                    self.hideThumbnail()
-                    self.autoCloseTimer?.invalidate()
-                    self.autoCloseTimer = nil
+                    // Improved menu detection
+                    var isOverMenu = false
+                    if let chooserWindow = self.windowChooser?.window {
+                        let windowFrame = chooserWindow.frame
+                        isOverMenu = NSPointInRect(mouseLocation, windowFrame)
+                    }
+                    
+                    // Only close if mouse is not over any relevant area
+                    if !isOverCorrectDockIcon && !isOverMenu {
+                        self.hideThumbnail()
+                        self.autoCloseTimer?.invalidate()
+                        self.autoCloseTimer = nil
+                    }
                 }
             }
         }
-        
-    }
+    }*/
     
     func hideThumbnail() {
         print("hideThumbnail")
