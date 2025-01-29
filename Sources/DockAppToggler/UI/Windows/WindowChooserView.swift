@@ -516,10 +516,7 @@ class WindowChooserView: NSView {
             if button.tag < options.count {
                 let windowInfo = options[button.tag]
                 
-                if isHistoryMode {
-                    // For history mode, we already created the thumbnail view with the correct app in mouseEntered
-                    thumbnailView?.showThumbnail(for: windowInfo, withTimer: false)
-                } else {
+                
                     // Normal mode - use existing thumbnail logic
                     if !windowInfo.isAppElement {
                         Logger.debug("""
@@ -549,7 +546,9 @@ class WindowChooserView: NSView {
                             Logger.debug("History mode - No CGWindowID, attempting to find window")
                             var pid: pid_t = 0
                             if AXUIElementGetPid(windowInfo.window, &pid) == .success {
-                                let windowList = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[CFString: Any]] ?? []
+                                // Use .optionAll to get all windows including minimized ones
+                                let windowList = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[CFString: Any]] ?? []
+                                //print("🔍 History mode - Window list: \(windowList)")
                                 let appWindows = windowList.filter { dict in
                                     guard let windowPID = dict[kCGWindowOwnerPID] as? pid_t,
                                           windowPID == pid,
@@ -570,7 +569,6 @@ class WindowChooserView: NSView {
                                     func normalizeTitle(_ title: String) -> String {
                                         let baseTitle = title
                                             .replacingOccurrences(of: " - \(targetApp.localizedName ?? "")", with: "")
-                                            .replacingOccurrences(of: ".txt", with: "")
                                             .trimmingCharacters(in: .whitespaces)
                                         
                                         if baseTitle.contains(" - ") {
@@ -608,7 +606,7 @@ class WindowChooserView: NSView {
                             }
                         }
                     }
-                }
+                
             }
         }
     }
@@ -913,16 +911,17 @@ class WindowChooserView: NSView {
     }
     
     private func hasVisibleWindows(for app: NSRunningApplication) -> Bool {
-        let windowList = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[CFString: Any]] ?? []
+        // Use .optionAll to get all windows including minimized ones
+        let windowList = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[CFString: Any]] ?? []
+        
         return windowList.contains { info in
             guard let pid = info[kCGWindowOwnerPID] as? pid_t,
                   pid == app.processIdentifier,
                   let layer = info[kCGWindowLayer] as? Int32,
-                  layer == kCGNormalWindowLevel,
-                  let isOnscreen = info[kCGWindowIsOnscreen] as? Bool,
-                  isOnscreen else {
+                  layer == kCGNormalWindowLevel else {
                 return false
             }
+            
             return true
         }
     }

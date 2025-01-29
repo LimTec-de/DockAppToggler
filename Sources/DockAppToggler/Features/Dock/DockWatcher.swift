@@ -232,6 +232,10 @@ class DockWatcher: NSObject, NSMenuDelegate {
     private var historyCheckTimer: Timer?
     private let historyShowThreshold: CGFloat = 20 // pixels from bottom
     
+    // Add new property to track mouse position time
+    private var mouseNearBottomSince: TimeInterval?
+    private let historyShowDelay: TimeInterval = 0.2 // 200ms
+    
     override init() {
         super.init()
         windowChooser = nil  // Ensure it starts nil
@@ -801,17 +805,19 @@ class DockWatcher: NSObject, NSMenuDelegate {
     }
     
     @MainActor private func processMouseMovement(at point: CGPoint) {
-        // Add throttling to prevent too frequent updates
+        // Throttle updates (60fps)
         let currentTime = ProcessInfo.processInfo.systemUptime
-        if currentTime - lastMouseMoveTime < 0.05 { // ~60fps throttle
+        if currentTime - lastMouseMoveTime < 0.05 {
             return
         }
         lastMouseMoveTime = currentTime
         lastMenuInteractionTime = currentTime
-        
+
         // Early exit if menu is blocked
         if menuBlocked {
-            if let (app, _, _) = DockService.shared.findAppUnderCursor(at: point) {
+            // Cache dock check result
+            let dockResult = DockService.shared.findAppUnderCursor(at: point)
+            if let (app, _, _) = dockResult {
                 if app == lastClickedIconApp { return }
                 menuBlocked = false
                 lastClickedIconApp = nil
@@ -821,70 +827,64 @@ class DockWatcher: NSObject, NSMenuDelegate {
             }
         }
 
-        // Cache mouse location and dock check
+        // Cache mouse location and dock check once
         let mouseLocation = NSEvent.mouseLocation
         let dockCheckResult = DockService.shared.findAppUnderCursor(at: point)
         let isOverDock = dockCheckResult != nil
-        
-        // Optimize chooser area check
-        let isOverChooserArea: Bool
-        if let chooser = windowChooser,
-           let window = chooser.window {
-            let margin = Constants.UI.menuDismissalMargin
-            isOverChooserArea = window.frame.insetBy(dx: -margin, dy: -margin).contains(mouseLocation)
-        } else {
-            isOverChooserArea = false
-        }
+
+        // Optimize chooser area check with cached frame
+        let chooserFrame: NSRect? = windowChooser?.window?.frame
+        let isOverChooserArea = chooserFrame.map { frame in
+            frame.insetBy(dx: -Constants.UI.menuDismissalMargin, 
+                         dy: -Constants.UI.menuDismissalMargin).contains(mouseLocation)
+        } ?? false
 
         if isOverDock {
             guard let (app, _, iconCenter) = dockCheckResult else { return }
+            
+            // Update state once
             isMouseOverDock = true
             cleanupTimer?.invalidate()
             
-            // Check if we need to reload windows using cached time
+            // Check if windows need reloading using cached values
             let shouldReloadWindows = app != lastProcessedApp || 
                                     (lastProcessedWindows?.isEmpty ?? true) ||
                                     (currentTime - lastProcessedTime) > windowsCacheTimeout ||
                                     (lastProcessedApp?.bundleIdentifier != app.bundleIdentifier)
-            
+
             if shouldReloadWindows {
                 Task {
                     // Get windows in background
-                    let windows = await Task.detached { 
+                    let windows = await Task.detached(priority: .userInitiated) { 
                         await AccessibilityService.shared.listApplicationWindows(for: app)
                     }.value
-                    
-                    //print("windows: \(windows)")
 
-                    // Update cache
+                    // Update cache atomically
                     lastProcessedApp = app
                     lastProcessedWindows = windows
                     lastProcessedTime = currentTime
-                    
+
                     if !windows.isEmpty {
-
-                        
-
-                        // Update window chooser
+                        // Update window chooser efficiently
                         if let existingChooser = windowChooser {
-
-
-                            if (windows[0].isCGWindowOnly == true) {
+                            if windows[0].isCGWindowOnly ?? false {  // Safely unwrap with default false
                                 existingChooser.chooserView?.thumbnailView?.hideThumbnail()
-                                //existingChooser.close()
-                                //displayWindowSelector(for: app, at: iconCenter, windows: [])
-                                //return
+                            } else {
+                                // Batch UI updates
+                                autoreleasepool {
+                                    existingChooser.updateWindows(windows, for: app, at: iconCenter)
+                                    existingChooser.updatePosition(iconCenter)
+                                    existingChooser.window?.makeKeyAndOrderFront(nil)
+                                }
                             }
-
-                            existingChooser.updateWindows(windows, for: app, at: iconCenter)
-                            existingChooser.updatePosition(iconCenter)
-                            existingChooser.window?.makeKeyAndOrderFront(nil)
                         } else {
+                            // Create new chooser only if needed
                             windowChooser?.close()
                             windowChooser = nil
                             displayWindowSelector(for: app, at: iconCenter, windows: windows)
                         }
                         
+                        // Update state once
                         lastHoveredApp = app
                         currentApp = app
                     } else {
@@ -895,37 +895,43 @@ class DockWatcher: NSObject, NSMenuDelegate {
                     }
                 }
             } else if app != lastHoveredApp {
-                // Update window chooser position for different app
+                // Only update position for different app
                 if let (_, _, iconCenter) = dockCheckResult {
-                    windowChooser?.updatePosition(iconCenter)
-                    windowChooser?.window?.makeKeyAndOrderFront(nil)
+                    autoreleasepool {
+                        windowChooser?.updatePosition(iconCenter)
+                        windowChooser?.window?.makeKeyAndOrderFront(nil)
+                    }
+                    lastHoveredApp = app
                 }
-                lastHoveredApp = app
             }
         } else {
-            // Mouse is not over dock or chooser area
+            // Mouse not over dock or chooser
             if !isOverChooserArea {
+                // Update state once
                 isMouseOverDock = false
                 lastHoveredApp = nil
                 lastProcessedApp = nil
                 lastProcessedWindows = nil
                 lastProcessedTime = 0
                 
-                // Hide window chooser immediately if not over its area
-                windowChooser?.chooserView?.thumbnailView?.hideThumbnail()
-                //windowChooser?.chooserView?.thumbnailView?.cleanup()
-                //windowChooser?.window?.orderOut(nil)
+                // Hide window chooser efficiently
+                if let chooser = windowChooser {
+                    autoreleasepool {
+                        chooser.chooserView?.thumbnailView?.hideThumbnail()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak chooser] in
+                            chooser?.window?.orderOut(nil)
+                        }
+                    }
+                }
                 
                 // Start cleanup timer
                 cleanupTimer?.invalidate()
                 cleanupTimer = Timer.scheduledTimer(withTimeInterval: cleanupDelay, repeats: false) { [weak self] _ in
                     Task { @MainActor [weak self] in
-                        guard let self = self else { return }
-                        if !self.isMouseOverDock {
-                            self.windowChooser?.close()
-                            self.windowChooser = nil
-                            await self.cleanupResources()
-                        }
+                        guard let self = self, !self.isMouseOverDock else { return }
+                        self.windowChooser?.close()
+                        self.windowChooser = nil
+                        await self.cleanupResources()
                     }
                 }
             }
@@ -1206,7 +1212,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
     }
     
     private func startHistoryCheck() {
-        historyCheckTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+        historyCheckTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.checkMouseForHistory()
             }
@@ -1214,9 +1220,8 @@ class DockWatcher: NSObject, NSMenuDelegate {
     }
     
     private func checkMouseForHistory() {
-        //Logger.debug("Checking mouse for history menu...")
-        
         let mouseLocation = NSEvent.mouseLocation
+        let currentTime = ProcessInfo.processInfo.systemUptime
         
         // Only check window chooser's window visibility
         if let chooserWindow = windowChooser?.window, chooserWindow.isVisible {
@@ -1226,22 +1231,35 @@ class DockWatcher: NSObject, NSMenuDelegate {
                 windowChooser?.close()
                 windowChooser = nil
             }
+            mouseNearBottomSince = nil  // Reset timer when menu is visible
             return
         }
         
         guard NSScreen.main != nil else {
             Logger.debug("  - No main screen available")
+            mouseNearBottomSince = nil  // Reset timer when no screen
             return
         }
         
         // Check if mouse is at bottom of screen
         let distanceFromBottom = mouseLocation.y
-        //Logger.debug("  - Mouse distance from bottom: \(distanceFromBottom)")
         
-        // Show menu if mouse is very close to bottom
         if distanceFromBottom < 2 {
-            Logger.debug("  - Showing history menu")
-            showHistoryMenu()
+            // Start tracking time if not already tracking
+            if mouseNearBottomSince == nil {
+                mouseNearBottomSince = currentTime
+            }
+            
+            // Check if enough time has passed
+            if let startTime = mouseNearBottomSince,
+               currentTime - startTime >= historyShowDelay {
+                Logger.debug("  - Mouse held at bottom for required duration, showing history menu")
+                showHistoryMenu()
+                mouseNearBottomSince = nil  // Reset timer after showing menu
+            }
+        } else {
+            // Reset timer if mouse moves away from bottom
+            mouseNearBottomSince = nil
         }
     }
     

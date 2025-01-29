@@ -38,6 +38,7 @@ class DockService {
         if point.y < dockAreaY {
             return nil
         }
+        
 
         let systemWide = AXUIElementCreateSystemWide()
         var elementUntyped: AXUIElement?
