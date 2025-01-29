@@ -687,9 +687,9 @@ class WindowChooserView: NSView {
                         return buttonScreenFrame.contains(mouseLocation)
                     }
                     
-                    if !isOverAnyButton {
-                        thumbnailView?.hideThumbnail()
-                    }
+                    //if !isOverAnyButton {
+                        //thumbnailView?.hideThumbnail()
+                    //}
                 }
             }
         }
@@ -701,8 +701,7 @@ class WindowChooserView: NSView {
         Logger.debug("Selected window info - Name: \(windowInfo.name), ID: \(windowInfo.cgWindowID ?? 0)")
         
         // Hide thumbnail immediately
-        thumbnailView?.cleanup()
-        thumbnailView = nil
+        thumbnailView?.hideThumbnail(removePanel: true)
         
         // Add window to history when clicked
         WindowHistory.shared.addWindow(windowInfo, for: targetApp)
@@ -1032,7 +1031,6 @@ class WindowChooserView: NSView {
         let thumbnailViewToClean = thumbnailView
 
         print("WindowChooserView deinit")
-        
         
         // Schedule cleanup on main actor
         Task { @MainActor in
@@ -1769,14 +1767,19 @@ class WindowChooserView: NSView {
         needsLayout = true
         window?.contentView?.needsLayout = true
         
-        // Update thumbnail view options
+        // Update thumbnail view options instead of recreating
         if !isHistoryMode {
-            thumbnailView = WindowThumbnailView(
-                targetApp: targetApp,
-                dockIconCenter: dockIconCenter,
-                options: self.options,
-                windowChooser: self.window?.windowController as? WindowChooserController
-            )
+            if thumbnailView == nil {
+                thumbnailView = WindowThumbnailView(
+                    targetApp: targetApp,
+                    dockIconCenter: dockIconCenter,
+                    options: self.options,
+                    windowChooser: self.window?.windowController as? WindowChooserController
+                )
+            } else {
+                // Just update the options for existing thumbnailView
+                thumbnailView?.updateOptions(self.options)
+            }
         }
     }
 
@@ -1796,10 +1799,9 @@ class WindowChooserView: NSView {
     }
 
     func cleanup() {
-        // Cleanup thumbnail view
-        thumbnailView?.cleanup()
-        thumbnailView = nil
-
+        // Cleanup thumbnail view without destroying it
+        thumbnailView?.hideThumbnail()
+        
         // Remove tracking areas and clear event monitors
         buttons.forEach { button in
             button.trackingAreas.forEach { button.removeTrackingArea($0) }
@@ -1938,16 +1940,11 @@ class WindowChooserView: NSView {
     
     func selectCurrentItem() {
         guard selectedIndex >= 0 && selectedIndex < options.count else { return }
-        // print("🔍 selectCurrentItem called for index: \(selectedIndex)")
         
         let windowInfo = options[selectedIndex]
-        // print("  - Selected window: \(windowInfo.name)")
-        // print("  - Window element: \(windowInfo.window != nil ? "exists" : "nil")")
-        // print("  - CGWindowID: \(windowInfo.cgWindowID ?? 0)")
         
-        // Hide thumbnail immediately
-        thumbnailView?.cleanup()
-        thumbnailView = nil
+        // Hide thumbnail without destroying
+        thumbnailView?.hideThumbnail(removePanel: true)
         
         // Add window to history
         WindowHistory.shared.addWindow(windowInfo, for: targetApp)
@@ -1981,23 +1978,20 @@ class WindowChooserView: NSView {
     
     private func updateSelection() {
         // Guard against empty options
-        guard !options.isEmpty else {
-            return
-        }
+        guard !options.isEmpty else { return }
         
         if let selectedButton = buttons.first(where: { $0.tag == selectedIndex }) {
-            // Get the window info for the selected item
             let windowInfo = options[selectedIndex]
             
-            // Update thumbnail based on mode
+            // In history mode, we need to find the correct app for each window
             if isHistoryMode {
-                // For history mode, find the correct app and create thumbnail
                 if let cgWindowID = windowInfo.cgWindowID,
                    let windowList = CGWindowListCopyWindowInfo([.optionIncludingWindow], cgWindowID) as? [[CFString: Any]],
                    let cgWindowInfo = windowList.first,
                    let ownerPID = cgWindowInfo[kCGWindowOwnerPID] as? pid_t,
                    let runningApp = NSRunningApplication(processIdentifier: ownerPID) {
                     
+                    // Create a proper WindowInfo object from the CGWindow info
                     let updatedWindowInfo = WindowInfo(
                         window: windowInfo.window,
                         name: windowInfo.name,
@@ -2005,24 +1999,35 @@ class WindowChooserView: NSView {
                         isAppElement: windowInfo.isAppElement
                     )
                     
-                    thumbnailView = WindowThumbnailView(
-                        targetApp: runningApp,
-                        dockIconCenter: dockIconCenter,
-                        options: [updatedWindowInfo],
-                        windowChooser: self.window?.windowController as? WindowChooserController
-                    )
+                    // Create thumbnail view with the correct app and window info
+                    if thumbnailView == nil {
+                        thumbnailView = WindowThumbnailView(
+                            targetApp: runningApp,
+                            dockIconCenter: dockIconCenter,
+                            options: [updatedWindowInfo],
+                            windowChooser: self.window?.windowController as? WindowChooserController
+                        )
+                    } else {
+                        thumbnailView?.updateTargetApp(runningApp)
+                        thumbnailView?.updateOptions([updatedWindowInfo])
+                    }
                     thumbnailView?.showThumbnail(for: updatedWindowInfo, withTimer: false)
                 } else {
                     // Fallback for AX windows
                     var pid: pid_t = 0
                     if AXUIElementGetPid(windowInfo.window, &pid) == .success,
                        let runningApp = NSRunningApplication(processIdentifier: pid) {
-                        thumbnailView = WindowThumbnailView(
-                            targetApp: runningApp,
-                            dockIconCenter: dockIconCenter,
-                            options: [windowInfo],
-                            windowChooser: self.window?.windowController as? WindowChooserController
-                        )
+                        if thumbnailView == nil {
+                            thumbnailView = WindowThumbnailView(
+                                targetApp: runningApp,
+                                dockIconCenter: dockIconCenter,
+                                options: [windowInfo],
+                                windowChooser: self.window?.windowController as? WindowChooserController
+                            )
+                        } else {
+                            thumbnailView?.updateTargetApp(runningApp)
+                            thumbnailView?.updateOptions([windowInfo])
+                        }
                         thumbnailView?.showThumbnail(for: windowInfo, withTimer: false)
                     }
                 }
@@ -2036,6 +2041,8 @@ class WindowChooserView: NSView {
                             options: [windowInfo],
                             windowChooser: self.window?.windowController as? WindowChooserController
                         )
+                    } else {
+                        thumbnailView?.updateOptions([windowInfo])
                     }
                     thumbnailView?.showThumbnail(for: windowInfo, withTimer: false)
                 }

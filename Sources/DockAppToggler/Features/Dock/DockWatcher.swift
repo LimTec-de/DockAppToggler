@@ -864,6 +864,12 @@ class DockWatcher: NSObject, NSMenuDelegate {
                         await AccessibilityService.shared.listApplicationWindows(for: app)
                     }.value
 
+                    // Force cleanup of existing chooser when switching apps
+                    if app != lastHoveredApp {
+                        windowChooser?.close()
+                        windowChooser = nil
+                    }
+
                     // Update cache atomically
                     lastProcessedApp = app
                     lastProcessedWindows = windows
@@ -924,7 +930,10 @@ class DockWatcher: NSObject, NSMenuDelegate {
                     autoreleasepool {
                         chooser.chooserView?.thumbnailView?.hideThumbnail()
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak chooser] in
+                           
+                            
                             chooser?.window?.orderOut(nil)
+
                         }
                     }
                 }

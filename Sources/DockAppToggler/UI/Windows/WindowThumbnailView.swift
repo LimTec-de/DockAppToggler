@@ -43,10 +43,20 @@ class WindowThumbnailView {
         let timestamp: Date
         let appBundleIdentifier: String
         
-        static let cacheTimeout: TimeInterval = 10 // 2 hours
+        // Increase timeout from 10 seconds to 2 hours to match window cache
+        static let cacheTimeout: TimeInterval = 7200 // 2 hours
         
         var isValid: Bool {
-            Date().timeIntervalSince(timestamp) < Self.cacheTimeout
+            let age = Date().timeIntervalSince(timestamp)
+            let isValid = age < Self.cacheTimeout
+            Logger.debug("""
+                App thumbnail validity check:
+                - Bundle ID: \(appBundleIdentifier)
+                - Age: \(String(format: "%.1f", age))s
+                - Timeout: \(Self.cacheTimeout)s
+                - Valid: \(isValid)
+                """)
+            return isValid
         }
     }
     
@@ -60,9 +70,9 @@ class WindowThumbnailView {
     @MainActor private static var cacheClears: Int = 0
     
     private let dockIconCenter: NSPoint
-    private let targetApp: NSRunningApplication
+    private var targetApp: NSRunningApplication
     private let titleHeight: CGFloat = 24
-    private let options: [WindowInfo]
+    private var options: [WindowInfo]
     
     // Add property to store window chooser reference
     private weak var windowChooser: WindowChooserController?
@@ -387,7 +397,18 @@ class WindowThumbnailView {
         let rect = NSRect(origin: .zero, size: scaledSize)
         NSImage(cgImage: cgImage, size: .zero).draw(in: rect)
         image.unlockFocus()
-        
+
+        // Only cache app thumbnail if this is the frontmost window
+        if let windowInfo = options.first, 
+           windowInfo.cgWindowID == currentWindowID,
+           let bundleId = targetApp.bundleIdentifier {  // Safely unwrap bundleIdentifier
+            Self.appThumbnails[bundleId] = AppThumbnail(
+                image: image,
+                timestamp: Date(),
+                appBundleIdentifier: bundleId  // Use unwrapped value
+            )
+        }
+
         // Cache the scaled image
         Self.cachedThumbnails[cacheKey] = CachedThumbnail(
             image: image,
@@ -407,22 +428,48 @@ class WindowThumbnailView {
         // Store current imageView for fade transition
         let oldImageView = thumbnailView
         
-        createAndShowPanel(with: thumbnail, for: windowInfo, isLoading: isTemporary)
+        // Resize icon to 128x128 if it's temporary/loading state
+        let displayThumbnail: NSImage
+        if isTemporary {
+            let iconSize = NSSize(width: 128, height: 128)
+            let resizedIcon = NSImage(size: iconSize)
+            resizedIcon.lockFocus()
+            thumbnail.draw(in: NSRect(origin: .zero, size: iconSize),
+                          from: NSRect(origin: .zero, size: thumbnail.size),
+                          operation: .sourceOver,
+                          fraction: 1.0)
+            resizedIcon.unlockFocus()
+            displayThumbnail = resizedIcon
+        } else {
+            displayThumbnail = thumbnail
+        }
+        
+        // Create new panel or update existing one without removing old view yet
+        createAndShowPanel(with: displayThumbnail, for: windowInfo, isLoading: isTemporary, keepExistingView: true)
         
         // Perform fade transition if we have both old and new image views
         if let oldView = oldImageView, let newView = thumbnailView {
             // Set initial state
+            oldView.alphaValue = 1.0
             newView.alphaValue = 0.0
+            
+            // Important: Set the correct scaling before animation
+            if isTemporary {
+                newView.imageScaling = .scaleProportionallyUpOrDown
+            } else {
+                newView.imageScaling = .scaleProportionallyDown
+            }
             
             // Animate fade
             NSAnimationContext.runAnimationGroup({ context in
-                context.duration = 0.2 // Short duration for smooth transition
+                context.duration = 0.2
                 context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                context.allowsImplicitAnimation = true
                 
                 oldView.animator().alphaValue = 0.0
                 newView.animator().alphaValue = 1.0
             }, completionHandler: {
-                // Cleanup old view after animation
+                // Only remove old view after animation completes
                 oldView.removeFromSuperview()
             })
         } else {
@@ -435,7 +482,7 @@ class WindowThumbnailView {
             let cacheKey = getCacheKey(for: windowInfo)
             
             Self.cachedThumbnails[cacheKey] = CachedThumbnail(
-                image: thumbnail,
+                image: displayThumbnail,
                 timestamp: Date()
             )
             
@@ -448,7 +495,7 @@ class WindowThumbnailView {
         }
     }
     
-    private func createAndShowPanel(with thumbnail: NSImage, for windowInfo: WindowInfo, isLoading: Bool = false) {
+    private func createAndShowPanel(with thumbnail: NSImage, for windowInfo: WindowInfo, isLoading: Bool = false, keepExistingView: Bool = false) {
         let shadowPadding: CGFloat = 80
         let contentMargin: CGFloat = 20
         let titleTopMargin: CGFloat = 2
@@ -469,19 +516,39 @@ class WindowThumbnailView {
             panel = existingPanel
             containerView = panel.contentView!
             contentContainer = containerView.subviews[0]
-            imageView = contentContainer.subviews[0] as! NSImageView
-            titleLabel = contentContainer.subviews[1] as! NSTextField
+            
+            // Find views by type instead of assuming order
+            imageView = contentContainer.subviews.first { $0 is NSImageView } as! NSImageView
+            titleLabel = contentContainer.subviews.first { $0 is NSTextField } as! NSTextField
 
-            // Calculate correct frame for new image view
-            let imageFrame = NSRect(
-                x: contentMargin,
-                y: contentMargin,
-                width: thumbnailSize.width - (contentMargin * 2),
-                height: thumbnailSize.height - (contentMargin * 2) - titleTopMargin - titleHeight
-            )
+            // Calculate frame based on loading state
+            let frame: NSRect
+            if isLoading {
+                // Center the app icon with fixed size for loading state
+                let iconSize: CGFloat = 128
+                frame = NSRect(
+                    x: (thumbnailSize.width - iconSize) / 2,
+                    y: (thumbnailSize.height - iconSize - titleHeight) / 2,
+                    width: iconSize,
+                    height: iconSize
+                )
+            } else {
+                // Full size frame for normal thumbnails
+                frame = NSRect(
+                    x: contentMargin,
+                    y: contentMargin,
+                    width: thumbnailSize.width - (contentMargin * 2),
+                    height: thumbnailSize.height - (contentMargin * 2) - titleTopMargin - titleHeight
+                )
+            }
 
-            // Instead of using existing imageView's frame, use calculated frame
-            let newImageView = NSImageView(frame: imageFrame)
+            // Only remove old image view if not keeping it for transition
+            if !keepExistingView {
+                contentContainer.subviews.filter { $0 is NSImageView }.forEach { $0.removeFromSuperview() }
+            }
+            
+            // Create new image view with correct frame and scaling
+            let newImageView = NSImageView(frame: frame)
             newImageView.image = thumbnail
             newImageView.imageScaling = isLoading ? .scaleProportionallyUpOrDown : .scaleProportionallyDown
             newImageView.wantsLayer = true
@@ -510,7 +577,7 @@ class WindowThumbnailView {
                         width: thumbnailSize.width,
                         height: thumbnailSize.height + titleHeight
                     )
-                    newImageView.animator().frame = imageFrame
+                    newImageView.animator().frame = frame
                     titleLabel.animator().frame = NSRect(
                         x: contentMargin,
                         y: thumbnailSize.height - titleHeight - titleTopMargin,
@@ -616,45 +683,30 @@ class WindowThumbnailView {
             WindowThumbnailView.activePreviewWindows.insert(panel)
         }
 
-        // Update imageView frame to account for title space
+        // Update imageView frame and scaling based on loading state
         let imageViewFrame = NSRect(
             x: contentMargin,
-            y: contentMargin,  // Keep bottom margin
+            y: contentMargin,
             width: thumbnailSize.width - (contentMargin * 2),
-            height: thumbnailSize.height - (contentMargin * 2) - titleHeight - 8  // Add 8px extra padding below title
+            height: thumbnailSize.height - (contentMargin * 2) - titleTopMargin - titleHeight
         )
-        
+
         if isLoading {
-            // Center the app icon
+            // Center the app icon with fixed size
             let iconSize: CGFloat = 128
             imageView.frame = NSRect(
                 x: (thumbnailSize.width - iconSize) / 2,
-                y: (thumbnailSize.height - iconSize - titleHeight) / 2,  // Center vertically in remaining space
+                y: (thumbnailSize.height - iconSize - titleHeight) / 2,
                 width: iconSize,
                 height: iconSize
             )
             imageView.imageScaling = .scaleProportionallyUpOrDown
             imageView.alphaValue = 0.7
-            
-            // Add spinner below the icon
-            /*let spinner = NSProgressIndicator(frame: NSRect(x: 0, y: 0, width: 32, height: 32))
-            spinner.style = .spinning
-            spinner.startAnimation(nil)
-            spinner.frame = NSRect(
-                x: (thumbnailSize.width - spinner.frame.width) / 2,
-                y: imageView.frame.minY - 48,  // Position below icon with some spacing
-                width: spinner.frame.width,
-                height: spinner.frame.height
-            )
-            contentContainer.addSubview(spinner)*/
         } else {
-            // Normal thumbnail display
+            // Normal thumbnail display - use full available space
             imageView.frame = imageViewFrame
             imageView.imageScaling = .scaleProportionallyDown
             imageView.alphaValue = 1.0
-            
-            // Remove spinner if it exists
-            contentContainer.subviews.filter { $0 is NSProgressIndicator }.forEach { $0.removeFromSuperview() }
         }
 
         // Update title label position to be at the top
@@ -683,95 +735,68 @@ class WindowThumbnailView {
                 return
             }
 
-            
-            
-            // First close any existing thumbnail
-            hideThumbnail()
-            
-            // Then close all other active preview windows
-            WindowThumbnailView.activePreviewWindows.forEach { panel in
-                panel.close()
-            }
-            WindowThumbnailView.activePreviewWindows.removeAll()
-            
             // Skip thumbnails for app elements
             guard !windowInfo.isAppElement else { return }
             
             let cacheKey = getCacheKey(for: windowInfo)
             
-            // Check cache first
+            // Check cache first - even for hidden apps
             if let cached = Self.cachedThumbnails[cacheKey],
                cached.isValid(forHiddenApp: targetApp.isHidden) {
                 displayThumbnail(cached.image, for: windowInfo, setupTimer: withTimer)
                 return
             }
             
-            
-            
-            // Show loading state immediately
-            if let appIcon = targetApp.icon {
-                displayThumbnail(appIcon, for: windowInfo, setupTimer: withTimer)
-            } else {
-                // If no app icon available, skip showing preview until real thumbnail is ready
-                return
-            }
-            isThumbnailLoading = true
+            // Only show loading state and attempt to create new thumbnail if app is not hidden
+            if !targetApp.isHidden {
+                // Show loading state immediately using existing panel
+                if let appIcon = targetApp.icon {
+                    displayThumbnail(appIcon, for: windowInfo, setupTimer: withTimer)
+                }
+                isThumbnailLoading = true
 
-            //print("windowInfo.isCGWindowOnly: \(windowInfo.isCGWindowOnly)")
-            if windowInfo.isCGWindowOnly == true {
-                return
-            }
-            
-            // Get the specific window using CGWindowID if available
-            if let windowID = windowInfo.cgWindowID {
-                // Create thumbnail for the specific window ID
-                let imageData: CGImage? = await Task.detached {
-                    let captureOptions: CGWindowImageOption = [
-                        .boundsIgnoreFraming,
-                        .nominalResolution,
-                        .bestResolution
-                    ]
-                    
-                    return CGWindowListCreateImage(
-                        .null,
-                        .optionIncludingWindow,
-                        windowID,
-                        captureOptions
-                    )
-                }.value
                 
-                if let cgImage = imageData {
-                    let scaleFactor: CGFloat = 0.5
-                    let scaledSize = NSSize(
-                        width: CGFloat(cgImage.width) * scaleFactor,
-                        height: CGFloat(cgImage.height) * scaleFactor
-                    )
-                    
-                    let image = NSImage(size: scaledSize)
-                    image.lockFocus()
-                    NSGraphicsContext.current?.imageInterpolation = .medium
-                    let rect = NSRect(origin: .zero, size: scaledSize)
-                    NSImage(cgImage: cgImage, size: .zero).draw(in: rect)
-                    image.unlockFocus()
-                    
-                    isThumbnailLoading = false
-                    displayThumbnail(image, for: windowInfo, setupTimer: withTimer)
+
+                if windowInfo.isCGWindowOnly == true {
                     return
                 }
-            }
 
-            
-            
-            // Fallback to regular window thumbnail creation if CGWindowID is not available
-            if let thumbnail: NSImage = await createWindowThumbnail(for: windowInfo) {
-                displayThumbnail(thumbnail, for: windowInfo, setupTimer: withTimer)
+                
+                
+                
+                // Fallback to regular window thumbnail creation
+                if let thumbnail: NSImage = await createWindowThumbnail(for: windowInfo) {
+                    displayThumbnail(thumbnail, for: windowInfo, setupTimer: withTimer)
+                } else {
+                    isThumbnailLoading = false
+                }
             } else {
-                isThumbnailLoading = false
-
-                print("fallback complete")
-                //if let appIcon = targetApp.icon {
-                //    displayFallbackPanel(with: appIcon, for: windowInfo)
-                //}
+                // For hidden apps, try to use cached app thumbnail first
+                if let bundleID = targetApp.bundleIdentifier {
+                    Logger.debug("""
+                        Checking app thumbnail cache:
+                        - Bundle ID: \(bundleID)
+                        - Has cached thumbnail: \(Self.appThumbnails[bundleID] != nil)
+                        - Cache valid: \(Self.appThumbnails[bundleID]?.isValid ?? false)
+                        - Cache size: \(Self.appThumbnails.count)
+                        """)
+                    
+                    if let appThumbnail = Self.appThumbnails[bundleID],
+                       appThumbnail.isValid {
+                        Logger.debug("Using cached app thumbnail for hidden app: \(bundleID)")
+                        displayThumbnail(appThumbnail.image, for: windowInfo, setupTimer: withTimer)
+                    } else {
+                        Logger.debug("No valid cached thumbnail found, using app icon")
+                        if let appIcon = targetApp.icon {
+                            displayThumbnail(appIcon, for: windowInfo, setupTimer: withTimer)
+                        }
+                    }
+                } else {
+                    Logger.debug("No bundle ID available for app")
+                    if let appIcon = targetApp.icon {
+                        displayThumbnail(appIcon, for: windowInfo, setupTimer: withTimer)
+                    }
+                }
             }
         }
     }
@@ -913,12 +938,12 @@ class WindowThumbnailView {
         }
     }*/
     
-    func hideThumbnail() {
+    func hideThumbnail(removePanel: Bool = false) {
         print("hideThumbnail")
 
         // Cancel any existing timer
-        autoCloseTimer?.invalidate()
-        autoCloseTimer = nil
+        //autoCloseTimer?.invalidate()
+        //autoCloseTimer = nil
         
         guard let panel = _thumbnailWindow else { return }
         
@@ -937,9 +962,19 @@ class WindowThumbnailView {
             }
         }
         
-        WindowThumbnailView.activePreviewWindows.remove(panel)
+        //WindowThumbnailView.activePreviewWindows.remove(panel)
+
+        WindowThumbnailView.activePreviewWindows.forEach { panel in
+            panel.orderOut(nil)
+        }
+        //WindowThumbnailView.activePreviewWindows.removeAll()
+        // Then close all other active preview windows
+            /*WindowThumbnailView.activePreviewWindows.forEach { panel in
+                panel.close()
+            }
+            WindowThumbnailView.activePreviewWindows.removeAll()*/
         
-        panel.close()
+        //panel.close()
         self._thumbnailWindow = nil
         self.thumbnailView = nil
         currentWindowID = nil
@@ -951,6 +986,15 @@ class WindowThumbnailView {
             - Cache size before: \(Self.cachedThumbnails.count)
             - Hidden app: \(targetApp.isHidden)
             """)
+
+        //WindowThumbnailView.activePreviewWindows.remove(panel)
+
+
+        // Then close all other active preview windows
+        WindowThumbnailView.activePreviewWindows.forEach { panel in
+            panel.close()
+        }
+        WindowThumbnailView.activePreviewWindows.removeAll()
         
         autoCloseTimer?.invalidate()
         autoCloseTimer = nil
@@ -1085,7 +1129,7 @@ class WindowThumbnailView {
     }
     
     // Add new method to show thumbnail without timer
-    @MainActor func showThumbnailWithoutTimer(for windowInfo: WindowInfo) {
+    /*@MainActor func showThumbnailWithoutTimer(for windowInfo: WindowInfo) {
         Task { @MainActor in
             // Check if previews are enabled
             guard Self.previewsEnabled else {
@@ -1133,6 +1177,14 @@ class WindowThumbnailView {
                 displayThumbnail(thumbnail, for: windowInfo)
             }
         }
+    }*/
+    
+    func updateOptions(_ newOptions: [WindowInfo]) {
+        self.options = newOptions
+    }
+    
+    func updateTargetApp(_ newApp: NSRunningApplication) {
+        self.targetApp = newApp
     }
 }
 
