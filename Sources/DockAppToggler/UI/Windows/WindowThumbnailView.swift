@@ -953,9 +953,9 @@ class WindowThumbnailView {
         if previewWindowBlocked {
             Task { @MainActor in
                 // Wait for a short time and check again
-                try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 second delay
+                try? await Task.sleep(nanoseconds: 1_000_000_000) // 0.1 second delay
                 while previewWindowBlocked {
-                    try? await Task.sleep(nanoseconds: 100_000_000)
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
                 }
                 // Once unblocked, proceed with hiding
                 hideThumbnailImpl(removePanel: removePanel)
