@@ -958,7 +958,9 @@ class WindowThumbnailView {
                     try? await Task.sleep(nanoseconds: 100_000_000)
                 }
                 // Once unblocked, proceed with hiding
-                await hideThumbnailImpl(removePanel: removePanel)
+                hideThumbnailImpl(removePanel: removePanel)
+                hideThumbnailImpl(removePanel: removePanel)
+                hideThumbnailImpl(removePanel: removePanel)
             }
             return
         }
