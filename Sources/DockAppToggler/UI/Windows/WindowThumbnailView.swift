@@ -947,6 +947,10 @@ class WindowThumbnailView {
     }*/
     
     func hideThumbnail(removePanel: Bool = false) {
+        if _thumbnailWindow?.isVisible == false {
+            return
+        }
+
         Logger.debug("Hiding thumbnail window")
 
         // If preview window is blocked, wait until unblocked
@@ -1018,6 +1022,12 @@ class WindowThumbnailView {
     }
     
     func cleanup() {
+        // Check if previews are enabled
+        guard Self.previewsEnabled else {
+            Logger.debug("Window previews are disabled")
+            return
+        }
+
         Logger.debug("Starting thumbnail view cleanup")
         
         // Cancel timer first
@@ -1054,6 +1064,8 @@ class WindowThumbnailView {
         Self.appThumbnails = Self.appThumbnails.filter { _, thumbnail in
             thumbnail.isValid
         }
+
+        manageCacheSize()
         
         // Clean up other caches
         Self.windowKeyCache.removeAll()
@@ -1217,6 +1229,11 @@ class WindowThumbnailView {
     
     func updateTargetApp(_ newApp: NSRunningApplication) {
         self.targetApp = newApp
+    }
+    
+    // Add method to update window chooser reference
+    func updateWindowChooser(_ controller: WindowChooserController) {
+        self.windowChooser = controller
     }
     
     // Add a new method to force close all thumbnails but preserve cache

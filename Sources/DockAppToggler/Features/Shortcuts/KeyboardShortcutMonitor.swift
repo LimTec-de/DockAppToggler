@@ -103,8 +103,19 @@ class KeyboardShortcutMonitor {
         
         if wasPressed && !isNowPressed {
             if let chooserView = windowChooserController?.chooserView {
-                chooserView.selectCurrentItem()
-                hideWindowChooser()
+                // Ensure we have a valid selection before proceeding
+                if chooserView.selectedIndex >= 0 && chooserView.selectedIndex < chooserView.options.count {
+                    // First select the current item
+                    chooserView.selectCurrentItem()
+                    
+                    // Then hide the chooser after a short delay to ensure the selection is processed
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        self.hideWindowChooser()
+                    }
+                } else {
+                    // If no valid selection, just hide the chooser
+                    hideWindowChooser()
+                }
             } else {
                 hideWindowChooser()
             }
@@ -146,9 +157,12 @@ class KeyboardShortcutMonitor {
     private func showWindowChooser() {
         currentWindowIndex = 0
         
+        // Get the main screen
+        guard let screen = NSScreen.main else { return }
+        
         // Create backdrop window
         let backdropWindow = NSPanel(
-            contentRect: NSScreen.main?.frame ?? .zero,
+            contentRect: screen.frame,
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
@@ -186,10 +200,17 @@ class KeyboardShortcutMonitor {
         
         self.backdropWindow = backdropWindow
         
+        // Calculate center position for window chooser
+        let windows = WindowHistory.shared.getAllRecentWindows()
+        let chooserPoint = NSPoint(
+            x: screen.frame.midX,
+            y: screen.frame.midY
+        )
+        
         // Create window chooser controller
         windowChooserController = WindowChooserController(
-            at: .zero,
-            windows: WindowHistory.shared.getAllRecentWindows(),
+            at: chooserPoint,
+            windows: windows,
             app: NSRunningApplication.current,
             isHistory: true,
             callback: { [weak self] element, isMinimized in
@@ -229,6 +250,7 @@ class KeyboardShortcutMonitor {
         isTabPressed = false
         
         // Close windows
+        //windowChooserController?.chooserView?.thumbnailView?.hideThumbnail(removePanel: true)
         windowChooserController?.close()
         windowChooserController = nil
         backdropWindow?.close()

@@ -436,6 +436,17 @@ class AccessibilityService {
         var pid: pid_t = 0
         AXUIElementGetPid(window, &pid)
         
+        // Special handling for Finder
+        let isFinderApp = app.bundleIdentifier == "com.apple.finder"
+        
+        // Get window role and subrole for Finder-specific checks
+        var roleValue: AnyObject?
+        var subroleValue: AnyObject?
+        AXUIElementCopyAttributeValue(window, kAXRoleAttribute as CFString, &roleValue)
+        AXUIElementCopyAttributeValue(window, kAXSubroleAttribute as CFString, &subroleValue)
+        let role = roleValue as? String
+        let subrole = subroleValue as? String
+        
         // Check if this is a CGWindow-only application
         var windowsRef: CFTypeRef?
         let hasAXWindows = AXUIElementCopyAttributeValue(window, Constants.Accessibility.windowsKey, &windowsRef) == .success &&
@@ -445,18 +456,59 @@ class AccessibilityService {
         var isSettable = DarwinBoolean(false)
         let settableResult = AXUIElementIsAttributeSettable(window, kAXHiddenAttribute as CFString, &isSettable)
         
+        // For Finder, we need special handling
+        if isFinderApp {
+            // Skip desktop window
+            if role == "AXDesktop" {
+                Logger.debug("Skipping Finder desktop window")
+                return
+            }
+            
+            // For Finder windows, try multiple approaches
+            var success = false
+            
+            // First try setting hidden attribute
+            if settableResult == .success && isSettable.boolValue {
+                success = AXUIElementSetAttributeValue(window, kAXHiddenAttribute as CFString, true as CFTypeRef) == .success
+            }
+            
+            // If that fails, try minimizing
+            if !success {
+                success = AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, true as CFTypeRef) == .success
+            }
+            
+            // If both fail, try hiding the app
+            if !success {
+                app.hide()
+            }
+            
+            return
+        }
+        
+        // For non-Finder apps, use the original logic
         if pid == app.processIdentifier && (!hasAXWindows || settableResult != .success || !isSettable.boolValue) {
-            // If this is a CGWindow-only app or we can't set hidden attribute, hide the app
             Logger.debug("Hiding entire application: \(app.localizedName ?? "Unknown")")
             app.hide()
         } else {
-            // Existing window hiding logic for regular windows
             Logger.debug("Hiding individual window")
             AXUIElementSetAttributeValue(window, kAXHiddenAttribute as CFString, true as CFTypeRef)
         }
     }
     
     func checkWindowVisibility(_ window: AXUIElement) -> Bool {
+        // Get window role and subrole
+        var roleValue: AnyObject?
+        var subroleValue: AnyObject?
+        AXUIElementCopyAttributeValue(window, kAXRoleAttribute as CFString, &roleValue)
+        AXUIElementCopyAttributeValue(window, kAXSubroleAttribute as CFString, &subroleValue)
+        let role = roleValue as? String
+        let subrole = subroleValue as? String
+        
+        // Skip desktop window
+        if role == "AXDesktop" {
+            return false
+        }
+        
         // Check hidden state
         var hiddenValue: AnyObject?
         let hiddenResult = AXUIElementCopyAttributeValue(window, kAXHiddenAttribute as CFString, &hiddenValue)
@@ -467,8 +519,14 @@ class AccessibilityService {
         let minimizedResult = AXUIElementCopyAttributeValue(window, kAXMinimizedAttribute as CFString, &minimizedValue)
         let isMinimized = (minimizedResult == .success && (minimizedValue as? Bool == true))
         
-        // A window is considered visible only if it's neither hidden nor minimized
-        return !isHidden && !isMinimized
+        // Check if window is a standard window
+        let isStandardWindow = role == "AXWindow" && subrole == "AXStandardWindow"
+        
+        // A window is considered visible only if:
+        // 1. It's a standard window
+        // 2. Not hidden
+        // 3. Not minimized
+        return isStandardWindow && !isHidden && !isMinimized
     }
     
     func hideAllWindows(for app: NSRunningApplication) {
@@ -507,6 +565,7 @@ class AccessibilityService {
     func restoreAllWindows(for app: NSRunningApplication) {
         Logger.debug("restoreAllWindows called for: \(app.localizedName ?? "Unknown")")
         let pid = app.processIdentifier
+        let isFinderApp = app.bundleIdentifier == "com.apple.finder"
         
         Task<Void, Never> { @MainActor in
             // Get current windows if no states are stored
@@ -517,7 +576,17 @@ class AccessibilityService {
                 if AXUIElementCopyAttributeValue(axApp, Constants.Accessibility.windowsKey, &windowsRef) == .success,
                    let windows = windowsRef as? [AXUIElement] {
                     var states: [(window: AXUIElement, wasVisible: Bool, order: Int, stackOrder: Int)] = []
+                    
                     for (index, window) in windows.enumerated() {
+                        // Skip desktop window for Finder
+                        if isFinderApp {
+                            var roleValue: AnyObject?
+                            AXUIElementCopyAttributeValue(window, kAXRoleAttribute as CFString, &roleValue)
+                            if roleValue as? String == "AXDesktop" {
+                                continue
+                            }
+                        }
+                        
                         // Only include non-minimized windows
                         var minimizedValue: AnyObject?
                         let isMinimized = AXUIElementCopyAttributeValue(window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success &&
@@ -542,9 +611,31 @@ class AccessibilityService {
             Logger.info("Restoring windows for app: \(app.localizedName ?? "Unknown")")
             Logger.info("Total window states: \(states.count)")
             
+            // For Finder, ensure app is activated first
+            if isFinderApp {
+                app.activate(options: [.activateIgnoringOtherApps])
+                try? await Task.sleep(nanoseconds: UInt64(0.1 * 1_000_000_000))
+            }
+            
             // First pass: unhide all windows (they're already non-minimized)
             for state in states {
-                AXUIElementSetAttributeValue(state.window, kAXHiddenAttribute as CFString, false as CFTypeRef)
+                // For Finder, try multiple approaches
+                if isFinderApp {
+                    // First try unhiding
+                    var success = AXUIElementSetAttributeValue(state.window, kAXHiddenAttribute as CFString, false as CFTypeRef) == .success
+                    
+                    // If that fails, try unminimizing
+                    if !success {
+                        success = AXUIElementSetAttributeValue(state.window, kAXMinimizedAttribute as CFString, false as CFTypeRef) == .success
+                    }
+                    
+                    // If either succeeded, raise the window
+                    if success {
+                        AXUIElementPerformAction(state.window, kAXRaiseAction as CFString)
+                    }
+                } else {
+                    AXUIElementSetAttributeValue(state.window, kAXHiddenAttribute as CFString, false as CFTypeRef)
+                }
                 try? await Task.sleep(nanoseconds: UInt64(0.05 * 1_000_000_000))
             }
             

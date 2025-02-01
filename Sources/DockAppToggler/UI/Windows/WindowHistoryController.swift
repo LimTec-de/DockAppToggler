@@ -49,7 +49,7 @@ class WindowHistoryController: NSWindowController {
         Logger.debug("  - Configuring window")
         configureWindow()
         setupVisualEffect(width: width, height: height)
-        //setupChooserView(windows: windows, app: app)
+        setupChooserView(windows: windows, app: app)
         setupScreenTracking()
         animateAppearance()
         Logger.debug("WindowHistoryController initialization complete")
@@ -101,8 +101,8 @@ class WindowHistoryController: NSWindowController {
         self.visualEffectView = visualEffect
     }
     
-    /*private func setupChooserView(windows: [WindowInfo], app: NSRunningApplication) {
-        /*guard let contentView = window?.contentView else { return }
+    private func setupChooserView(windows: [WindowInfo], app: NSRunningApplication) {
+        guard let contentView = window?.contentView else { return }
         
         let chooserView = WindowChooserView(
             windows: windows,
@@ -114,15 +114,16 @@ class WindowHistoryController: NSWindowController {
         
         contentView.addSubview(chooserView)
         chooserView.frame = contentView.bounds
-        self.historyView = chooserView*/
-    }*/
+        self.historyView = chooserView
+    }
     
     private func setupScreenTracking() {
-        guard let screen = NSScreen.main else { return }
+        // Only track on primary screen where dock is located
+        guard let primaryScreen = NSScreen.screens.first else { return }
         
-        // Create a minimal tracking window
+        // Create a minimal tracking window for primary screen only
         let trackingWindow = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: screen.frame.width, height: 50), // Only track bottom area
+            contentRect: NSRect(x: 0, y: 0, width: primaryScreen.frame.width, height: 50), // Only track bottom area
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
@@ -148,8 +149,10 @@ class WindowHistoryController: NSWindowController {
         view.addTrackingArea(trackingArea)
         self.screenTrackingArea = trackingArea
         
-        // Position at bottom of screen
-        trackingWindow.setFrameOrigin(NSPoint(x: 0, y: 0))
+        // Position at bottom of primary screen
+        let originX = primaryScreen.frame.origin.x
+        let originY = primaryScreen.frame.origin.y
+        trackingWindow.setFrameOrigin(NSPoint(x: originX, y: originY))
         trackingWindow.orderFront(nil)
         self.trackingWindow = trackingWindow
     }

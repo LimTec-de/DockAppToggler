@@ -5,6 +5,15 @@
 /// Constants used throughout the DockAppToggler application
 enum Constants {
 
+    /// Event tap related constants
+    enum EventTap {
+        static let eventMask: CGEventMask = (1 << CGEventType.mouseMoved.rawValue) |
+                                          (1 << CGEventType.leftMouseDown.rawValue) |
+                                          (1 << CGEventType.leftMouseUp.rawValue) |
+                                          (1 << CGEventType.rightMouseDown.rawValue) |
+                                          (1 << CGEventType.rightMouseUp.rawValue)
+    }
+
     /// UI-related constants for layout and dimensions
     enum UI {
         // Window dimensions

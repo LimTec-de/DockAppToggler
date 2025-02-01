@@ -31,7 +31,8 @@ class WindowChooserView: NSView {
     private var minimizeButton: NSButton?
     private var maximizeButton: NSButton?
     
-    private var selectedIndex: Int = 0
+    // Change from private to internal
+    var selectedIndex: Int = 0
     
     // Add near other properties
     weak var delegate: WindowChooserViewDelegate?
@@ -245,7 +246,7 @@ class WindowChooserView: NSView {
             }
             
             // Only add minimize button in normal mode, but always add window control buttons for regular windows
-            if !windowInfo.isAppElement && windowInfo.cgWindowID == nil {
+            if !windowInfo.isAppElement {  // Remove the cgWindowID check
                 // Add minimize button only in normal mode
                 if !isHistoryMode {
                     let hideButton = createHideButton(for: windowInfo, at: index)
@@ -325,12 +326,12 @@ class WindowChooserView: NSView {
         let buttonWidth: CGFloat
         let buttonX: CGFloat
         
-        if windowInfo.isAppElement || windowInfo.cgWindowID != nil {
-            // For app elements and CGWindow entries
+        if windowInfo.isAppElement {
+            // For app elements only
             buttonWidth = Constants.UI.windowWidth - Constants.UI.windowPadding * 2
             buttonX = Constants.UI.windowPadding
         } else {
-            // For regular windows, keep existing layout with space for controls
+            // For all regular windows (both normal and history mode)
             buttonWidth = Constants.UI.windowWidth - Constants.UI.windowPadding * 2 - 44 - 
                 (Constants.UI.leftSideButtonWidth + Constants.UI.centerButtonWidth + Constants.UI.rightSideButtonWidth + Constants.UI.sideButtonsSpacing * 2) - 8
             buttonX = 44  // Move right to make room for close button
@@ -395,7 +396,7 @@ class WindowChooserView: NSView {
     
     private func configureButton(_ button: NSButton, title: String, tag: Int) {
         // Truncate title if too long
-        let maxTitleLength = 60
+        let maxTitleLength = isHistoryMode ? 45 : 60  // Shorter titles in history mode
         let truncatedTitle = title.count > maxTitleLength ? 
             title.prefix(maxTitleLength) + "..." : 
             title
@@ -403,8 +404,8 @@ class WindowChooserView: NSView {
         let windowInfo = options[tag]
         
         // Different alignment and padding based on window type and mode
-        if windowInfo.isAppElement || windowInfo.cgWindowID != nil {
-            // Center align for app elements and CGWindows
+        if windowInfo.isAppElement {
+            // Center align for app elements
             button.alignment = .center
             button.title = String(truncatedTitle)
         } else {
@@ -415,8 +416,8 @@ class WindowChooserView: NSView {
             let baseTitle = String(truncatedTitle)
             
             if isHistoryMode {
-                // In history mode: space for app icon
-                let leftPadding = "      "  // 6 spaces for app icon
+                // In history mode: more space for app icon
+                let leftPadding = "            "  // 12 spaces for app icon and padding
                 button.title = leftPadding + baseTitle
             } else {
                 // In normal mode: space for minimize button
@@ -700,13 +701,40 @@ class WindowChooserView: NSView {
         
         // Hide thumbnail immediately and force close
         thumbnailView?.hideThumbnail(removePanel: true)
-        Task { @MainActor in
-            WindowThumbnailView.forceCloseAllThumbnails()
-        }
         
         let windowInfo = options[sender.tag]
         Logger.debug("Selected window info - Name: \(windowInfo.name), ID: \(windowInfo.cgWindowID ?? 0)")
         
+        // In history mode, we need special handling
+        if isHistoryMode {
+            if let cgWindowID = windowInfo.cgWindowID,
+               let windowList = CGWindowListCopyWindowInfo([.optionIncludingWindow], cgWindowID) as? [[CFString: Any]],
+               let cgWindowInfo = windowList.first,
+               let ownerPID = cgWindowInfo[kCGWindowOwnerPID] as? pid_t,
+               let app = NSRunningApplication(processIdentifier: ownerPID) {
+                
+                // Get fresh window list for the app
+                let windows = AccessibilityService.shared.listApplicationWindows(for: app)
+                
+                // Try to find matching window by ID or name
+                if let matchingWindow = windows.first(where: { $0.cgWindowID == cgWindowID }) ?? 
+                                      windows.first(where: { $0.name == windowInfo.name }) {
+                    // Use AccessibilityService to raise the window properly
+                    AccessibilityService.shared.raiseWindow(windowInfo: matchingWindow, for: app)
+                } else {
+                    // Fallback: just activate the app if window not found
+                    AccessibilityService.shared.activateApp(app)
+                }
+                
+                // Close the history window chooser
+                if let windowController = self.window?.windowController as? WindowChooserController {
+                    windowController.close()
+                }
+                return
+            }
+        }
+        
+        // Rest of the existing code for non-history mode...
         // Add window to history when clicked
         WindowHistory.shared.addWindow(windowInfo, for: targetApp)
         
@@ -742,6 +770,19 @@ class WindowChooserView: NSView {
         let isDoubleClick = (currentTime - lastClickTime) < doubleClickInterval
         lastClickTime = currentTime
         
+        // Define handleDoubleClick closure
+        let handleDoubleClick = {
+            if isDoubleClick {
+                // Double click: minimize all other windows
+                for (index, otherWindow) in self.options.enumerated() {
+                    if index != sender.tag && !otherWindow.isAppElement {
+                        // Minimize other windows
+                        AXUIElementSetAttributeValue(otherWindow.window, kAXMinimizedAttribute as CFString, true as CFTypeRef)
+                    }
+                }
+            }
+        }
+
         // Get window controller reference
         let windowController = self.window?.windowController as? WindowChooserController
         
@@ -761,92 +802,53 @@ class WindowChooserView: NSView {
             targetApp.activate(options: [.activateIgnoringOtherApps])
             
             // Then unminimize if needed and raise the window
-            var isMinimized = false
             var minimizedValue: AnyObject?
-            if AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success,
-               let minimizedState = minimizedValue as? Bool {
-                isMinimized = minimizedState
-            }
-            
-            // Handle window raising and minimizing other windows
-            let handleDoubleClick = {
-                if isDoubleClick {
-                    // Double click: minimize all other windows
-                    for (index, otherWindow) in self.options.enumerated() {
-                        if index != sender.tag && !otherWindow.isAppElement {
-                            // Minimize other windows
-                            AXUIElementSetAttributeValue(otherWindow.window, kAXMinimizedAttribute as CFString, true as CFTypeRef)
-                        }
-                    }
-                    
-                    // Close window chooser after minimizing windows in history mode
-                    if self.isHistoryMode {
-                        windowController?.close()
-                        return
-                    }
-                    
-                    // Update menu after minimizing windows
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-                        guard let self = self else { return }
-                        let updatedWindows = AccessibilityService.shared.listApplicationWindows(for: self.targetApp)
-                        windowController?.updateWindows(updatedWindows, for: self.targetApp, at: self.dockIconCenter)
-                    }
-                }
-            }
+            let isMinimized = AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success &&
+                             (minimizedValue as? Bool == true)
             
             if isMinimized {
-                // For minimized windows, handle unminimize
+                // Unminimize and raise
                 AXUIElementSetAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
+                AXUIElementPerformAction(windowInfo.window, kAXRaiseAction as CFString)
                 
-                // Wait for unminimize animation, then raise and handle double-click
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                    // Set focus attributes
-                    AXUIElementSetAttributeValue(windowInfo.window, kAXMainAttribute as CFString, true as CFTypeRef)
-                    AXUIElementSetAttributeValue(windowInfo.window, kAXFocusedAttribute as CFString, true as CFTypeRef)
+                // Update minimize button state
+                if let hideButton = hideButtons.first(where: { $0.tag == sender.tag }) as? MinimizeButton {
+                    hideButton.updateMinimizedState(false)
+                }
+                
+                // Update topmost window
+                self.topmostWindow = windowInfo.window
+                self.updateButtonStates()
+                
+                // Ensure window gets focus
+                AXUIElementSetAttributeValue(windowInfo.window, kAXMainAttribute as CFString, true as CFTypeRef)
+                AXUIElementSetAttributeValue(windowInfo.window, kAXFocusedAttribute as CFString, true as CFTypeRef)
+                
+                self.callback?(windowInfo.window, false)
+                
+                // Close window chooser in history mode
+                if self.isHistoryMode {
+                    windowController?.close()
+                    return
+                }
+                
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                    handleDoubleClick()
                     
-                    // Update topmost window
-                    self.topmostWindow = windowInfo.window
-                    self.updateButtonStates()
-                    
-                    // Update minimize button state
-                    if let hideButton = self.hideButtons.first(where: { $0.tag == sender.tag }) as? MinimizeButton {
-                        hideButton.updateMinimizedState(false)
-                    }
-                    
-                    self.callback?(windowInfo.window, false)
-                    
-                    // Close window chooser in history mode
-                    if self.isHistoryMode {
-                        windowController?.close()
-                        return
-                    }
-                    
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                        handleDoubleClick()
-                        
-                        // Update menu after a short delay
-                        if let self = self {
-                            let updatedWindows = AccessibilityService.shared.listApplicationWindows(for: self.targetApp)
-                            self.updateWindows(updatedWindows)
-                            
-                            // Refresh menu after all operations
-                            if let windowController = self.window?.windowController as? WindowChooserController {
-                                windowController.refreshMenu()
-                            }
+                    // Update menu after a short delay
+                    if let self = self {
+                        if let windowController = self.window?.windowController as? WindowChooserController {
+                            windowController.refreshMenu()
                         }
                     }
                 }
             } else {
-                // Handle non-minimized windows
+                // Just raise the window
+                AXUIElementPerformAction(windowInfo.window, kAXRaiseAction as CFString)
+                
+                // Ensure window gets focus
                 AXUIElementSetAttributeValue(windowInfo.window, kAXMainAttribute as CFString, true as CFTypeRef)
                 AXUIElementSetAttributeValue(windowInfo.window, kAXFocusedAttribute as CFString, true as CFTypeRef)
-                
-                topmostWindow = windowInfo.window
-                updateButtonStates()
-                
-                if let hideButton = hideButtons.first(where: { $0.tag == sender.tag }) as? MinimizeButton {
-                    hideButton.updateMinimizedState(false)
-                }
                 
                 callback?(windowInfo.window, false)
                 
@@ -1030,14 +1032,20 @@ class WindowChooserView: NSView {
     deinit {
         print("WindowChooserView deinit")
         
+        
+
         // Capture values before async operation
         let thumbnailViewToClean = thumbnailView
         let buttonsToClean = buttons
         let hideButtonsToClean = hideButtons
         let closeButtonsToClean = closeButtons
+
+        Task { @MainActor in
+            thumbnailViewToClean?.hideThumbnail(removePanel: true)
+        }
         
         // Force close all thumbnails
-        Task { @MainActor in
+        /*Task { @MainActor in
             WindowThumbnailView.forceCloseAllThumbnails()
             
             // Clean up thumbnail view
@@ -1050,7 +1058,7 @@ class WindowChooserView: NSView {
                     button.removeTrackingArea(area)
                 }
             }
-        }
+        }*/
         
         // Clear reference
         thumbnailView = nil
@@ -1807,7 +1815,7 @@ class WindowChooserView: NSView {
 
     func cleanup() {
         // Cleanup thumbnail view without destroying it
-        thumbnailView?.hideThumbnail()
+        //thumbnailView?.hideThumbnail()
         
         // Remove tracking areas and clear event monitors
         buttons.forEach { button in
@@ -1909,6 +1917,14 @@ class WindowChooserView: NSView {
         // Ensure view is layer-backed
         self.wantsLayer = true
         self.layer?.backgroundColor = NSColor.clear.cgColor
+        
+        // Update thumbnail view's window chooser reference
+        if let controller = window?.windowController as? WindowChooserController {
+            Task { @MainActor in
+                thumbnailView?.updateWindowChooser(controller)
+                Logger.debug("Updated thumbnail view's window chooser from viewDidMoveToWindow")
+            }
+        }
     }
 
     func selectNextItem() {
@@ -1960,22 +1976,40 @@ class WindowChooserView: NSView {
         var pid: pid_t = 0
         if AXUIElementGetPid(windowInfo.window, &pid) == .success,
            let app = NSRunningApplication(processIdentifier: pid) {
-            // print("  - Found app: \(app.localizedName ?? "unknown")")
             
             // First activate the app
             app.activate(options: .activateIgnoringOtherApps)
             
-            // Then raise the window
-            // print("  - Raising window")
-            AXUIElementPerformAction(windowInfo.window, "AXRaise" as CFString)
+            // Unminimize if needed
+            var minimizedValue: AnyObject?
+            let isMinimized = AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success &&
+                             (minimizedValue as? Bool == true)
             
-            // Call the callback after activation
-            callback?(windowInfo.window, false)
+            if isMinimized {
+                AXUIElementSetAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
+            }
+            
+            // Ensure window gets focus and is frontmost
+            AXUIElementSetAttributeValue(windowInfo.window, kAXMainAttribute as CFString, true as CFTypeRef)
+            AXUIElementSetAttributeValue(windowInfo.window, kAXFocusedAttribute as CFString, true as CFTypeRef)
+            AXUIElementPerformAction(windowInfo.window, kAXRaiseAction as CFString)
+            
+            // Additional raise action after a tiny delay to ensure it takes effect
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                AXUIElementPerformAction(windowInfo.window, kAXRaiseAction as CFString)
+                self.callback?(windowInfo.window, false)
+            }
         } else {
-            // print("  - Falling back to CGWindow activation")
             // Fallback to CGWindow-based activation
             targetApp.activate(options: .activateIgnoringOtherApps)
-            callback?(windowInfo.window, false)
+            
+            // Try to raise window using accessibility API even for CGWindow
+            AXUIElementPerformAction(windowInfo.window, kAXRaiseAction as CFString)
+            
+            // Call callback after a tiny delay
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                self.callback?(windowInfo.window, false)
+            }
         }
         
         // Update topmost window and refresh menu
