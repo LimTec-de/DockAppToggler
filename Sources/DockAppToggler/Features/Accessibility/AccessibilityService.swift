@@ -151,7 +151,6 @@ class AccessibilityService {
                     return nil
                 }
                 
-                //Logger.debug("Adding window '\(name)' (\(rect.width) x \(rect.height))")
                 cgWindows.append((
                     id: windowID,
                     name: name,
@@ -162,10 +161,7 @@ class AccessibilityService {
             return windowID
         })
         
-        //Logger.debug("Found \(cgWindowIDs.count) CGWindows for \(cleanAppName):")
-        /*for window in cgWindows {
-            Logger.debug("  - ID: \(window.id), Name: \(window.name ?? "unnamed"), Bounds: \(window.bounds)")
-        }*/
+        //Logger.debug("Found \(cgWindowIDs.count) CGWindows for \(cleanAppName)")
         
         // Get windows using Accessibility API
         var windowsRef: CFTypeRef?
@@ -297,10 +293,11 @@ class AccessibilityService {
             windows.append(appWindowInfo)
         }
         
-        Logger.debug("Found \(windows.count) total windows for \(cleanAppName)")
+        // Sort windows and log the final count
+        let sortedWindows = windows.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        Logger.debug("Found \(sortedWindows.count) valid windows for \(cleanAppName)")
         
-        // Before returning windows array, sort alphabetically by name
-        return windows.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        return sortedWindows
     }
 
     private func createWindowInfo(for window: AXUIElement, app: NSRunningApplication, index: Int) -> WindowInfo? {

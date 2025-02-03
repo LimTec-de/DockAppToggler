@@ -57,7 +57,9 @@ class WindowChooserView: NSView {
     }
     
     // Change from instance method to static method
-    private static func sortWindows(_ windows: [WindowInfo], app: NSRunningApplication, isHistory: Bool = false) -> [WindowInfo] {
+    static func sortWindows(_ windows: [WindowInfo], app: NSRunningApplication, isHistory: Bool = false) -> [WindowInfo] {
+        Logger.debug("Filtering windows - Initial count: \(windows.count)")
+        
         // First filter out small windows
         let filteredWindows = windows.filter { windowInfo in
             // Always include app elements
@@ -78,7 +80,11 @@ class WindowChooserView: NSView {
                     AXValueGetValue(sizeRef, .cgSize, &size)
                     
                     // Filter out windows smaller than 200x200
-                    return size.width >= 200 && size.height >= 200
+                    let isValidSize = size.width >= 200 && size.height >= 200
+                    if !isValidSize {
+                        Logger.debug("Filtering out window due to size: \(windowInfo.name) (\(size.width) x \(size.height))")
+                    }
+                    return isValidSize
                 }
             }
             
@@ -91,11 +97,18 @@ class WindowChooserView: NSView {
                 let height = bounds["Height"] ?? 0
                 
                 // Filter out windows smaller than 200x200
-                return width >= 200 && height >= 200
+                let isValidSize = width >= 200 && height >= 200
+                if !isValidSize {
+                    let windowName = windowInfo[kCGWindowName as CFString] as? String ?? "Unknown"
+                    Logger.debug("Filtering out CGWindow due to size: \(windowName) (\(width) x \(height))")
+                }
+                return isValidSize
             }
             
             return false
         }
+        
+        Logger.debug("Windows after size filtering: \(filteredWindows.count)")
         
         // Get recent windows for this app
         let recentWindows = WindowHistory.shared.getRecentWindows(for: app.bundleIdentifier ?? "")
@@ -129,8 +142,12 @@ class WindowChooserView: NSView {
         // Store history mode
         self.isHistoryMode = isHistory
         
+        Logger.debug("WindowChooserView init - Initial windows count: \(windows.count)")
+        
         // Use static method to filter and sort windows, passing the app and history mode
         self.options = WindowChooserView.sortWindows(windows, app: app, isHistory: isHistory)
+        Logger.debug("WindowChooserView init - After filtering count: \(self.options.count)")
+        
         self.callback = callback
         self.targetApp = app
         self.dockIconCenter = iconCenter
@@ -147,12 +164,18 @@ class WindowChooserView: NSView {
             self.topmostWindow = frontmost.window
         }
         
-        // Use filtered options count for height calculation
+        // Calculate height based on filtered options count
+        let validWindowCount = self.options.count
+        let calculatedHeight = Constants.UI.windowHeight(for: validWindowCount)
+        Logger.debug("Height calculation details:")
+        Logger.debug("  - Valid window count: \(validWindowCount)")
+        Logger.debug("  - Calculated height: \(calculatedHeight)")
+        
         super.init(frame: NSRect(
             x: 0, 
             y: 0, 
             width: Constants.UI.windowWidth, 
-            height: Constants.UI.windowHeight(for: self.options.count)
+            height: calculatedHeight
         ))
         
         // Set title based on mode immediately

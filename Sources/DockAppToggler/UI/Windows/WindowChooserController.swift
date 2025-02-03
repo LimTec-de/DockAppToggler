@@ -47,28 +47,31 @@ class WindowChooserController: NSWindowController {
         self.menuTitle = app.localizedName ?? "Unknown"
         self.isHistoryMenu = isHistory
         
+        // Filter and sort windows before creating the view
+        let filteredWindows = WindowChooserView.sortWindows(windows, app: app, isHistory: isHistory)
+        
         super.init(window: nil)
         
         let contentRect = NSRect(
             x: 0,
             y: 0,
             width: Constants.UI.windowWidth,
-            height: Constants.UI.windowHeight(for: windows.count)
+            height: Constants.UI.windowHeight(for: filteredWindows.count)
         )
         
         // Create window with proper type specifications
         let window = NSWindow(
             contentRect: contentRect,
-            styleMask: NSWindow.StyleMask.borderless,
-            backing: NSWindow.BackingStoreType.buffered,
+            styleMask: .borderless,
+            backing: .buffered,
             defer: false
         )
         
         // Configure window
-        window.backgroundColor = .clear
+        window.backgroundColor = NSColor.clear
         window.isOpaque = false
         window.hasShadow = true
-        window.level = .popUpMenu
+        window.level = NSWindow.Level.popUpMenu
         window.appearance = NSApp.effectiveAppearance
         
         self.window = window
@@ -78,7 +81,7 @@ class WindowChooserController: NSWindowController {
         
         // Create and configure the chooser view
         let chooserView = WindowChooserView(
-            windows: windows,
+            windows: filteredWindows,  // Use filtered windows
             appName: app.localizedName ?? "Unknown",
             app: app,
             iconCenter: point,
@@ -278,37 +281,32 @@ class WindowChooserController: NSWindowController {
     }
 
     func updateWindows(_ windows: [WindowInfo], for app: NSRunningApplication, at point: CGPoint) {
-
         // Update app reference
         self.app = app
         
-        // Create new chooser view first to get filtered window count
-        let newView = WindowChooserView(
-            windows: windows,
-            appName: app.localizedName ?? "Unknown",
-            app: app,
-            iconCenter: point,
-            isHistory: false,  // Explicitly set to false for normal mode
-            callback: callback
-        )
-        
-        // Use filtered window count for height calculation
-        let newHeight = Constants.UI.windowHeight(for: newView.options.count)
-        updateWindowSize(to: newHeight)
-        
-        // Replace old view with new one
-        if let oldView = chooserView {
-            oldView.removeFromSuperview()
+        // Update existing chooser view if it exists
+        if let existingView = chooserView {
+            existingView.updateWindows(windows, forceNormalMode: true)
+        } else {
+            // Only create new view if one doesn't exist
+            let newView = WindowChooserView(
+                windows: windows,
+                appName: app.localizedName ?? "Unknown",
+                app: app,
+                iconCenter: point,
+                isHistory: false,  // Explicitly set to false for normal mode
+                callback: callback
+            )
+            
+            // Add and position new view immediately
+            if let containerView = window?.contentView?.subviews.first {
+                containerView.addSubview(newView)
+                newView.frame = containerView.bounds
+            }
+            
+            // Update reference
+            chooserView = newView
         }
-        
-        // Add and position new view immediately
-        if let containerView = window?.contentView?.subviews.first {
-            containerView.addSubview(newView)
-            newView.frame = containerView.bounds
-        }
-        
-        // Update reference
-        chooserView = newView
         
         // Update position
         updatePosition(point)

@@ -49,21 +49,31 @@ enum Constants {
         
         // Calculate total height needed for a given number of buttons
         static func windowHeight(for windowCount: Int) -> CGFloat {
+            Logger.debug("Window height calculation:")
+            Logger.debug("  - Window count: \(windowCount)")
+            
             // Base height includes title area
             let baseHeight = titleHeight + titlePadding
+            Logger.debug("  - Base height (title + padding): \(baseHeight)")
             
             // Calculate button area height
             let buttonsHeight = CGFloat(windowCount) * buttonSpacing
+            Logger.debug("  - Buttons height (\(windowCount) * \(buttonSpacing)): \(buttonsHeight)")
             
             // Add padding - use less padding for single window
             let totalPadding = windowCount <= 1 ? verticalPadding : (verticalPadding * 2)
+            Logger.debug("  - Total padding: \(totalPadding)")
             
             // Calculate total height
             let totalHeight = baseHeight + buttonsHeight + totalPadding
+            Logger.debug("  - Total height before min check: \(totalHeight)")
             
             // Ensure minimum height but keep it compact for single entries
             let minHeight: CGFloat = windowCount <= 1 ? 70 : 100
-            return max(totalHeight, minHeight)
+            let finalHeight = max(totalHeight, minHeight)
+            Logger.debug("  - Final height (after min height \(minHeight)): \(finalHeight)")
+            
+            return finalHeight
         }
         
         // Theme-related constants
