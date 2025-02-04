@@ -610,6 +610,10 @@ class DockWatcher: NSObject, NSMenuDelegate {
                                         }
                                     }
                                 }
+                                if type == .rightMouseDown {
+                                    watcher.windowChooser?.chooserView?.thumbnailView?.hideThumbnail()
+                                    watcher.windowChooser?.close()
+                                }
                             }
                         case .leftMouseUp:
                             if let app = watcher.clickedApp {
