@@ -1712,16 +1712,20 @@ class WindowChooserView: NSView {
                 // For CGWindow entries, use CGWindow-based closing
                 AccessibilityService.shared.closeWindow(windowInfo: windowInfo, for: targetApp)
                 
-                // Update after a short delay
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                // Close window chooser after a delay
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
                     guard let self = self else { return }
-                    let updatedWindows = AccessibilityService.shared.listApplicationWindows(for: self.targetApp)
+                    windowController?.close()
                     
-                    if !updatedWindows.isEmpty {
-                        // Refresh the menu with updated windows
-                        windowController?.updateWindows(updatedWindows, for: self.targetApp, at: self.dockIconCenter)
-                    } else {
-                        windowController?.close()
+                    // Reopen window chooser after another short delay
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                        if let (_, _, iconCenter) = DockService.shared.findAppUnderCursor(at: NSEvent.mouseLocation) {
+                            let updatedWindows = AccessibilityService.shared.listApplicationWindows(for: self.targetApp)
+                            if !updatedWindows.isEmpty {
+                                windowController?.updateWindows(updatedWindows, for: self.targetApp, at: iconCenter)
+                                windowController?.window?.makeKeyAndOrderFront(nil)
+                            }
+                        }
                     }
                 }
                 
@@ -1735,16 +1739,20 @@ class WindowChooserView: NSView {
                     let closeButton = closeButtonRef as! AXUIElement
                     AXUIElementPerformAction(closeButton, kAXPressAction as CFString)
                     
-                    // Update after window closes
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                    // Close window chooser after a delay
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
                         guard let self = self else { return }
-                        let updatedWindows = AccessibilityService.shared.listApplicationWindows(for: self.targetApp)
+                        windowController?.close()
                         
-                        if !updatedWindows.isEmpty {
-                            // Refresh the menu with updated windows
-                            windowController?.updateWindows(updatedWindows, for: self.targetApp, at: self.dockIconCenter)
-                        } else {
-                            windowController?.close()
+                        // Reopen window chooser after another short delay
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                            if let (_, _, iconCenter) = DockService.shared.findAppUnderCursor(at: NSEvent.mouseLocation) {
+                                let updatedWindows = AccessibilityService.shared.listApplicationWindows(for: self.targetApp)
+                                if !updatedWindows.isEmpty {
+                                    windowController?.updateWindows(updatedWindows, for: self.targetApp, at: iconCenter)
+                                    windowController?.window?.makeKeyAndOrderFront(nil)
+                                }
+                            }
                         }
                     }
                 }
