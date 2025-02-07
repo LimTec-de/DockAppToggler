@@ -125,7 +125,7 @@ class WindowChooserController: NSWindowController {
         window.backgroundColor = .clear
         window.isOpaque = false
         window.hasShadow = true
-        window.level = NSWindow.Level.floating + 2  // Match the higher level
+        window.level = NSWindow.Level.popUpMenu + 2  // Match the higher level
         window.appearance = NSApp.effectiveAppearance
         
         // Disable mouse moved events by default
@@ -172,7 +172,7 @@ class WindowChooserController: NSWindowController {
     private func animateAppearance() {
         guard let window = window else { return }
         window.alphaValue = 0
-        window.level = NSWindow.Level.floating + 2
+        window.level = NSWindow.Level.popUpMenu + 2
         window.orderFront(nil)
         
         NSAnimationContext.runAnimationGroup { context in
@@ -289,7 +289,7 @@ class WindowChooserController: NSWindowController {
         self.app = app
         
         // Ensure window level and ordering
-        window?.level = NSWindow.Level.floating + 2
+        window?.level = NSWindow.Level.popUpMenu + 2
         window?.orderFront(nil)
         
         // Update existing chooser view if it exists
@@ -398,7 +398,7 @@ class WindowChooserController: NSWindowController {
         newWindow.backgroundColor = .clear
         newWindow.isOpaque = false
         newWindow.hasShadow = true
-        newWindow.level = NSWindow.Level.floating + 2
+        newWindow.level = NSWindow.Level.popUpMenu + 2
         newWindow.appearance = NSApp.effectiveAppearance
         newWindow.alphaValue = 0
         
@@ -596,7 +596,7 @@ class WindowChooserController: NSWindowController {
         
         // Configure window
         window?.isMovableByWindowBackground = true
-        window?.level = NSWindow.Level.floating + 2  // Match the higher level
+        window?.level = NSWindow.Level.popUpMenu + 2  // Match the higher level
         window?.backgroundColor = .clear
         
         // Set style mask to allow becoming key window
