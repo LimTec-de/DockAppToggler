@@ -100,7 +100,7 @@ class WindowChooserController: NSWindowController {
         
         // Set up tracking area and animate
         setupTrackingArea()
-        animateAppearance()
+        //animateAppearance()
         
         // Position window for history menu
         if isHistory {
