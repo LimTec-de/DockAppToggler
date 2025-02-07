@@ -70,9 +70,10 @@ class WindowChooserController: NSWindowController {
         // Configure window
         window.backgroundColor = NSColor.clear
         window.isOpaque = false
-        window.hasShadow = true
-        window.level = NSWindow.Level.popUpMenu
+        window.hasShadow = false
+        window.level = NSWindow.Level.popUpMenu + 2  // Higher than floating
         window.appearance = NSApp.effectiveAppearance
+       
         
         self.window = window
         
@@ -124,7 +125,7 @@ class WindowChooserController: NSWindowController {
         window.backgroundColor = .clear
         window.isOpaque = false
         window.hasShadow = true
-        window.level = .popUpMenu
+        window.level = NSWindow.Level.floating + 2  // Match the higher level
         window.appearance = NSApp.effectiveAppearance
         
         // Disable mouse moved events by default
@@ -171,6 +172,9 @@ class WindowChooserController: NSWindowController {
     private func animateAppearance() {
         guard let window = window else { return }
         window.alphaValue = 0
+        window.level = NSWindow.Level.floating + 2
+        window.orderFront(nil)
+        
         NSAnimationContext.runAnimationGroup { context in
             context.duration = Constants.UI.animationDuration
             window.animator().alphaValue = 1
@@ -284,6 +288,10 @@ class WindowChooserController: NSWindowController {
         // Update app reference
         self.app = app
         
+        // Ensure window level and ordering
+        window?.level = NSWindow.Level.floating + 2
+        window?.orderFront(nil)
+        
         // Update existing chooser view if it exists
         if let existingView = chooserView {
             existingView.updateWindows(windows, forceNormalMode: true)
@@ -314,6 +322,13 @@ class WindowChooserController: NSWindowController {
 
     func updatePosition(_ iconCenter: CGPoint) {
         guard let window = window else { return }
+        
+        // Ensure window stays above previews
+        window.level = NSWindow.Level.popUpMenu + 2
+        window.collectionBehavior = [.transient, .ignoresCycle, .moveToActiveSpace]
+        window.hidesOnDeactivate = false
+        window.canHide = false
+        window.orderFront(nil)
         
         // Calculate new window position
         let menuWidth = window.frame.width
@@ -383,9 +398,12 @@ class WindowChooserController: NSWindowController {
         newWindow.backgroundColor = .clear
         newWindow.isOpaque = false
         newWindow.hasShadow = true
-        newWindow.level = .popUpMenu
+        newWindow.level = NSWindow.Level.floating + 2
         newWindow.appearance = NSApp.effectiveAppearance
         newWindow.alphaValue = 0
+        
+        // Ensure window stays above others
+        newWindow.collectionBehavior = [.transient, .ignoresCycle]
         
         // Create container view for shadow
         let containerView = NSView(frame: newWindow.contentView!.bounds)
@@ -554,6 +572,13 @@ class WindowChooserController: NSWindowController {
         }
         
         guard let window = self.window else { return }
+        
+        // Ensure proper window level and behavior
+        window.level = NSWindow.Level.popUpMenu + 2
+        window.collectionBehavior = [.transient, .ignoresCycle, .moveToActiveSpace]
+        window.hidesOnDeactivate = false
+        window.canHide = false
+        
         // Show the window chooser UI
         let screen = NSScreen.main ?? NSScreen.screens[0]
         let frame = NSRect(
@@ -571,7 +596,7 @@ class WindowChooserController: NSWindowController {
         
         // Configure window
         window?.isMovableByWindowBackground = true
-        window?.level = .floating
+        window?.level = NSWindow.Level.floating + 2  // Match the higher level
         window?.backgroundColor = .clear
         
         // Set style mask to allow becoming key window

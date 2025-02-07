@@ -1125,13 +1125,14 @@ class WindowThumbnailView {
     
     private func configurePanel(_ panel: NSPanel) {
         // Configure panel
-        panel.level = .popUpMenu // Higher than .modalPanel
+        panel.level = NSWindow.Level.floating  // Lower than window chooser
         panel.backgroundColor = NSColor.clear
         panel.isOpaque = false
         panel.hasShadow = true
         panel.ignoresMouseEvents = true
         panel.isMovable = false
         panel.hidesOnDeactivate = false
+        panel.collectionBehavior = [.transient]  // Don't add ignoresCycle to preview windows
     }
     
     // Add after togglePreviews() method
