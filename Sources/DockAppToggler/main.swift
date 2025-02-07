@@ -53,6 +53,9 @@ let appController = (
 // Configure the app to be a background application
 app.setActivationPolicy(.accessory)
 
+// Initialize keyboard shortcut monitor
+_ = KeyboardShortcutMonitor.shared
+
 // Start the application
 app.run()
 

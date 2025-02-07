@@ -32,21 +32,24 @@ class HelpViewController: NSViewController {
         let features = """
         DockAppToggler enhances your Mac's Dock with powerful window management features:
         
-        🖱 Window Selection
+        🖥️ Window Selection
         • Hover over a Dock icon to see all windows of that app
         • Single-click on Dock icon to show all non-minimized windows
         • Single-click on List-Item to bring a window to the front
         • Double-click on List-Item to bring a window to front and minimize other windows
         
-        🎯 Window Actions
+        ⚡️ Window Actions
         • Click the close button (×) to close a window
         • Click the minimize button (-) to minimize
         • Click left/right icon to snap window left/right
         • Click center icon to center/maximize a window
         • Double-click center icon to move window to secondary screen
 
-        🔔 Tray Tooltips
-        • Hover over tray icon to see a tooltip showing the application name
+        ℹ️ Status Menu
+        • Hover over menu bar icon to see a tooltip showing the application name
+
+        ⌨️ Keyboard Shortcuts
+        • Option+Tab: Show recent windows (Tab again to cycle through them)
         """
         
         featuresTextView.string = features

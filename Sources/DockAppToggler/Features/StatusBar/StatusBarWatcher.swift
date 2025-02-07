@@ -2,9 +2,14 @@ import AppKit
 import Cocoa
 import ApplicationServices
 
+extension Notification.Name {
+    static let statusBarTooltipsStateChanged = Notification.Name("statusBarTooltipsStateChanged")
+}
+
 @MainActor
 class TooltipWindow {
     private var window: NSWindow?
+    
     
     func show(text: String, at location: NSPoint) {
         // Hide existing tooltip if any
@@ -21,8 +26,27 @@ class TooltipWindow {
         // Configure tooltip window
         tooltip.level = .floating
         tooltip.isOpaque = false
-        tooltip.backgroundColor = .clear
         tooltip.hasShadow = true
+        tooltip.isMovableByWindowBackground = false
+        
+        // Create content view with rounded corners and proper system appearance
+        let contentView = NSVisualEffectView()
+        contentView.wantsLayer = true
+        contentView.material = .popover
+        contentView.blendingMode = .withinWindow
+        contentView.state = .active
+        
+        // Create a container view to handle the rounded corners
+        let containerView = NSView()
+        containerView.wantsLayer = true
+        containerView.layer?.cornerCurve = .continuous
+        containerView.layer?.cornerRadius = 4
+        containerView.layer?.masksToBounds = true
+        
+        // Set up view hierarchy
+        containerView.addSubview(contentView)
+        tooltip.contentView = containerView
+        tooltip.backgroundColor = .clear
         
         // Create label with system font
         let label = NSTextField(frame: .zero)
@@ -30,51 +54,48 @@ class TooltipWindow {
         label.isBezeled = false
         label.isEditable = false
         label.drawsBackground = false
-        label.textColor = .black
-        label.font = .systemFont(ofSize: 13.5)  // Match Dock tooltip font size
+        label.textColor = .labelColor // Use system label color for automatic dark mode support
+        label.font = .systemFont(ofSize: NSFont.smallSystemFontSize + 1.5) // Slightly larger than system small font
         label.alignment = .center
+        label.cell?.truncatesLastVisibleLine = true
+        label.maximumNumberOfLines = 1
         
-        // Calculate size with padding
-        let textSize = label.intrinsicContentSize
-        let horizontalPadding: CGFloat = 10
-        let verticalPadding: CGFloat = 5
-        let extraWidth: CGFloat = 4  // Add extra width to prevent text clipping
-        let windowWidth = textSize.width + horizontalPadding * 2 + extraWidth
+        // Calculate size and set frames
+        let textSize = (text as NSString).size(withAttributes: [
+            .font: label.font as Any
+        ])
+        let horizontalPadding: CGFloat = 12
+        let verticalPadding: CGFloat = 6
+        let textBuffer: CGFloat = 8
+        let windowWidth = textSize.width + horizontalPadding * 2 + textBuffer
         let windowHeight = textSize.height + verticalPadding * 2
         
         // Position window
         let windowX = location.x - windowWidth / 2
         
         // Calculate Y position relative to menu bar
-        guard let screen = NSScreen.main else {
-            return
-        }
+        guard let screen = NSScreen.main else { return }
         let menuBarY = screen.frame.maxY
-        let tooltipGap: CGFloat = 3  // Gap between menu bar and tooltip
-        let windowY = menuBarY - 24 - windowHeight - tooltipGap  // 24 is menu bar height
+        let tooltipGap: CGFloat = 4
+        let menuBarHeight: CGFloat = 24
+        let windowY = menuBarY - menuBarHeight - windowHeight - tooltipGap
         
+        // Set frames
+        containerView.frame = NSRect(x: 0, y: 0, width: windowWidth, height: windowHeight)
+        contentView.frame = containerView.bounds
+        
+        // Then set window frame
         tooltip.setFrame(NSRect(x: windowX, y: windowY,
                               width: windowWidth, height: windowHeight),
-                        display: true)
+                        display: false)
         
-        // Center label in window
+        // Center label in window with buffer space
         label.frame = NSRect(x: horizontalPadding,
                            y: verticalPadding,
-                           width: textSize.width + extraWidth,  // Add extra width here too
+                           width: textSize.width + textBuffer,
                            height: textSize.height)
         
-        // Create content view with rounded corners and gradient background
-        let contentView = NSVisualEffectView(frame: tooltip.frame)
-        contentView.wantsLayer = true
-        contentView.material = .hudWindow  // Semi-transparent light material
-        contentView.blendingMode = .behindWindow
-        contentView.state = .active
-        contentView.layer?.cornerRadius = 6
-        
-        // Add label to content view
         contentView.addSubview(label)
-        
-        tooltip.contentView = contentView
         tooltip.orderFront(nil)
         window = tooltip
     }
@@ -87,18 +108,50 @@ class TooltipWindow {
 
 @MainActor
 class StatusBarWatcher {
+    private var lastMouseMoveTime: TimeInterval = 0
     private var eventMonitor: Any?
     private var lastHoveredPid: pid_t = 0
     private var lastHoveredElement: AXUIElement?
     private let tooltipWindow = TooltipWindow()
+    private var isEnabled: Bool
     
     init() {
+        // Initialize with saved preference, default to true
+        if UserDefaults.standard.object(forKey: "StatusBarTooltipsEnabled") == nil {
+            UserDefaults.standard.set(true, forKey: "StatusBarTooltipsEnabled")
+            self.isEnabled = true
+        } else {
+            self.isEnabled = UserDefaults.standard.bool(forKey: "StatusBarTooltipsEnabled")
+        }
+        
         if !checkAccessibilityPermissions() {
             print("[StatusBarWatcher] Please grant accessibility permissions in System Settings > Privacy & Security > Accessibility")
             return
         }
         
-        startWatching()
+        setupNotificationObserver()
+        if isEnabled {
+            startWatching()
+        }
+    }
+    
+    private func setupNotificationObserver() {
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleTooltipsStateChanged),
+            name: .statusBarTooltipsStateChanged,
+            object: nil
+        )
+    }
+    
+    @objc private func handleTooltipsStateChanged() {
+        isEnabled = UserDefaults.standard.bool(forKey: "StatusBarTooltipsEnabled")
+        if isEnabled {
+            startWatching()
+        } else {
+            cleanup()
+            tooltipWindow.hide()
+        }
     }
     
     private nonisolated func checkAccessibilityPermissions() -> Bool {
@@ -177,6 +230,15 @@ class StatusBarWatcher {
     }
     
     private func handleMouseMove(_ event: NSEvent) {
+        guard isEnabled else { return }
+
+        // Add throttling to prevent too frequent updates
+        let currentTime = ProcessInfo.processInfo.systemUptime
+        if currentTime - lastMouseMoveTime < 0.05 { // ~60fps throttle
+            return
+        }
+        lastMouseMoveTime = currentTime
+        
         let mouseLocation = NSEvent.mouseLocation
         let menuBarHeight: CGFloat = 24.0
         

@@ -98,11 +98,8 @@ class AccessibilityService {
         // Store CGWindow information for debugging and matching
         var cgWindows: [(id: CGWindowID, name: String?, bounds: CGRect)] = []
         
-            
         // Create a set of window IDs belonging to this app
         let cgWindowIDs = Set(windowList.compactMap { window -> CGWindowID? in
-            
-
             // Check multiple identifiers to ensure we catch all windows
             let ownerPIDMatches = (window[kCGWindowOwnerPID as String] as? pid_t) == pid
             let ownerNameMatches = (window[kCGWindowOwnerName as String] as? String) == app.localizedName
@@ -154,7 +151,6 @@ class AccessibilityService {
                     return nil
                 }
                 
-                Logger.debug("Adding window '\(name)' (\(rect.width) x \(rect.height))")
                 cgWindows.append((
                     id: windowID,
                     name: name,
@@ -165,18 +161,14 @@ class AccessibilityService {
             return windowID
         })
         
-        Logger.debug("Found \(cgWindowIDs.count) CGWindows for \(cleanAppName):")
-        for window in cgWindows {
-            Logger.debug("  - ID: \(window.id), Name: \(window.name ?? "unnamed"), Bounds: \(window.bounds)")
-        }
-        
+        //Logger.debug("Found \(cgWindowIDs.count) CGWindows for \(cleanAppName)")
         
         // Get windows using Accessibility API
         var windowsRef: CFTypeRef?
         if AXUIElementCopyAttributeValue(axApp, Constants.Accessibility.windowsKey, &windowsRef) == .success,
            let windowArray = windowsRef as? [AXUIElement] {
             
-            Logger.debug("Found \(windowArray.count) AX windows for \(cleanAppName)")
+            //Logger.debug("Found \(windowArray.count) AX windows for \(cleanAppName)")
             
             for window in windowArray {
                 var titleValue: AnyObject?
@@ -216,8 +208,6 @@ class AccessibilityService {
                                     role == "AXDialog" || // Or is a dialog
                                     subrole == "AXStandardWindow") // Or has standard window subrole
                 
-                
-
                 if !isHidden && isValidWindow {
                     // Get window position and size
                     var positionValue: CFTypeRef?
@@ -249,66 +239,65 @@ class AccessibilityService {
                         }
                     }
                     
-                    Logger.debug("Adding window: '\(title)' ID: \(windowID ?? 0) role: \(role ?? "none") subrole: \(subrole ?? "none") minimized: \(isMinimized) position: \(position?.debugDescription ?? "unknown") size: \(size?.debugDescription ?? "unknown")")
+                    //Logger.debug("Adding window: '\(title)' ID: \(windowID ?? 0) role: \(role ?? "none") subrole: \(subrole ?? "none") minimized: \(isMinimized) position: \(position?.debugDescription ?? "unknown") size: \(size?.debugDescription ?? "unknown")")
                     
                     // Create window info with all available data
-                    windows.append(WindowInfo(
+                    let windowInfo = WindowInfo(
                         window: window,
                         name: title.isEmpty ? cleanAppName : title,
-                        isAppElement: false,
                         cgWindowID: windowID,
+                        isCGWindowOnly: false,
+                        isAppElement: false,
+                        bundleIdentifier: app.bundleIdentifier,
                         position: position,
                         size: size,
                         bounds: getWindowBounds(window)
-                    ))
+                    )
+                    windows.append(windowInfo)
                 } else {
                     Logger.debug("Skipping window: '\(title)' - hidden: \(isHidden), valid: \(isValidWindow), role: \(role ?? "none"), subrole: \(subrole ?? "none")")
                 }
             }
         }
         
-        // If we found CGWindows but no AX windows, try to create windows from CGWindow info
+        // If we found CGWindows but no AX windows, add just the app itself
         if windows.isEmpty && !cgWindows.isEmpty {
-            Logger.debug("No AX windows found, creating from \(cgWindows.count) CGWindows")
-            for cgWindow in cgWindows {
-                // Create a new AXUIElement for each window
-                let axWindow = AXUIElementCreateApplication(app.processIdentifier)
-                
-                // Store the CGWindowID in the AXUIElement immediately
-                let windowID = cgWindow.id  // This is already a CGWindowID (UInt32)
-                let numValue = windowID as CFNumber
-                Logger.debug("Setting window ID \(windowID) on AXUIElement")
-                
-                // Set both the window ID and title
-                AXUIElementSetAttributeValue(axWindow, Constants.Accessibility.windowIDKey, numValue)
-                if let title = cgWindow.name {
-                    AXUIElementSetAttributeValue(axWindow, kAXTitleAttribute as CFString, title as CFTypeRef)
-                }
-                
-                windows.append(WindowInfo(
-                    window: axWindow,
-                    name: cgWindow.name ?? cleanAppName,
-                    isAppElement: false,
-                    cgWindowID: windowID,
-                    position: CGPoint(x: cgWindow.bounds.minX, y: cgWindow.bounds.minY),
-                    size: CGSize(width: cgWindow.bounds.width, height: cgWindow.bounds.height),
-                    bounds: cgWindow.bounds
-                ))
-            }
+            Logger.debug("CGWindow-only application detected, adding app element")
+            let appWindowInfo = WindowInfo(
+                window: axApp,
+                name: cleanAppName,
+                cgWindowID: nil,
+                isCGWindowOnly: true,
+                isAppElement: true,
+                bundleIdentifier: app.bundleIdentifier,
+                position: nil,
+                size: nil,
+                bounds: nil
+            )
+            windows.append(appWindowInfo)
         }
         
-        // Sort windows alphabetically by name
-        windows.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-        
-        // If no windows were found, add the app itself
+        // If no windows were found at all, add the app itself
         if windows.isEmpty {
-            windows.append(WindowInfo(window: axApp,
-                                    name: cleanAppName,
-                                    isAppElement: true))
+            let appWindowInfo = WindowInfo(
+                window: axApp,
+                name: cleanAppName,
+                cgWindowID: nil,
+                isCGWindowOnly: false,
+                isAppElement: true,
+                bundleIdentifier: app.bundleIdentifier,
+                position: nil,
+                size: nil,
+                bounds: nil
+            )
+            windows.append(appWindowInfo)
         }
         
-        Logger.debug("Found \(windows.count) total windows for \(cleanAppName)")
-        return windows
+        // Sort windows and log the final count
+        let sortedWindows = windows.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        Logger.debug("Found \(sortedWindows.count) valid windows for \(cleanAppName)")
+        
+        return sortedWindows
     }
 
     private func createWindowInfo(for window: AXUIElement, app: NSRunningApplication, index: Int) -> WindowInfo? {
@@ -328,9 +317,9 @@ class AccessibilityService {
             return nil
         }
         
-        let windowID = number.uint32Value
+        let _ = number.uint32Value  // Explicitly ignore
         let windowName = windowTitle
-        Logger.success("Adding window: '\(windowName)' ID: \(windowID)")
+        //Logger.success("Adding window: '\(windowName)' ID: \(windowID)")
         return WindowInfo(window: window, name: windowName)
     }
     
@@ -347,7 +336,7 @@ class AccessibilityService {
         }
         
         guard index < matchingWindows.count,
-              let windowID = matchingWindows[index][kCGWindowNumber] as? CGWindowID else {
+              let _ = matchingWindows[index][kCGWindowNumber] as? CGWindowID else {
             return nil
         }
         
@@ -358,38 +347,49 @@ class AccessibilityService {
         let windowTitle = matchingWindows[index][kCGWindowName as CFString] as? String
         let windowName = windowTitle ?? "\(app.localizedName ?? "Window") \(index + 1)"
         
-        Logger.success("Adding window (fallback): '\(windowName)' ID: \(windowID)")
+        //Logger.success("Adding window (fallback): '\(windowName)' ID: \(windowID)")
         return WindowInfo(window: window, name: windowName)
     }
     
     func raiseWindow(windowInfo: WindowInfo, for app: NSRunningApplication) {
-        Logger.debug("=== RAISING WINDOW ===")
-        Logger.debug("Raising window - Name: \(windowInfo.name), ID: \(windowInfo.cgWindowID ?? 0)")
-        
-        // Get the window's owner PID
-        var pid: pid_t = 0
-        AXUIElementGetPid(windowInfo.window, &pid)
-        
-        // First try using CGWindow APIs if we have a window ID
-        if let windowID = windowInfo.cgWindowID {
-            Logger.debug("Using CGWindow APIs with ID: \(windowID)")
-            raiseCGWindow(windowID: windowID, ownerPID: pid)
+        Logger.debug("=== RAISING WINDOW/APP ===")
+        Logger.debug("Raising - Name: \(windowInfo.name), IsAppElement: \(windowInfo.isAppElement)")
+
+        // Add window to history before raising
+        Task { @MainActor in
+            WindowHistory.shared.addWindow(windowInfo, for: app)
+        }
+
+        if windowInfo.isAppElement {
+            // For app elements, just activate the application
+            app.activate(options: [.activateIgnoringOtherApps])
+            Logger.debug("Activated application directly")
         } else {
-            Logger.debug("No CGWindowID available, using AX APIs")
-            // Unminimize first if needed
-            AXUIElementSetAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
+            // Existing window raising logic
+            // Get the window's owner PID
+            var pid: pid_t = 0
+            AXUIElementGetPid(windowInfo.window, &pid)
             
-            // Then raise the window
-            AXUIElementPerformAction(windowInfo.window, kAXRaiseAction as CFString)
+            // First try using CGWindow APIs if we have a window ID
+            if let windowID = windowInfo.cgWindowID {
+                Logger.debug("Using CGWindow APIs with ID: \(windowID)")
+                raiseCGWindow(windowID: windowID, ownerPID: pid)
+            } else {
+                Logger.debug("No CGWindowID available, using AX APIs")
+                // Unminimize first if needed
+                AXUIElementSetAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
+                
+                // Then raise the window
+                AXUIElementPerformAction(windowInfo.window, kAXRaiseAction as CFString)
+            }
+            
+            // Activate the app
+            app.activate(options: [.activateIgnoringOtherApps])
         }
         
-        // Activate the app
-        app.activate(options: [.activateIgnoringOtherApps])
-        
-        Logger.debug("Completed raising window")
         Logger.debug("=== RAISING COMPLETE ===")
         
-        // Important: Signal completion
+        // Signal completion
         Task { @MainActor in
             NotificationCenter.default.post(name: NSNotification.Name("WindowRaiseComplete"), object: nil)
         }
@@ -430,10 +430,82 @@ class AccessibilityService {
     }
     
     func hideWindow(window: AXUIElement, for app: NSRunningApplication) {
-        AXUIElementSetAttributeValue(window, kAXHiddenAttribute as CFString, true as CFTypeRef)
+        var pid: pid_t = 0
+        AXUIElementGetPid(window, &pid)
+        
+        // Special handling for Finder
+        let isFinderApp = app.bundleIdentifier == "com.apple.finder"
+        
+        // Get window role and subrole for Finder-specific checks
+        var roleValue: AnyObject?
+        var subroleValue: AnyObject?
+        AXUIElementCopyAttributeValue(window, kAXRoleAttribute as CFString, &roleValue)
+        AXUIElementCopyAttributeValue(window, kAXSubroleAttribute as CFString, &subroleValue)
+        let role = roleValue as? String
+        let subrole = subroleValue as? String
+        
+        // Check if this is a CGWindow-only application
+        var windowsRef: CFTypeRef?
+        let hasAXWindows = AXUIElementCopyAttributeValue(window, Constants.Accessibility.windowsKey, &windowsRef) == .success &&
+                          (windowsRef as? [AXUIElement])?.isEmpty == false
+        
+        // Check if this is the app element and if the hidden attribute is settable
+        var isSettable = DarwinBoolean(false)
+        let settableResult = AXUIElementIsAttributeSettable(window, kAXHiddenAttribute as CFString, &isSettable)
+        
+        // For Finder, we need special handling
+        if isFinderApp {
+            // Skip desktop window
+            if role == "AXDesktop" {
+                Logger.debug("Skipping Finder desktop window")
+                return
+            }
+            
+            // For Finder windows, try multiple approaches
+            var success = false
+            
+            // First try setting hidden attribute
+            if settableResult == .success && isSettable.boolValue {
+                success = AXUIElementSetAttributeValue(window, kAXHiddenAttribute as CFString, true as CFTypeRef) == .success
+            }
+            
+            // If that fails, try minimizing
+            if !success {
+                success = AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, true as CFTypeRef) == .success
+            }
+            
+            // If both fail, try hiding the app
+            if !success {
+                app.hide()
+            }
+            
+            return
+        }
+        
+        // For non-Finder apps, use the original logic
+        if pid == app.processIdentifier && (!hasAXWindows || settableResult != .success || !isSettable.boolValue) {
+            Logger.debug("Hiding entire application: \(app.localizedName ?? "Unknown")")
+            app.hide()
+        } else {
+            Logger.debug("Hiding individual window")
+            AXUIElementSetAttributeValue(window, kAXHiddenAttribute as CFString, true as CFTypeRef)
+        }
     }
     
     func checkWindowVisibility(_ window: AXUIElement) -> Bool {
+        // Get window role and subrole
+        var roleValue: AnyObject?
+        var subroleValue: AnyObject?
+        AXUIElementCopyAttributeValue(window, kAXRoleAttribute as CFString, &roleValue)
+        AXUIElementCopyAttributeValue(window, kAXSubroleAttribute as CFString, &subroleValue)
+        let role = roleValue as? String
+        let subrole = subroleValue as? String
+        
+        // Skip desktop window
+        if role == "AXDesktop" {
+            return false
+        }
+        
         // Check hidden state
         var hiddenValue: AnyObject?
         let hiddenResult = AXUIElementCopyAttributeValue(window, kAXHiddenAttribute as CFString, &hiddenValue)
@@ -444,8 +516,14 @@ class AccessibilityService {
         let minimizedResult = AXUIElementCopyAttributeValue(window, kAXMinimizedAttribute as CFString, &minimizedValue)
         let isMinimized = (minimizedResult == .success && (minimizedValue as? Bool == true))
         
-        // A window is considered visible only if it's neither hidden nor minimized
-        return !isHidden && !isMinimized
+        // Check if window is a standard window
+        let isStandardWindow = role == "AXWindow" && subrole == "AXStandardWindow"
+        
+        // A window is considered visible only if:
+        // 1. It's a standard window
+        // 2. Not hidden
+        // 3. Not minimized
+        return isStandardWindow && !isHidden && !isMinimized
     }
     
     func hideAllWindows(for app: NSRunningApplication) {
@@ -484,6 +562,7 @@ class AccessibilityService {
     func restoreAllWindows(for app: NSRunningApplication) {
         Logger.debug("restoreAllWindows called for: \(app.localizedName ?? "Unknown")")
         let pid = app.processIdentifier
+        let isFinderApp = app.bundleIdentifier == "com.apple.finder"
         
         Task<Void, Never> { @MainActor in
             // Get current windows if no states are stored
@@ -494,7 +573,17 @@ class AccessibilityService {
                 if AXUIElementCopyAttributeValue(axApp, Constants.Accessibility.windowsKey, &windowsRef) == .success,
                    let windows = windowsRef as? [AXUIElement] {
                     var states: [(window: AXUIElement, wasVisible: Bool, order: Int, stackOrder: Int)] = []
+                    
                     for (index, window) in windows.enumerated() {
+                        // Skip desktop window for Finder
+                        if isFinderApp {
+                            var roleValue: AnyObject?
+                            AXUIElementCopyAttributeValue(window, kAXRoleAttribute as CFString, &roleValue)
+                            if roleValue as? String == "AXDesktop" {
+                                continue
+                            }
+                        }
+                        
                         // Only include non-minimized windows
                         var minimizedValue: AnyObject?
                         let isMinimized = AXUIElementCopyAttributeValue(window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success &&
@@ -519,9 +608,31 @@ class AccessibilityService {
             Logger.info("Restoring windows for app: \(app.localizedName ?? "Unknown")")
             Logger.info("Total window states: \(states.count)")
             
+            // For Finder, ensure app is activated first
+            if isFinderApp {
+                app.activate(options: [.activateIgnoringOtherApps])
+                try? await Task.sleep(nanoseconds: UInt64(0.1 * 1_000_000_000))
+            }
+            
             // First pass: unhide all windows (they're already non-minimized)
             for state in states {
-                AXUIElementSetAttributeValue(state.window, kAXHiddenAttribute as CFString, false as CFTypeRef)
+                // For Finder, try multiple approaches
+                if isFinderApp {
+                    // First try unhiding
+                    var success = AXUIElementSetAttributeValue(state.window, kAXHiddenAttribute as CFString, false as CFTypeRef) == .success
+                    
+                    // If that fails, try unminimizing
+                    if !success {
+                        success = AXUIElementSetAttributeValue(state.window, kAXMinimizedAttribute as CFString, false as CFTypeRef) == .success
+                    }
+                    
+                    // If either succeeded, raise the window
+                    if success {
+                        AXUIElementPerformAction(state.window, kAXRaiseAction as CFString)
+                    }
+                } else {
+                    AXUIElementSetAttributeValue(state.window, kAXHiddenAttribute as CFString, false as CFTypeRef)
+                }
                 try? await Task.sleep(nanoseconds: UInt64(0.05 * 1_000_000_000))
             }
             
@@ -853,6 +964,24 @@ class AccessibilityService {
         }
         
         Logger.debug("❌ No matching window found")
+    }
+
+    @MainActor
+    func activateApp(_ app: NSRunningApplication) {
+        // Get all windows before activating
+        let windows = listApplicationWindows(for: app)
+        
+        // Activate the app
+        app.unhide()
+        app.activate(options: [.activateIgnoringOtherApps])
+        
+        // Add first non-app-element window to history if available
+        if let firstWindow = windows.first(where: { !$0.isAppElement }) {
+            WindowHistory.shared.addWindow(firstWindow, for: app)
+        } else if let appElement = windows.first {
+            // Fallback to app element if no regular windows
+            WindowHistory.shared.addWindow(appElement, for: app)
+        }
     }
 }
 

@@ -2,6 +2,12 @@ import AppKit
 import Cocoa
 
 class BubbleVisualEffectView: NSVisualEffectView {
+    var showsArrow: Bool = true {
+        didSet {
+            updateLayer()
+        }
+    }
+    
     override func updateLayer() {
         super.updateLayer()
         
@@ -16,18 +22,24 @@ class BubbleVisualEffectView: NSVisualEffectView {
         
         // Create the main rounded rectangle first, but exclude the bottom edge
         let rect = NSRect(x: bounds.minX,
-                         y: bounds.minY + Constants.UI.arrowHeight,
+                         y: bounds.minY + (showsArrow ? Constants.UI.arrowHeight : 0),
                          width: bounds.width,
-                         height: bounds.height - Constants.UI.arrowHeight)
+                         height: bounds.height - (showsArrow ? Constants.UI.arrowHeight : 0))
         
         // Create custom path for rounded rectangle with partial bottom edge
         let roundedRect = NSBezierPath()
         
         // Start from the arrow connection point on the left
-        roundedRect.move(to: NSPoint(x: arrowTipX - Constants.UI.arrowWidth/2, y: rect.minY))
+        if showsArrow {
+            roundedRect.move(to: NSPoint(x: arrowTipX - Constants.UI.arrowWidth/2, y: rect.minY))
+        } else {
+            roundedRect.move(to: NSPoint(x: rect.minX + radius, y: rect.minY))
+        }
         
         // Draw left bottom corner and left side
-        roundedRect.line(to: NSPoint(x: rect.minX + radius, y: rect.minY))
+        if showsArrow {
+            roundedRect.line(to: NSPoint(x: rect.minX + radius, y: rect.minY))
+        }
         roundedRect.appendArc(withCenter: NSPoint(x: rect.minX + radius, y: rect.minY + radius),
                             radius: radius,
                             startAngle: 270,
@@ -61,17 +73,21 @@ class BubbleVisualEffectView: NSVisualEffectView {
                             clockwise: true)
         
         // Bottom edge to arrow
-        roundedRect.line(to: NSPoint(x: arrowTipX + Constants.UI.arrowWidth/2, y: rect.minY))
-        
-        // Create arrow path
-        let arrowPath = NSBezierPath()
-        arrowPath.move(to: NSPoint(x: arrowTipX + Constants.UI.arrowWidth/2, y: rect.minY))
-        arrowPath.line(to: NSPoint(x: arrowTipX, y: arrowTipY))
-        arrowPath.line(to: NSPoint(x: arrowTipX - Constants.UI.arrowWidth/2, y: rect.minY))
+        if showsArrow {
+            roundedRect.line(to: NSPoint(x: arrowTipX + Constants.UI.arrowWidth/2, y: rect.minY))
+            
+            // Create arrow path
+            let arrowPath = NSBezierPath()
+            arrowPath.move(to: NSPoint(x: arrowTipX + Constants.UI.arrowWidth/2, y: rect.minY))
+            arrowPath.line(to: NSPoint(x: arrowTipX, y: arrowTipY))
+            arrowPath.line(to: NSPoint(x: arrowTipX - Constants.UI.arrowWidth/2, y: rect.minY))
+            path.append(arrowPath)
+        } else {
+            roundedRect.line(to: NSPoint(x: rect.minX + radius, y: rect.minY))
+        }
         
         // Combine paths
         path.append(roundedRect)
-        path.append(arrowPath)
         
         // Create mask layer for the entire shape
         let maskLayer = CAShapeLayer()

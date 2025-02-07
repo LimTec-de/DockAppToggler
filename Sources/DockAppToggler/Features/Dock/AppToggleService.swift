@@ -59,7 +59,7 @@ class AppToggleService {
                         name: app.localizedName ?? "Unknown",
                         isAppElement: false
                     )
-                    await AccessibilityService.shared.raiseWindow(windowInfo: windowInfo, for: app)
+                    AccessibilityService.shared.raiseWindow(windowInfo: windowInfo, for: app)
                 }
                 return
             }
@@ -87,7 +87,7 @@ class AppToggleService {
                 )
                 
                 app.activate(options: [.activateIgnoringOtherApps])
-                await AccessibilityService.shared.raiseWindow(windowInfo: windowInfo, for: app)
+                AccessibilityService.shared.raiseWindow(windowInfo: windowInfo, for: app)
             } else {
                 app.hide()
             }

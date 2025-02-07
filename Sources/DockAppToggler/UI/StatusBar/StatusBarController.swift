@@ -9,10 +9,18 @@ class StatusBarController {
     private var menu: NSMenu
     private weak var updaterController: SPUStandardUpdaterController?
     private let autostartMenuItem: NSMenuItem
+    private let tooltipsMenuItem: NSMenuItem
+    private let optionTabMenuItem: NSMenuItem
+    
+    // Use nonisolated(unsafe) for the monitor since we need to modify it
+    private nonisolated(unsafe) var mouseEventMonitor: AnyObject?
+    
+    // Add menu item property to track state
+    private var previewsMenuItem: NSMenuItem?
     
     init(updater: SPUStandardUpdaterController?) {
         statusBar = NSStatusBar.system
-        statusItem = statusBar.statusItem(withLength: NSStatusItem.squareLength)
+        statusItem = statusBar.statusItem(withLength: NSStatusItem.variableLength)
         menu = NSMenu()
         
         // Store the shared updater controller
@@ -22,6 +30,20 @@ class StatusBarController {
         autostartMenuItem = NSMenuItem(
             title: "Start at Login",
             action: #selector(toggleAutostart),
+            keyEquivalent: ""
+        )
+        
+        // Create tooltips menu item
+        tooltipsMenuItem = NSMenuItem(
+            title: "Tray Tooltips",
+            action: #selector(toggleTooltips),
+            keyEquivalent: ""
+        )
+        
+        // Create Option+Tab menu item
+        optionTabMenuItem = NSMenuItem(
+            title: "Option+Tab Switching",
+            action: #selector(toggleOptionTab),
             keyEquivalent: ""
         )
         
@@ -55,13 +77,38 @@ class StatusBarController {
         
         setupMenu()
         updateAutostartState()
+        //setupMouseEventMonitoring()
     }
     
     private func setupMenu() {
+        // Get current state of window previews, defaulting to disabled
+        let previewsEnabled = UserDefaults.standard.bool(forKey: "WindowPreviewsEnabled", defaultValue: false)
+        
         // Add autostart toggle
         autostartMenuItem.target = self
         menu.addItem(autostartMenuItem)
         
+        // Add tooltips toggle - default to enabled
+        tooltipsMenuItem.target = self
+        tooltipsMenuItem.state = UserDefaults.standard.bool(forKey: "StatusBarTooltipsEnabled", defaultValue: true) ? .on : .off
+        menu.addItem(tooltipsMenuItem)
+        
+        // Add Option+Tab toggle - default to enabled
+        optionTabMenuItem.target = self
+        let optionTabEnabled = UserDefaults.standard.bool(forKey: "OptionTabEnabled", defaultValue: true)
+        optionTabMenuItem.state = optionTabEnabled ? .on : .off
+        menu.addItem(optionTabMenuItem)
+        
+        // Create menu item with checkmark for window previews
+        previewsMenuItem = NSMenuItem(
+            title: "Window Previews",
+            action: #selector(toggleWindowPreviews(_:)),
+            keyEquivalent: ""
+        )
+        previewsMenuItem?.target = self
+        previewsMenuItem?.state = previewsEnabled ? .on : .off
+        menu.addItem(previewsMenuItem!)
+
         // Add separator
         menu.addItem(NSMenuItem.separator())
         
@@ -88,6 +135,8 @@ class StatusBarController {
         )
         restartItem.target = self
         menu.addItem(restartItem)
+        
+        
         
         menu.addItem(NSMenuItem.separator())
         
@@ -118,11 +167,80 @@ class StatusBarController {
         StatusBarController.performRestart()
     }
     
+    @objc private func toggleWindowPreviews(_ sender: NSMenuItem) {
+        Task { @MainActor in
+            // Toggle previews
+            WindowThumbnailView.togglePreviews()
+            
+            // Update menu item state and save preference
+            let newState = !WindowThumbnailView.arePreviewsDisabled()
+            sender.state = newState ? .on : .off
+            UserDefaults.standard.set(newState, forKey: "WindowPreviewsEnabled")
+        }
+    }
+    
+    @objc private func toggleTooltips() {
+        let newState = tooltipsMenuItem.state == .off
+        UserDefaults.standard.set(newState, forKey: "StatusBarTooltipsEnabled")
+        tooltipsMenuItem.state = newState ? .on : .off
+        
+        // Post notification for StatusBarWatcher
+        NotificationCenter.default.post(name: .statusBarTooltipsStateChanged, object: nil)
+    }
+    
+    @objc private func toggleOptionTab() {
+        let newState = optionTabMenuItem.state == .off
+        UserDefaults.standard.set(newState, forKey: "OptionTabEnabled")
+        optionTabMenuItem.state = newState ? .on : .off
+        
+        // Post notification for any listeners that need to know about the change
+        NotificationCenter.default.post(name: .optionTabStateChanged, object: nil, userInfo: ["enabled": newState])
+    }
+    
+    @objc private func statusBarButtonClicked(_ sender: NSStatusBarButton) {
+        // Update menu item state before showing menu
+        if let previewsItem = previewsMenuItem {
+            previewsItem.state = WindowThumbnailView.arePreviewsDisabled() ? .off : .on
+        }
+        
+        // Show menu
+        statusItem.menu = menu
+        statusItem.button?.performClick(nil)
+    }
+    
+    @objc private func quit() {
+        NSApplication.shared.terminate(nil)
+    }
+    
     static func performRestart() {
         // Set flag to skip help on next launch
         UserDefaults.standard.set(true, forKey: "HideHelpOnStartup")
         
         // Restart without checking for updates
         NSApplication.restart(skipUpdateCheck: true)
+    }
+    
+    
+    deinit {
+        // Since we're using nonisolated(unsafe), we need to be careful about thread safety
+        if let monitor = mouseEventMonitor {
+            NSEvent.removeMonitor(monitor)
+        }
+    }
+}
+
+// Add extension for the notification name
+extension Notification.Name {
+    static let optionTabStateChanged = Notification.Name("optionTabStateChanged")
+}
+
+// Add extension for UserDefaults to handle default values
+extension UserDefaults {
+    func bool(forKey key: String, defaultValue: Bool) -> Bool {
+        if object(forKey: key) == nil {
+            set(defaultValue, forKey: key)
+            return defaultValue
+        }
+        return bool(forKey: key)
     }
 } 
