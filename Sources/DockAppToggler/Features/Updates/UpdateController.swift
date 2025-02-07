@@ -16,6 +16,7 @@ class UpdateController: NSObject, SPUStandardUserDriverDelegate {
         Task { @MainActor in
             // When an update alert will be presented, place the app in the foreground
             NSApp.setActivationPolicy(.regular)
+            NSApp.activate(ignoringOtherApps: true)
             
             if !isUserInitiated {
                 // Add a badge to the app's dock icon indicating one alert occurred
