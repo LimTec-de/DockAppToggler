@@ -60,8 +60,10 @@ class DockWatcher: NSObject, NSMenuDelegate {
     private var lastHoveredApp: NSRunningApplication?
     private var lastWindowOrder: [AXUIElement]?
     private let menuShowDelay: TimeInterval = 0.01
-    private var lastClickTime: TimeInterval = 0
+    @MainActor var lastClickTime: TimeInterval = 0
     private let clickDebounceInterval: TimeInterval = 0.3
+    private var lastTouchpadClickTime: TimeInterval = 0
+    private let touchpadClickDebounceInterval: TimeInterval = 0.5
     private var clickedApp: NSRunningApplication?
     private let dismissalMargin: CGFloat = 20.0
     private var lastMouseMoveTime: TimeInterval = 0
@@ -576,43 +578,44 @@ class DockWatcher: NSObject, NSMenuDelegate {
                         switch type {
                         case .leftMouseDown, .rightMouseDown:
                             if let (app, _, _) = DockService.shared.findAppUnderCursor(at: location) {
-                                watcher.menuBlocked = true
-                                watcher.lastClickedIconApp = app
+                                // Check if this is a touchpad click by examining the event flags
+                                let isTouchpadClick = event.flags.contains(.maskSecondaryFn) || 
+                                                    event.flags.contains(.maskControl) ||
+                                                    event.getIntegerValueField(.eventSourceUserData) != 0
                                 
-                                // Hide both window chooser and thumbnail
-                                //watcher.windowChooser?.chooserView?.thumbnailView?.hideThumbnail()
-                                //watcher.windowChooser?.chooserView?.cleanup()
+                                // Get current time and use appropriate debounce interval
+                                let currentTime = ProcessInfo.processInfo.systemUptime
+                                let lastTime = isTouchpadClick ? watcher.lastTouchpadClickTime : watcher.lastClickTime
+                                let debounceInterval = isTouchpadClick ? watcher.touchpadClickDebounceInterval : watcher.clickDebounceInterval
                                 
-                                //watcher.windowChooser?.window?.orderOut(nil)
-                                //watcher.currentThumbnailView?.hideThumbnail()
-                                
-                                Logger.debug("Blocked menu and thumbnail")
-                                
-                                if type == .leftMouseDown {
-                                    Logger.debug("Left mouse down")
+                                if currentTime - lastTime >= debounceInterval {
+                                    watcher.menuBlocked = true
+                                    watcher.lastClickedIconApp = app
                                     
-                                    // Debounce clicks
-                                    let currentTime = ProcessInfo.processInfo.systemUptime
-                                    if currentTime - watcher.lastClickTime >= watcher.clickDebounceInterval {
-                                        watcher.lastClickTime = currentTime
-                                        
-                                        // Store the app being clicked for mouseUp handling
-                                        if let (app, _, _) = DockService.shared.findAppUnderCursor(at: location) {
-                                            watcher.clickedApp = app
-
-                                            
-                                            watcher.lastClickedDockIcon = app
-                                            watcher.skipNextClickProcessing = false
-                                            
-                                            // Don't show window chooser immediately on click anymore
-                                            // This was causing the issue
-                                            watcher.showingWindowChooserOnClick = false
-                                        }
-                                    }
-                                }
-                                if type == .rightMouseDown {
+                                    // Hide window chooser
                                     watcher.windowChooser?.chooserView?.thumbnailView?.hideThumbnail()
-                                    watcher.windowChooser?.close()
+                                    
+                                    Logger.debug("Blocked menu and thumbnail")
+                                    
+                                    if type == .leftMouseDown {
+                                        Logger.debug("Left mouse down - \(isTouchpadClick ? "Touchpad" : "Mouse") click")
+                                        
+                                        // Update appropriate timestamp
+                                        if isTouchpadClick {
+                                            watcher.lastTouchpadClickTime = currentTime
+                                        } else {
+                                            watcher.lastClickTime = currentTime
+                                        }
+                                        
+                                        watcher.clickedApp = app
+                                        watcher.lastClickedDockIcon = app
+                                        watcher.skipNextClickProcessing = false
+                                        watcher.showingWindowChooserOnClick = false
+                                    }
+                                } else {
+                                    // If click is too soon after previous, block it
+                                    Logger.debug("Ignoring \(isTouchpadClick ? "touchpad" : "mouse") click - too soon after previous (\(currentTime - lastTime)s)")
+                                    watcher.skipNextClickProcessing = true
                                 }
                             }
                         case .leftMouseUp:
