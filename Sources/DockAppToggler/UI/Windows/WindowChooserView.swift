@@ -152,17 +152,7 @@ class WindowChooserView: NSView {
         self.targetApp = app
         self.dockIconCenter = iconCenter
         
-        // Find the topmost window from sorted list
-        if let frontmost = self.options.first(where: { window in
-            var frontValue: AnyObject?
-            if AXUIElementCopyAttributeValue(window.window, "AXMain" as CFString, &frontValue) == .success,
-               let isFront = frontValue as? Bool {
-                return isFront
-            }
-            return false
-        }) {
-            self.topmostWindow = frontmost.window
-        }
+        
         
         // Calculate height based on filtered options count
         let validWindowCount = self.options.count
@@ -177,10 +167,26 @@ class WindowChooserView: NSView {
             width: Constants.UI.windowWidth, 
             height: calculatedHeight
         ))
+
+        // Find the topmost window from sorted list
+        if let frontmost = self.options.first(where: { window in
+            var frontValue: AnyObject?
+            if AXUIElementCopyAttributeValue(window.window, "AXMain" as CFString, &frontValue) == .success,
+               let isFront = frontValue as? Bool {
+                return isFront
+            }
+            return false
+        }) {
+            Logger.debug("Topmost window: \(frontmost.name)")
+            self.topmostWindow = frontmost.window
+            //self.topmostWindow = self.options[0].window
+            //self.updateTopmostWindow(frontmost.window)
+        }
         
         // Set title based on mode immediately
         setupTitle(isHistory ? "Recent Windows" : appName)
         setupButtons()
+        
         
         // Create thumbnail view only for non-history mode
         if !isHistory {
@@ -730,13 +736,6 @@ class WindowChooserView: NSView {
         
         let windowInfo = options[sender.tag]
         Logger.debug("Selected window info - Name: \(windowInfo.name), ID: \(windowInfo.cgWindowID ?? 0)")
-
-        // Refresh menu after a small delay to let window state update
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                if let windowController = self?.window?.windowController as? WindowChooserController {
-                    windowController.refreshMenu()
-                }
-            }
         
         // In history mode, we need special handling
         if isHistoryMode {
@@ -748,6 +747,8 @@ class WindowChooserView: NSView {
                 
                 // Get fresh window list for the app
                 let windows = AccessibilityService.shared.listApplicationWindows(for: app)
+
+                topmostWindow = windows[0].window
                 
                 // Try to find matching window by ID or name
                 if let matchingWindow = windows.first(where: { $0.cgWindowID == cgWindowID }) ?? 
@@ -767,10 +768,6 @@ class WindowChooserView: NSView {
             }
         }
         
-        // Rest of the existing code for non-history mode...
-        // Add window to history when clicked
-        //WindowHistory.shared.addWindow(windowInfo, for: targetApp)
-        
         var pid: pid_t = 0
         if windowInfo.cgWindowID != nil && AXUIElementGetPid(windowInfo.window, &pid) != .success {
             // For CGWindow entries, just activate the app
@@ -789,8 +786,13 @@ class WindowChooserView: NSView {
                 return
             }
             
-            
-            return
+            // Refresh menu after a small delay to let window state update
+            /*DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                if let windowController = self?.window?.windowController as? WindowChooserController {
+                    windowController.refreshMenu()
+                }
+            }
+            return*/
         }
         
         // Check for double click
@@ -823,8 +825,7 @@ class WindowChooserView: NSView {
             Logger.debug("  - Window name: \(windowInfo.name)")
             Logger.debug("  - Window ID: \(windowInfo.cgWindowID ?? 0)")
             
-            // Update topmost window
-            topmostWindow = windowInfo.window
+            
             
             // First activate the app
             targetApp.activate(options: [.activateIgnoringOtherApps])
@@ -879,6 +880,10 @@ class WindowChooserView: NSView {
                 AXUIElementSetAttributeValue(windowInfo.window, kAXFocusedAttribute as CFString, true as CFTypeRef)
                 
                 callback?(windowInfo.window, false)
+
+                Logger.debug("Updating topmost windowy")
+                // Update topmost window
+                //topmostWindow = windowInfo.window
                 
                 // Close window chooser in history mode
                 if isHistoryMode {
@@ -891,7 +896,25 @@ class WindowChooserView: NSView {
                     
                     
                 }
+
             }
+        }
+
+
+
+        // Update menu with new window states
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            guard let self = self else { return }
+
+            //self.topmostWindow = windowInfo.window
+
+            Logger.debug("Updating menu with new window states")
+
+            let updatedWindows = AccessibilityService.shared.listApplicationWindows(for: self.targetApp)
+            //windowController?.updateWindows(updatedWindows, for: self.targetApp, at: self.dockIconCenter)
+            
+            self.updateWindows(updatedWindows, forceNormalMode: true)  // Force normal mode
+            //self.refreshMenu()
         }
     }
     
@@ -929,7 +952,7 @@ class WindowChooserView: NSView {
         }
     }
     
-    private func handleWindowClick(_ windowInfo: WindowInfo, hideButton: NSButton) {
+    /*private func handleWindowClick(_ windowInfo: WindowInfo, hideButton: NSButton) {
         // Show and raise window
         AXUIElementSetAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
         AccessibilityService.shared.raiseWindow(windowInfo: windowInfo, for: targetApp)
@@ -937,8 +960,9 @@ class WindowChooserView: NSView {
         
         // Update UI
         updateTopmostWindow(windowInfo.window)
+
         updateHideButton(hideButton)
-    }
+    }*/
     
     private func hasVisibleWindows(for app: NSRunningApplication) -> Bool {
         // Use .optionAll to get all windows including minimized ones
@@ -1631,7 +1655,7 @@ class WindowChooserView: NSView {
     }
     
     // Add method to update topmost window state
-    private func updateTopmostWindow(_ window: AXUIElement) {
+    /*private func updateTopmostWindow(_ window: AXUIElement) {
         topmostWindow = window
         
         // Refresh all window buttons
@@ -1648,7 +1672,7 @@ class WindowChooserView: NSView {
                 }
             }
         }
-    }
+    }*/
     
     // Add new method to center window
     private func centerWindow(_ window: AXUIElement) {
@@ -1791,17 +1815,16 @@ class WindowChooserView: NSView {
         // Use static method to filter and sort
         self.options = WindowChooserView.sortWindows(windows, app: targetApp, isHistory: isHistoryMode)
         
-        // First, find the new topmost window
-        topmostWindow = nil  // Reset first
-        for windowInfo in self.options {
-            var minimizedValue: AnyObject?
-            let isMinimized = AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success &&
-                             (minimizedValue as? Bool == true)
-            
-            if !isMinimized {
-                topmostWindow = windowInfo.window
-                break
+        // Find the topmost window from sorted list
+        if let frontmost = self.options.first(where: { window in
+            var frontValue: AnyObject?
+            if AXUIElementCopyAttributeValue(window.window, "AXMain" as CFString, &frontValue) == .success,
+               let isFront = frontValue as? Bool {
+                return isFront
             }
+            return false
+        }) {
+            self.topmostWindow = frontmost.window
         }
         
         // Update frame height based on filtered windows count
@@ -1834,7 +1857,7 @@ class WindowChooserView: NSView {
     }
 
     // Add helper method to update a single window's state
-    func updateWindowState(_ window: AXUIElement, isMinimized: Bool) {
+    /*func updateWindowState(_ window: AXUIElement, isMinimized: Bool) {
         if let index = options.firstIndex(where: { $0.window == window }) {
             if let button = buttons.first(where: { $0.tag == index }) {
                 button.contentTintColor = isMinimized ? 
@@ -1846,7 +1869,7 @@ class WindowChooserView: NSView {
                 minimizeButton.updateMinimizedState(isMinimized)
             }
         }
-    }
+    }*/
 
     func cleanup() {
         // Cleanup thumbnail view without destroying it
@@ -1945,7 +1968,7 @@ class WindowChooserView: NSView {
     }
 
     // When window becomes key, make this view first responder
-    override func viewDidMoveToWindow() {
+    /*override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         window?.makeFirstResponder(self)
         
@@ -1960,7 +1983,7 @@ class WindowChooserView: NSView {
                 Logger.debug("Updated thumbnail view's window chooser from viewDidMoveToWindow")
             }
         }
-    }
+    }*/
 
     func selectNextItem() {
         // print("🔍 selectNextItem called")
@@ -2048,7 +2071,7 @@ class WindowChooserView: NSView {
         }
         
         // Update topmost window and refresh menu
-        topmostWindow = windowInfo.window
+        //topmostWindow = windowInfo.window
         updateButtonStates()
     }
     

@@ -370,9 +370,9 @@ class WindowChooserController: NSWindowController {
         //}
     }
 
-    func refreshMenu() {
+    func refreshMenu(force: Bool = false) {
         if let windows = chooserView?.options {
-            if needsWindowUpdate(windows: windows) {
+            if force || needsWindowUpdate(windows: windows) {
                 // Update content without recreating window
                 chooserView?.updateWindows(windows, forceNormalMode: true)  // Force normal mode
                 

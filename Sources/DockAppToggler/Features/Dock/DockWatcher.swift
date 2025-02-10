@@ -594,7 +594,9 @@ class DockWatcher: NSObject, NSMenuDelegate {
                                     watcher.lastClickedIconApp = app
                                     
                                     // Hide window chooser
+                                    
                                     watcher.windowChooser?.chooserView?.thumbnailView?.hideThumbnail()
+                                    watcher.windowChooser?.close()
                                     
                                     Logger.debug("Blocked menu and thumbnail")
                                     
