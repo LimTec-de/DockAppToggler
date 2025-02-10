@@ -157,9 +157,9 @@ class WindowChooserView: NSView {
         // Calculate height based on filtered options count
         let validWindowCount = self.options.count
         let calculatedHeight = Constants.UI.windowHeight(for: validWindowCount)
-        Logger.debug("Height calculation details:")
-        Logger.debug("  - Valid window count: \(validWindowCount)")
-        Logger.debug("  - Calculated height: \(calculatedHeight)")
+        //Logger.debug("Height calculation details:")
+        //Logger.debug("  - Valid window count: \(validWindowCount)")
+        //Logger.debug("  - Calculated height: \(calculatedHeight)")
         
         super.init(frame: NSRect(
             x: 0, 
@@ -477,9 +477,12 @@ class WindowChooserView: NSView {
                           (minimizedValue as? Bool == true)
         
         // Set initial color based on window state
-        if isMinimized {
+        if isHistoryMode && button.tag == 0 {
+            // In history mode, always use primaryTextColor for the first entry
+            button.contentTintColor = Constants.UI.Theme.primaryTextColor
+        } else if isMinimized {
             button.contentTintColor = Constants.UI.Theme.minimizedTextColor
-        } else if windowInfo.window == topmostWindow {
+        } else if !isHistoryMode && windowInfo.window == topmostWindow {
             button.contentTintColor = Constants.UI.Theme.primaryTextColor
         } else {
             button.contentTintColor = Constants.UI.Theme.secondaryTextColor
@@ -536,9 +539,12 @@ class WindowChooserView: NSView {
                 let isMinimized = AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success &&
                                  (minimizedValue as? Bool == true)
                 
-                if isMinimized {
+                if isHistoryMode && button.tag == 0 {
+                    // In history mode, always use primaryTextColor for the first entry
+                    button.contentTintColor = Constants.UI.Theme.primaryTextColor
+                } else if isMinimized {
                     button.contentTintColor = Constants.UI.Theme.minimizedTextColor
-                } else if windowInfo.window == topmostWindow {
+                } else if !isHistoryMode && windowInfo.window == topmostWindow {
                     button.contentTintColor = Constants.UI.Theme.primaryTextColor
                 } else {
                     button.contentTintColor = Constants.UI.Theme.secondaryTextColor
