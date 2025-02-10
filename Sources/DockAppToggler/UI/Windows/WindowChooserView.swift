@@ -199,6 +199,9 @@ class WindowChooserView: NSView {
                 //DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
                     thumbnailView?.showThumbnail(for: windowInfo, withTimer: true)
                 //}
+            } else {
+                Logger.debug("No topmost window found or it's an app element")
+                thumbnailView?.hideThumbnail()
             }
         }
     }
@@ -727,6 +730,13 @@ class WindowChooserView: NSView {
         
         let windowInfo = options[sender.tag]
         Logger.debug("Selected window info - Name: \(windowInfo.name), ID: \(windowInfo.cgWindowID ?? 0)")
+
+        // Refresh menu after a small delay to let window state update
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                if let windowController = self?.window?.windowController as? WindowChooserController {
+                    windowController.refreshMenu()
+                }
+            }
         
         // In history mode, we need special handling
         if isHistoryMode {
@@ -759,7 +769,7 @@ class WindowChooserView: NSView {
         
         // Rest of the existing code for non-history mode...
         // Add window to history when clicked
-        WindowHistory.shared.addWindow(windowInfo, for: targetApp)
+        //WindowHistory.shared.addWindow(windowInfo, for: targetApp)
         
         var pid: pid_t = 0
         if windowInfo.cgWindowID != nil && AXUIElementGetPid(windowInfo.window, &pid) != .success {
@@ -779,12 +789,7 @@ class WindowChooserView: NSView {
                 return
             }
             
-            // Refresh menu after a small delay to let window state update
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-                if let windowController = self?.window?.windowController as? WindowChooserController {
-                    windowController.refreshMenu()
-                }
-            }
+            
             return
         }
         
@@ -884,10 +889,7 @@ class WindowChooserView: NSView {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                     handleDoubleClick()
                     
-                    // Refresh menu after all operations
-                    if let windowController = self.window?.windowController as? WindowChooserController {
-                        windowController.refreshMenu()
-                    }
+                    
                 }
             }
         }
@@ -1054,18 +1056,20 @@ class WindowChooserView: NSView {
     
     deinit {
         print("WindowChooserView deinit")
+        // Remove the thumbnail cleanup logic
+        // thumbnailView?.hideThumbnail()
         
-        
-
         // Capture values before async operation
         let thumbnailViewToClean = thumbnailView
         let buttonsToClean = buttons
         let hideButtonsToClean = hideButtons
         let closeButtonsToClean = closeButtons
 
-        Task { @MainActor in
-            thumbnailViewToClean?.hideThumbnail(removePanel: true)
-        }
+        //Task { @MainActor in
+            //DispatchQueue.main.asyncAfter(deadline: .now() + 10) { // Add a delay of 0.1 seconds
+                //thumbnailViewToClean?.hideThumbnail()
+            //}
+        //}
         
         // Force close all thumbnails
         /*Task { @MainActor in
@@ -2001,7 +2005,7 @@ class WindowChooserView: NSView {
         thumbnailView?.hideThumbnail(removePanel: true)
         
         // Add window to history
-        WindowHistory.shared.addWindow(windowInfo, for: targetApp)
+       //WindowHistory.shared.addWindow(windowInfo, for: targetApp)
         
         // Get the app for this window
         var pid: pid_t = 0
@@ -2102,6 +2106,7 @@ class WindowChooserView: NSView {
                         }
                         thumbnailView?.showThumbnail(for: windowInfo, withTimer: false)
                     }
+                    
                 }
             } else {
                 // Normal mode - use existing thumbnail logic

@@ -733,6 +733,8 @@ class WindowThumbnailView {
                 Logger.debug("Window previews are disabled")
                 return
             }
+
+            //Logger.debug("Showing thumbnail for window: \(windowInfo.name)")
             
             // Check screen recording permission
             guard Self.checkScreenRecordingPermission() else {

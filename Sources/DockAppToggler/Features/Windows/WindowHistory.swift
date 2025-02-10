@@ -246,26 +246,26 @@ class WindowHistory {
     }
     
     /// Add a window to history - kept for API compatibility but no longer stores history
-    func addWindow(_ window: WindowInfo, for app: NSRunningApplication) {
+    /*func addWindow(_ window: WindowInfo, for app: NSRunningApplication) {
         // Store as last active window
         lastActiveWindow = window
         lastActiveApp = app
-    }
+    }*/
     
     /// Clear history for an app - kept for API compatibility but no longer stores history
-    func clearHistory(for bundleIdentifier: String) {
+    /*func clearHistory(for bundleIdentifier: String) {
         if let lastApp = lastActiveApp,
            lastApp.bundleIdentifier == bundleIdentifier {
             lastActiveWindow = nil
             lastActiveApp = nil
         }
-    }
+    }*/
     
     /// Clear all history - kept for API compatibility but no longer stores history
-    func clearAllHistory() {
+    /*func clearAllHistory() {
         lastActiveWindow = nil
         lastActiveApp = nil
-    }
+    }*/
     
     deinit {
         cleanupTimerRef?.timer.invalidate()

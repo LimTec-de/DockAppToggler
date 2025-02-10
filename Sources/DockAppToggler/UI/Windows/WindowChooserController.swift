@@ -194,6 +194,9 @@ class WindowChooserController: NSWindowController {
     }
     
     @MainActor private func cleanup() {
+        // Add thumbnail cleanup logic
+        chooserView?.thumbnailView?.hideThumbnail()
+        
         // Remove tracking area
         if let trackingArea = trackingArea,
            let contentView = window?.contentView {
@@ -346,7 +349,7 @@ class WindowChooserController: NSWindowController {
         let currentCenterX = window.frame.origin.x + (window.frame.width / 2)
         let isSignificantMove = abs(currentCenterX - iconCenter.x) > window.frame.width / 2
         
-        if window.isVisible && isSignificantMove {
+        /*if window.isVisible && isSignificantMove {
             // Use fade transition only for significant position changes
             NSAnimationContext.runAnimationGroup({ context in
                 context.duration = 0.15
@@ -360,11 +363,11 @@ class WindowChooserController: NSWindowController {
                     self?.window?.animator().alphaValue = 1.0
                 })
             }
-        } else {
+        } else {*/
             // Direct update for initial display or small movements
             window.setFrame(newFrame, display: true)
             window.alphaValue = 1.0
-        }
+        //}
     }
 
     func refreshMenu() {
