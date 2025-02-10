@@ -49,13 +49,13 @@ class WindowThumbnailView {
         var isValid: Bool {
             let age = Date().timeIntervalSince(timestamp)
             let isValid = age < Self.cacheTimeout
-            Logger.debug("""
+            /*Logger.debug("""
                 App thumbnail validity check:
                 - Bundle ID: \(appBundleIdentifier)
                 - Age: \(String(format: "%.1f", age))s
                 - Timeout: \(Self.cacheTimeout)s
                 - Valid: \(isValid)
-                """)
+                """)*/
             return isValid
         }
     }
@@ -733,6 +733,8 @@ class WindowThumbnailView {
                 Logger.debug("Window previews are disabled")
                 return
             }
+
+            //Logger.debug("Showing thumbnail for window: \(windowInfo.name)")
             
             // Check screen recording permission
             guard Self.checkScreenRecordingPermission() else {
@@ -951,7 +953,7 @@ class WindowThumbnailView {
             return
         }
 
-        Logger.debug("Hiding thumbnail window")
+        //Logger.debug("Hiding thumbnail window")
 
         // If preview window is blocked, wait until unblocked
         if previewWindowBlocked {
@@ -1028,7 +1030,7 @@ class WindowThumbnailView {
             return
         }
 
-        Logger.debug("Starting thumbnail view cleanup")
+        //Logger.debug("Starting thumbnail view cleanup")
         
         // Cancel timer first
         autoCloseTimer?.invalidate()
@@ -1071,14 +1073,14 @@ class WindowThumbnailView {
         Self.windowKeyCache.removeAll()
         Self.lastThumbnailCreationTime.removeAll()
         
-        Logger.debug("""
+        /*Logger.debug("""
             Cleanup completed:
             - Removed \(oldCount - newCache.count) expired thumbnails
             - Removed \(oldAppCount - Self.appThumbnails.count) expired app thumbnails
             - Cleared window key cache
             - Cleared thumbnail timing cache
             - Final cache size: \(newCache.count)
-            """)
+            """)*/
     }
     
     func clearCache() {

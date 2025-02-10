@@ -60,8 +60,10 @@ class DockWatcher: NSObject, NSMenuDelegate {
     private var lastHoveredApp: NSRunningApplication?
     private var lastWindowOrder: [AXUIElement]?
     private let menuShowDelay: TimeInterval = 0.01
-    private var lastClickTime: TimeInterval = 0
+    @MainActor var lastClickTime: TimeInterval = 0
     private let clickDebounceInterval: TimeInterval = 0.3
+    private var lastTouchpadClickTime: TimeInterval = 0
+    private let touchpadClickDebounceInterval: TimeInterval = 0.5
     private var clickedApp: NSRunningApplication?
     private let dismissalMargin: CGFloat = 20.0
     private var lastMouseMoveTime: TimeInterval = 0
@@ -322,9 +324,10 @@ class DockWatcher: NSObject, NSMenuDelegate {
         autoreleasepool {
             // Clear window chooser
             if let chooser = windowChooser {
+                // Ensure thumbnail is hidden and cleaned up
                 chooser.chooserView?.thumbnailView?.hideThumbnail(removePanel: true)
+                chooser.chooserView?.thumbnailView?.cleanup()
                 chooser.prepareForReuse()
-                //chooser.chooserView?.thumbnailView?.hideThumbnail(removePanel: true)
                 windowChooser = nil
             }
             
@@ -576,43 +579,46 @@ class DockWatcher: NSObject, NSMenuDelegate {
                         switch type {
                         case .leftMouseDown, .rightMouseDown:
                             if let (app, _, _) = DockService.shared.findAppUnderCursor(at: location) {
-                                watcher.menuBlocked = true
-                                watcher.lastClickedIconApp = app
+                                // Check if this is a touchpad click by examining the event flags
+                                let isTouchpadClick = event.flags.contains(.maskSecondaryFn) || 
+                                                    event.flags.contains(.maskControl) ||
+                                                    event.getIntegerValueField(.eventSourceUserData) != 0
                                 
-                                // Hide both window chooser and thumbnail
-                                //watcher.windowChooser?.chooserView?.thumbnailView?.hideThumbnail()
-                                //watcher.windowChooser?.chooserView?.cleanup()
+                                // Get current time and use appropriate debounce interval
+                                let currentTime = ProcessInfo.processInfo.systemUptime
+                                let lastTime = isTouchpadClick ? watcher.lastTouchpadClickTime : watcher.lastClickTime
+                                let debounceInterval = isTouchpadClick ? watcher.touchpadClickDebounceInterval : watcher.clickDebounceInterval
                                 
-                                //watcher.windowChooser?.window?.orderOut(nil)
-                                //watcher.currentThumbnailView?.hideThumbnail()
-                                
-                                Logger.debug("Blocked menu and thumbnail")
-                                
-                                if type == .leftMouseDown {
-                                    Logger.debug("Left mouse down")
+                                if currentTime - lastTime >= debounceInterval {
+                                    watcher.menuBlocked = true
+                                    watcher.lastClickedIconApp = app
                                     
-                                    // Debounce clicks
-                                    let currentTime = ProcessInfo.processInfo.systemUptime
-                                    if currentTime - watcher.lastClickTime >= watcher.clickDebounceInterval {
-                                        watcher.lastClickTime = currentTime
-                                        
-                                        // Store the app being clicked for mouseUp handling
-                                        if let (app, _, _) = DockService.shared.findAppUnderCursor(at: location) {
-                                            watcher.clickedApp = app
-
-                                            
-                                            watcher.lastClickedDockIcon = app
-                                            watcher.skipNextClickProcessing = false
-                                            
-                                            // Don't show window chooser immediately on click anymore
-                                            // This was causing the issue
-                                            watcher.showingWindowChooserOnClick = false
-                                        }
-                                    }
-                                }
-                                if type == .rightMouseDown {
+                                    // Hide window chooser
+                                    
                                     watcher.windowChooser?.chooserView?.thumbnailView?.hideThumbnail()
                                     watcher.windowChooser?.close()
+                                    
+                                    Logger.debug("Blocked menu and thumbnail")
+                                    
+                                    if type == .leftMouseDown {
+                                        Logger.debug("Left mouse down - \(isTouchpadClick ? "Touchpad" : "Mouse") click")
+                                        
+                                        // Update appropriate timestamp
+                                        if isTouchpadClick {
+                                            watcher.lastTouchpadClickTime = currentTime
+                                        } else {
+                                            watcher.lastClickTime = currentTime
+                                        }
+                                        
+                                        watcher.clickedApp = app
+                                        watcher.lastClickedDockIcon = app
+                                        watcher.skipNextClickProcessing = false
+                                        watcher.showingWindowChooserOnClick = false
+                                    }
+                                } else {
+                                    // If click is too soon after previous, block it
+                                    Logger.debug("Ignoring \(isTouchpadClick ? "touchpad" : "mouse") click - too soon after previous (\(currentTime - lastTime)s)")
+                                    watcher.skipNextClickProcessing = true
                                 }
                             }
                         case .leftMouseUp:
@@ -745,7 +751,6 @@ class DockWatcher: NSObject, NSMenuDelegate {
             // Clean up existing chooser properly
             if let existingChooser = windowChooser,
                 existingChooser.window != nil {
-                
                 existingChooser.prepareForReuse()
                 existingChooser.close()
                 windowChooser = nil
@@ -811,6 +816,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
             }
 
             //print("chooser.window?.frame: \(chooser.window?.frame)")
+
             
             // Reset interaction time when creating new chooser
             lastMenuInteractionTime = ProcessInfo.processInfo.systemUptime
@@ -852,8 +858,6 @@ class DockWatcher: NSObject, NSMenuDelegate {
                          dy: -Constants.UI.menuDismissalMargin).contains(mouseLocation)
         } ?? false
         
-        
-
         if isOverDock {
             guard let (app, _, iconCenter) = dockCheckResult else { return }
             
@@ -869,20 +873,16 @@ class DockWatcher: NSObject, NSMenuDelegate {
                                     (lastProcessedApp?.bundleIdentifier != app.bundleIdentifier)
 
             if shouldReloadWindows {
-                print("shouldReloadWindows: \(lastProcessedApp?.bundleIdentifier) \(app.bundleIdentifier)")
-                print("currentTime: \(currentTime)")
-                print("lastProcessedTime: \(lastProcessedTime)")
-                print("windowsCacheTimeout: \(windowsCacheTimeout)")
-                print("lastProcessedWindows: \(lastProcessedWindows?.isEmpty ?? true)")
-
                 Task {
                     // Get windows in background
                     let windows = await Task.detached(priority: .userInitiated) { 
                         await AccessibilityService.shared.listApplicationWindows(for: app)
                     }.value
 
-                    // Only create new chooser if we don't have one or if switching apps
-                    if app != lastHoveredApp {
+                    // Always create a new chooser for hidden apps to ensure thumbnail appears
+                    let shouldCreateNewChooser = app != lastHoveredApp || windowChooser == nil
+                    
+                    if shouldCreateNewChooser {
                         // Close existing chooser if switching apps
                         if lastHoveredApp != nil {
                             windowChooser?.close()
@@ -890,11 +890,13 @@ class DockWatcher: NSObject, NSMenuDelegate {
                         }
                         
                         if !windows.isEmpty {
+                            Logger.debug("Creating new window chooser for \(app.isActive ? "active" : "hidden") app")
                             displayWindowSelector(for: app, at: iconCenter, windows: windows)
                         }
                     } else if let existingChooser = windowChooser {
                         // Update existing chooser
                         autoreleasepool {
+                            Logger.debug("Updating existing chooser for \(app.isActive ? "active" : "hidden") app")
                             existingChooser.updateWindows(windows, for: app, at: iconCenter)
                             existingChooser.updatePosition(iconCenter)
                             existingChooser.window?.makeKeyAndOrderFront(nil)
@@ -908,16 +910,27 @@ class DockWatcher: NSObject, NSMenuDelegate {
                     lastHoveredApp = app
                     currentApp = app
                 }
-            } else if app != lastHoveredApp {
+            } /*else if app != lastHoveredApp {
                 // Only update position for different app
                 if let (_, _, iconCenter) = dockCheckResult {
-                    autoreleasepool {
-                        windowChooser?.updatePosition(iconCenter)
-                        windowChooser?.window?.makeKeyAndOrderFront(nil)
+                    if !app.isActive && windowChooser == nil {
+                        // For hidden apps, always create a new chooser
+                        Logger.debug("Creating new chooser for hidden app on hover")
+                        Task {
+                            let windows = await AccessibilityService.shared.listApplicationWindows(for: app)
+                            if !windows.isEmpty {
+                                displayWindowSelector(for: app, at: iconCenter, windows: windows)
+                            }
+                        }
+                    } else {
+                        autoreleasepool {
+                            windowChooser?.updatePosition(iconCenter)
+                            windowChooser?.window?.makeKeyAndOrderFront(nil)
+                        }
                     }
                     lastHoveredApp = app
                 }
-            }
+            }*/
         } else {
             // Mouse not over dock or chooser
             if !isOverChooserArea {
@@ -930,40 +943,26 @@ class DockWatcher: NSObject, NSMenuDelegate {
 
                 let currentTime = ProcessInfo.processInfo.systemUptime
                 if currentTime - lastDockAccessTime > 2.0 {
-                    //print("nothing to do")
                     return
                 }
 
-                /*if ProcessInfo.processInfo.systemUptime - _lastCleanupTime > 20.0 {
-                    windowChooser?.chooserView?.thumbnailView?.cleanup()
-                }
-                _lastCleanupTime = ProcessInfo.processInfo.systemUptime*/
-                windowChooser?.chooserView?.thumbnailView?.cleanup()
+
+                //Logger.debug("Performing cleanup of window chooser and thumbnail resources1")
+                // Hide both window chooser and thumbnail immediately
                 windowChooser?.chooserView?.thumbnailView?.hideThumbnail()
+                windowChooser?.chooserView?.thumbnailView?.cleanup()
                 windowChooser?.window?.orderOut(nil)
-                
-                // Hide window chooser efficiently
-                if let chooser = windowChooser {
-                    autoreleasepool {
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak chooser] in
-                            if ProcessInfo.processInfo.systemUptime - self._lastCleanupTime > 20.0 {
-                                chooser?.chooserView?.thumbnailView?.cleanup()
-                            }
-                            //chooser?.chooserView?.thumbnailView?.hideThumbnail()
-                            chooser?.window?.orderOut(nil)
-                        }
-                    }
-                }
                 
                 // Start cleanup timer
                 cleanupTimer?.invalidate()
                 cleanupTimer = Timer.scheduledTimer(withTimeInterval: cleanupDelay, repeats: false) { [weak self] _ in
                     Task { @MainActor [weak self] in
                         guard let self = self, !self.isMouseOverDock else { return }
-                        print("cleanupTimer cleanup")
+                        Logger.debug("Performing cleanup of window chooser and thumbnail resources")
                         
-                        //self.windowChooser?.chooserView?.thumbnailView?.hideThumbnail(removePanel: true)
-                        //self.windowChooser?.chooserView?.thumbnailView?.cleanup()
+                        // Ensure thumbnail is hidden and cleaned up
+                        self.windowChooser?.chooserView?.thumbnailView?.hideThumbnail()
+                        self.windowChooser?.chooserView?.thumbnailView?.cleanup()
                         self.windowChooser?.close()
                         self.windowChooser = nil
                         await self.cleanupResources()
@@ -1308,7 +1307,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
         // Create window chooser controller
         let controller = WindowChooserController(
             at: mouseLocation,
-            windows: WindowHistory.shared.getMouseTriggeredWindows(),
+            windows:  WindowHistory.shared.getAllRecentWindows(),
             app: NSRunningApplication.current,
             isHistory: true,
             callback: { [weak self] window, isHideAction in
@@ -1330,7 +1329,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
         
         // Position at bottom of screen at mouse x position
         if let window = controller.window {
-            let xPos = mouseLocation.x - window.frame.width/2  // Center on mouse x position
+            let xPos = mouseLocation.x - window.frame.width / 2  // Center on mouse x position
             window.setFrameOrigin(NSPoint(x: xPos, y: 0))
             
             // Configure window

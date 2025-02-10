@@ -239,7 +239,7 @@ class AccessibilityService {
                         }
                     }
                     
-                    //Logger.debug("Adding window: '\(title)' ID: \(windowID ?? 0) role: \(role ?? "none") subrole: \(subrole ?? "none") minimized: \(isMinimized) position: \(position?.debugDescription ?? "unknown") size: \(size?.debugDescription ?? "unknown")")
+                    Logger.debug("Adding window: '\(title)' ID: \(windowID ?? 0) role: \(role ?? "none") subrole: \(subrole ?? "none") minimized: \(isMinimized) position: \(position?.debugDescription ?? "unknown") size: \(size?.debugDescription ?? "unknown")")
                     
                     // Create window info with all available data
                     let windowInfo = WindowInfo(
@@ -356,9 +356,9 @@ class AccessibilityService {
         Logger.debug("Raising - Name: \(windowInfo.name), IsAppElement: \(windowInfo.isAppElement)")
 
         // Add window to history before raising
-        Task { @MainActor in
+        /*Task { @MainActor in
             WindowHistory.shared.addWindow(windowInfo, for: app)
-        }
+        }*/
 
         if windowInfo.isAppElement {
             // For app elements, just activate the application
@@ -976,12 +976,12 @@ class AccessibilityService {
         app.activate(options: [.activateIgnoringOtherApps])
         
         // Add first non-app-element window to history if available
-        if let firstWindow = windows.first(where: { !$0.isAppElement }) {
+        /*if let firstWindow = windows.first(where: { !$0.isAppElement }) {
             WindowHistory.shared.addWindow(firstWindow, for: app)
         } else if let appElement = windows.first {
             // Fallback to app element if no regular windows
             WindowHistory.shared.addWindow(appElement, for: app)
-        }
+        }*/
     }
 }
 
