@@ -89,11 +89,6 @@ The project uses Swift Package Manager for dependency management. To open in Xco
 open Package.swift
 ```
 
-## Pricing
-
-- 60-day free trial
-- €2 one-time purchase after trial period
-
 ## Contributing
 
 1. Fork the repository
