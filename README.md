@@ -52,7 +52,7 @@ Transform your macOS Dock into a powerful window management hub while maintainin
 
 ### Homebrew
 ```bash
-brew install DockAppToggler
+not available yet
 ```
 
 ## Building from Source

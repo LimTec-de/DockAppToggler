@@ -17,7 +17,7 @@ enum Constants {
     /// UI-related constants for layout and dimensions
     enum UI {
         // Window dimensions
-        static let windowWidth: CGFloat = 280
+        static let windowWidth: CGFloat = 310
         static let windowHeight: CGFloat = 40
         static let windowPadding: CGFloat = 16
         static let verticalPadding: CGFloat = 8
