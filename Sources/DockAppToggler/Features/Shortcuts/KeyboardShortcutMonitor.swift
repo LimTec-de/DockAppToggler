@@ -184,7 +184,7 @@ class KeyboardShortcutMonitor {
         backdropWindow.contentView = contentView
         backdropWindow.backgroundColor = NSColor.black.withAlphaComponent(0.2)
         backdropWindow.isOpaque = false
-        backdropWindow.level = .modalPanel
+        backdropWindow.level = .modalPanel - 1  // Lower level so it appears behind other UI elements
         backdropWindow.ignoresMouseEvents = true
         backdropWindow.isMovable = false
         backdropWindow.acceptsMouseMovedEvents = false

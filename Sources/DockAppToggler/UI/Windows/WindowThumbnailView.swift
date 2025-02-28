@@ -74,6 +74,9 @@ class WindowThumbnailView {
     private let titleHeight: CGFloat = 24
     private var options: [WindowInfo]
     
+    // Add DockService property
+    private let dockService = DockService.shared
+    
     // Add property to store window chooser reference
     private weak var windowChooser: WindowChooserController?
     
@@ -661,12 +664,14 @@ class WindowThumbnailView {
             self.thumbnailView = imageView
         }
 
-        // Position panel at the bottom of the screen
-        guard let screen = NSScreen.main else { return }
+        // Position panel on the correct monitor
+        // Find the screen that contains the dock icon
+        let mouseLocation = NSEvent.mouseLocation
+        let targetScreen = dockService.getScreenContainingPoint(mouseLocation) ?? NSScreen.main ?? NSScreen.screens.first!
         
-        // Calculate position to be centered horizontally and at bottom of screen
-        let xCenter = screen.visibleFrame.midX - (panelSize.width / 2)
-        let yPosition = screen.visibleFrame.minY + 100 // 100px above the Dock
+        // Calculate position to be centered horizontally and at bottom of the target screen
+        let xCenter = targetScreen.visibleFrame.midX - (panelSize.width / 2)
+        let yPosition = targetScreen.visibleFrame.minY + 100 // 100px above the Dock
         
         // Set position
         var frame = NSRect(
@@ -676,11 +681,11 @@ class WindowThumbnailView {
             height: panelSize.height
         )
         
-        // Ensure the panel stays within screen bounds
-        if frame.minX < screen.visibleFrame.minX {
-            frame.origin.x = screen.visibleFrame.minX + 20
-        } else if frame.maxX > screen.visibleFrame.maxX {
-            frame.origin.x = screen.visibleFrame.maxX - frame.width - 20
+        // Ensure the panel stays within the target screen bounds
+        if frame.minX < targetScreen.visibleFrame.minX {
+            frame.origin.x = targetScreen.visibleFrame.minX + 20
+        } else if frame.maxX > targetScreen.visibleFrame.maxX {
+            frame.origin.x = targetScreen.visibleFrame.maxX - frame.width - 20
         }
         
         panel.setFrame(frame, display: true)
@@ -737,7 +742,7 @@ class WindowThumbnailView {
             //Logger.debug("Showing thumbnail for window: \(windowInfo.name)")
             
             // Check screen recording permission
-            guard Self.checkScreenRecordingPermission() else {
+            guard Self.checkScreenRecordingPermission() && !isWindowShared(windowName: windowInfo.name) else {
                 Logger.debug("No screen recording permission - cannot show thumbnail")
                 if let appIcon = targetApp.icon {
                     displayFallbackPanel(with: appIcon, for: windowInfo)
@@ -883,37 +888,38 @@ class WindowThumbnailView {
         containerView.addSubview(contentContainer)
         panel.contentView = containerView
         
-        // Position panel
-        guard let screen = NSScreen.main else { return }
-        let xCenter = screen.visibleFrame.midX - (panelSize.width / 2)
-        let yPosition = screen.visibleFrame.minY + 100
+        // Position panel on the correct monitor
+        // Find the screen that contains the dock icon
+        let targetScreen = NSScreen.screens.first { screen in
+            NSPointInRect(dockIconCenter, screen.frame)
+        } ?? NSScreen.main ?? NSScreen.screens.first!
         
-        panel.setFrame(NSRect(
+        // Calculate position to be centered horizontally and at bottom of the target screen
+        let xCenter = targetScreen.visibleFrame.midX - (panelSize.width / 2)
+        let yPosition = targetScreen.visibleFrame.minY + 100 // 100px above the Dock
+        
+        // Set position
+        var frame = NSRect(
             x: xCenter,
             y: yPosition,
             width: panelSize.width,
             height: panelSize.height
-        ), display: true)
+        )
         
-        // Ensure panel stays within screen bounds
-        var frame = panel.frame
-        if frame.minX < screen.visibleFrame.minX {
-            frame.origin.x = screen.visibleFrame.minX + 20
-        } else if frame.maxX > screen.visibleFrame.maxX {
-            frame.origin.x = screen.visibleFrame.maxX - frame.width - 20
+        // Ensure the panel stays within the target screen bounds
+        if frame.minX < targetScreen.visibleFrame.minX {
+            frame.origin.x = targetScreen.visibleFrame.minX + 20
+        } else if frame.maxX > targetScreen.visibleFrame.maxX {
+            frame.origin.x = targetScreen.visibleFrame.maxX - frame.width - 20
         }
         
-        if frame != panel.frame {
-            panel.setFrame(frame, display: true)
-        }
+        panel.setFrame(frame, display: true)
         
         self._thumbnailWindow = panel
         
         panel.orderFront(nil)
         panel.makeKey()
         WindowThumbnailView.activePreviewWindows.insert(panel)
-        
-        
     }
     
     // Extract timer setup to a separate method
@@ -1022,6 +1028,60 @@ class WindowThumbnailView {
         self.thumbnailView = nil
         self.currentWindowID = nil
     }
+
+    func getActiveWindows() -> [[String: Any]] {
+        let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+        guard let windowInfoList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
+            return []
+        }
+        return windowInfoList
+    }
+
+    func isWindowShared(windowName: String) -> Bool {
+        // Get all windows and check if Teams or Webex is running
+        let windows = self.getActiveWindows()
+        
+        // Check if Teams or Webex is running
+        var hasTeamsOrWebex = false
+        for window in windows {
+            if let ownerName = window[kCGWindowOwnerName as String] as? String {
+                if ownerName.contains("Teams") || ownerName.contains("Webex") {
+                    hasTeamsOrWebex = true
+                    break
+                }
+            }
+        }
+        
+        // Only check sharing indicators if Teams or Webex is running
+        if hasTeamsOrWebex {
+            // Common sharing indicator phrases in different languages
+            let sharingIndicators = [
+                "is being shared",      // English
+                "sharing a window",     // English
+                "wird geteilt",         // German
+                "está compartiendo",    // Spanish
+                "est partagé",         // French
+                "está sendo compartilhada", // Portuguese
+                "viene condiviso",      // Italian
+                "wordt gedeeld",        // Dutch
+                "共有中",               // Japanese
+                "正在共享"             // Chinese
+            ]
+            
+            for window in windows {
+                if let windowTitle = window[kCGWindowName as String] as? String {
+                    for indicator in sharingIndicators {
+                        if windowTitle.localizedCaseInsensitiveContains(indicator) {
+                            print("⚠️ Window \(windowName) appears to be shared")
+                            return true
+                        }
+                    }
+                }
+            }
+        }
+        return false
+    }
+
     
     func cleanup() {
         // Check if previews are enabled
@@ -1126,15 +1186,18 @@ class WindowThumbnailView {
     }
     
     private func configurePanel(_ panel: NSPanel) {
-        // Configure panel
-        panel.level = NSWindow.Level.floating  // Lower than window chooser
-        panel.backgroundColor = NSColor.clear
+        panel.backgroundColor = .clear
         panel.isOpaque = false
-        panel.hasShadow = true
-        panel.ignoresMouseEvents = true
+        panel.hasShadow = false
+        panel.level = .popUpMenu + 9  // Changed from 15 to 9 as requested
         panel.isMovable = false
+        panel.ignoresMouseEvents = true
+        panel.acceptsMouseMovedEvents = false
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.hidesOnDeactivate = false
-        panel.collectionBehavior = [.transient]  // Don't add ignoresCycle to preview windows
+        
+        // Add to active panels set
+        Self.activePreviewWindows.insert(panel)
     }
     
     // Add after togglePreviews() method

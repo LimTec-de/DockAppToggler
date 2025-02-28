@@ -122,6 +122,7 @@ class WindowHistoryController: NSWindowController {
         guard let primaryScreen = NSScreen.screens.first else { return }
         
         // Create a minimal tracking window for primary screen only
+        
         let trackingWindow = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: primaryScreen.frame.width, height: 50), // Only track bottom area
             styleMask: [.borderless],

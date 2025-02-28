@@ -70,8 +70,8 @@ class WindowChooserController: NSWindowController {
         // Configure window
         window.backgroundColor = NSColor.clear
         window.isOpaque = false
-        window.hasShadow = false
-        window.level = NSWindow.Level.popUpMenu + 2  // Higher than floating
+        window.hasShadow = true
+        window.level = NSWindow.Level.popUpMenu + 12  // Higher than thumbnail's level of +9
         window.appearance = NSApp.effectiveAppearance
        
         
@@ -102,16 +102,31 @@ class WindowChooserController: NSWindowController {
         setupTrackingArea()
         //animateAppearance()
         
+        // Get the screen containing the point
+        let pointScreen = dockService.getScreenContainingPoint(point) ?? NSScreen.main ?? NSScreen.screens.first!
+        
         // Position window for history menu
         if isHistory {
-            guard let screen = NSScreen.main else { return }
-            let xPos = (screen.frame.width - window.frame.width) / 2
-            window.setFrameOrigin(NSPoint(x: xPos, y: 0))
+            // Calculate position on the current screen
+            let screenWidth = pointScreen.frame.width
+            let screenHeight = pointScreen.frame.height
+            
+            // Center horizontally on the current screen
+            let adjustedX = pointScreen.frame.minX + (screenWidth - contentRect.width) / 2
+            
+            // Position vertically - centered with slight upward offset
+            let adjustedY = pointScreen.frame.minY + (screenHeight - contentRect.height) / 2 + 100
+            
+            window.setFrameOrigin(NSPoint(x: adjustedX, y: adjustedY))
         } else {
             // Position for regular dock menu
-            let dockHeight = DockService.shared.getDockMagnificationSize()
             let adjustedX = point.x - contentRect.width/2
-            let adjustedY = dockHeight + Constants.UI.arrowOffset - 4
+
+            let dockHeight = DockService.shared.getDockMagnificationSize()
+
+            let adjustedY = pointScreen.frame.minY + dockHeight + Constants.UI.arrowOffset - 4
+
+            
             window.setFrameOrigin(NSPoint(x: adjustedX, y: adjustedY))
         }
     }
@@ -125,7 +140,7 @@ class WindowChooserController: NSWindowController {
         window.backgroundColor = .clear
         window.isOpaque = false
         window.hasShadow = true
-        window.level = NSWindow.Level.popUpMenu + 2  // Match the higher level
+        window.level = NSWindow.Level.popUpMenu + 12  // Higher than thumbnail's level of +9
         window.appearance = NSApp.effectiveAppearance
         
         // Disable mouse moved events by default
@@ -172,7 +187,7 @@ class WindowChooserController: NSWindowController {
     private func animateAppearance() {
         guard let window = window else { return }
         window.alphaValue = 0
-        window.level = NSWindow.Level.popUpMenu + 2
+        window.level = NSWindow.Level.popUpMenu + 12
         window.orderFront(nil)
         
         NSAnimationContext.runAnimationGroup { context in
@@ -327,7 +342,7 @@ class WindowChooserController: NSWindowController {
         guard let window = window else { return }
         
         // Ensure window stays above previews
-        window.level = NSWindow.Level.popUpMenu + 2
+        window.level = NSWindow.Level.popUpMenu + 12  // Higher than thumbnail's level of +9
         window.collectionBehavior = [.transient, .ignoresCycle, .moveToActiveSpace]
         window.hidesOnDeactivate = false
         window.canHide = false
@@ -401,7 +416,7 @@ class WindowChooserController: NSWindowController {
         newWindow.backgroundColor = .clear
         newWindow.isOpaque = false
         newWindow.hasShadow = true
-        newWindow.level = NSWindow.Level.popUpMenu + 2
+        newWindow.level = NSWindow.Level.popUpMenu + 12  // Higher than thumbnail's level of +9
         newWindow.appearance = NSApp.effectiveAppearance
         newWindow.alphaValue = 0
         
@@ -577,16 +592,18 @@ class WindowChooserController: NSWindowController {
         guard let window = self.window else { return }
         
         // Ensure proper window level and behavior
-        window.level = NSWindow.Level.popUpMenu + 2
+        window.level = NSWindow.Level.popUpMenu + 12  // Higher than thumbnail's level of +9
         window.collectionBehavior = [.transient, .ignoresCycle, .moveToActiveSpace]
         window.hidesOnDeactivate = false
         window.canHide = false
         
         // Show the window chooser UI
-        let screen = NSScreen.main ?? NSScreen.screens[0]
+        // Get the screen containing the mouse cursor position
+        let mouseLocation = NSEvent.mouseLocation
+        let screen = dockService.getScreenContainingPoint(mouseLocation) ?? NSScreen.main ?? NSScreen.screens.first!
         let frame = NSRect(
-            x: (screen.frame.width - window.frame.width) / 2,
-            y: (screen.frame.height - window.frame.height) / 2 + 200,
+            x: (screen.frame.width - window.frame.width) / 2 + screen.frame.minX,
+            y: (screen.frame.height - window.frame.height) / 2 + screen.frame.minY + 200,
             width: window.frame.width,
             height: window.frame.height
         )
@@ -599,20 +616,24 @@ class WindowChooserController: NSWindowController {
         
         // Configure window
         window?.isMovableByWindowBackground = true
-        window?.level = NSWindow.Level.popUpMenu + 2  // Match the higher level
+        window?.level = NSWindow.Level.popUpMenu + 12  // Higher than thumbnail's level of +9
         window?.backgroundColor = .clear
         
         // Set style mask to allow becoming key window
         window?.styleMask.insert(.titled)  // This allows the window to become key
         window?.acceptsMouseMovedEvents = true
         
-        // Position window appropriately
-        if let screen = NSScreen.main {
-            let screenFrame = screen.frame
-            let windowFrame = window?.frame ?? .zero
-            let x = (screenFrame.width - windowFrame.width) / 2
-            let y = (screenFrame.height - windowFrame.height) / 2
-            window?.setFrameOrigin(NSPoint(x: x, y: y))
-        }
+        // Position window appropriately - use current mouse location to determine screen
+        let mouseLocation = NSEvent.mouseLocation
+        let screen = dockService.getScreenContainingPoint(mouseLocation) ?? 
+                     dockService.getScreenContainingPoint(iconCenter) ?? 
+                     NSScreen.main ?? 
+                     NSScreen.screens.first!
+        
+        let screenFrame = screen.frame
+        let windowFrame = window?.frame ?? .zero
+        let x = (screenFrame.width - windowFrame.width) / 2 + screenFrame.minX
+        let y = (screenFrame.height - windowFrame.height) / 2 + screenFrame.minY
+        window?.setFrameOrigin(NSPoint(x: x, y: y))
     }
 } 

@@ -121,15 +121,29 @@ class WindowHistory {
     
     /// Get the top 5 windows from the system
     private func getTopWindows() -> [WindowInfo] {
-        // Get all windows using CGWindow API with proper ordering
+        // Get all windows using CGWindow API with proper ordering - include all windows, including minimized ones
+        // Use optionOnScreenOnly with kCGNullWindowID to get windows in proper z-order (front to back)
         let windowList = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
         
-        // Filter and sort windows
-        let validWindows = windowList
+        // Also get off-screen windows (minimized, hidden)
+        let offscreenWindowList = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        
+        // Create a set of window IDs from the on-screen list to avoid duplicates
+        let onscreenWindowIDs = Set(windowList.compactMap { $0[kCGWindowNumber as String] as? CGWindowID })
+        
+        // Add off-screen windows that aren't already in the on-screen list
+        let combinedWindowList = windowList + offscreenWindowList.filter {
+            guard let windowID = $0[kCGWindowNumber as String] as? CGWindowID else { return false }
+            return !onscreenWindowIDs.contains(windowID)
+        }
+        
+        // Filter and process windows
+        let validWindows = combinedWindowList
             .filter { window in
                 // Only include normal windows
                 guard let layer = window[kCGWindowLayer as String] as? Int32,
-                      layer == kCGNormalWindowLevel,
+                      // Allow normal windows and other standard window layers
+                      (layer == kCGNormalWindowLevel || layer == kCGFloatingWindowLevel || layer == kCGModalPanelWindowLevel),
                       // Must have a title
                       let title = window[kCGWindowName as String] as? String,
                       !title.isEmpty,
@@ -139,9 +153,6 @@ class WindowHistory {
                       let windowID = window[kCGWindowNumber as String] as? CGWindowID,
                       // Must have bounds
                       let bounds = window[kCGWindowBounds as String] as? [String: CGFloat],
-                      // Window must be visible
-                      let alpha = window[kCGWindowAlpha as String] as? Float,
-                      alpha > 0,
                       // Get owner name for filtering
                       let ownerName = window[kCGWindowOwnerName as String] as? String,
                       // Filter out some system windows
@@ -155,7 +166,6 @@ class WindowHistory {
                 let height = bounds["Height"] ?? 0
                 return width >= 200 && height >= 200
             }
-            // Windows are already sorted by z-order due to CGWindowListCopyWindowInfo options
             .prefix(5) // Only take top 5 windows
         
         // Convert to WindowInfo objects with proper window bounds
@@ -182,10 +192,41 @@ class WindowHistory {
                 var titleRef: CFTypeRef?
                 var positionRef: CFTypeRef?
                 var sizeRef: CFTypeRef?
+                var minimizedRef: CFTypeRef?
                 
                 // Get window title
                 guard AXUIElementCopyAttributeValue(axWindow, kAXTitleAttribute as CFString, &titleRef) == .success,
                       let axTitle = titleRef as? String else {
+                    continue
+                }
+                
+                // Check if window is minimized (we'll include it either way)
+                var isMinimized = false
+                if AXUIElementCopyAttributeValue(axWindow, kAXMinimizedAttribute as CFString, &minimizedRef) == .success,
+                   let minimizedValue = minimizedRef as? Bool {
+                    isMinimized = minimizedValue
+                }
+                
+                // For minimized windows, we might not be able to get position/size, so handle differently
+                if isMinimized {
+                    // For minimized windows, just match by title
+                    let normalizedAxTitle = axTitle.trimmingCharacters(in: .whitespaces)
+                    let normalizedCGTitle = title.trimmingCharacters(in: .whitespaces)
+                    
+                    if normalizedAxTitle == normalizedCGTitle {
+                        return WindowInfo(
+                            window: axWindow,
+                            name: title,
+                            cgWindowID: windowID,
+                            isAppElement: false,
+                            bounds: CGRect(
+                                x: bounds["X"] ?? 0,
+                                y: bounds["Y"] ?? 0,
+                                width: bounds["Width"] ?? 0,
+                                height: bounds["Height"] ?? 0
+                            )
+                        )
+                    }
                     continue
                 }
                 
