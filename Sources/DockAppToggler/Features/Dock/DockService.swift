@@ -22,6 +22,32 @@ class DockService {
         return Constants.UI.dockHeight
     }
     
+    // Get dock orientation: 'bottom', 'left', or 'right'
+    func getDockOrientation() -> String {
+        let defaults = UserDefaults(suiteName: "com.apple.dock")
+        return defaults?.string(forKey: "orientation") ?? "bottom"
+    }
+    
+    // Get screen containing the dock
+    func getScreenWithDock() -> NSScreen? {
+        let orientation = getDockOrientation()
+        
+        // For left/right orientations, dock is typically on the leftmost/rightmost screen
+        if orientation == "left" {
+            return NSScreen.screens.min(by: { $0.frame.minX < $1.frame.minX })
+        } else if orientation == "right" {
+            return NSScreen.screens.max(by: { $0.frame.maxX < $1.frame.maxX })
+        }
+        
+        // For bottom orientation (default), dock is typically on the main screen
+        return NSScreen.main ?? NSScreen.screens.first
+    }
+    
+    // Get screen containing a specific point
+    func getScreenContainingPoint(_ point: CGPoint) -> NSScreen? {
+        return NSScreen.screens.first { NSPointInRect(point, $0.frame) }
+    }
+    
     func findDockProcess() -> NSRunningApplication? {
         return workspace.runningApplications.first(where: { $0.bundleIdentifier == Constants.Identifiers.dockBundleID })
     }
