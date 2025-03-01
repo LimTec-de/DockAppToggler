@@ -20,6 +20,9 @@ class HelpWindowController: NSWindowController {
         let viewController = HelpViewController()
         window.contentViewController = viewController
         
+        // Set window to be visible on all spaces
+        window.collectionBehavior = [.canJoinAllSpaces]
+        
         self.init(window: window)
     }
     

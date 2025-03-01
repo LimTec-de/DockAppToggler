@@ -189,6 +189,9 @@ class KeyboardShortcutMonitor {
         backdropWindow.isMovable = false
         backdropWindow.acceptsMouseMovedEvents = false
         
+        // Ensure window is visible on all spaces
+        backdropWindow.collectionBehavior = [.canJoinAllSpaces]
+        
         // Ensure window becomes key and visible
         (backdropWindow as NSPanel).becomesKeyOnlyIfNeeded = false
         backdropWindow.orderFront(nil)

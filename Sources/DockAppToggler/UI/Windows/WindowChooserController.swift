@@ -71,9 +71,20 @@ class WindowChooserController: NSWindowController {
         window.backgroundColor = NSColor.clear
         window.isOpaque = false
         window.hasShadow = true
-        window.level = NSWindow.Level.popUpMenu + 12  // Higher than thumbnail's level of +9
+        window.level = NSScreen.displaysHaveSeparateSpaces 
+            ? NSWindow.Level.popUpMenu + 12  // Higher level for separate spaces
+            : NSWindow.Level.popUpMenu + 12  // Regular level otherwise
         window.appearance = NSApp.effectiveAppearance
-       
+        
+        // Configure window behavior for multiple spaces
+        if NSScreen.displaysHaveSeparateSpaces {
+            window.collectionBehavior = [.transient, .ignoresCycle, .canJoinAllSpaces]
+        } else {
+            window.collectionBehavior = [.transient, .ignoresCycle]
+        }
+        
+        // Disable mouse moved events by default
+        window.acceptsMouseMovedEvents = false
         
         self.window = window
         
@@ -140,8 +151,20 @@ class WindowChooserController: NSWindowController {
         window.backgroundColor = .clear
         window.isOpaque = false
         window.hasShadow = true
-        window.level = NSWindow.Level.popUpMenu + 12  // Higher than thumbnail's level of +9
+        
+        // Set appropriate window level based on whether displays have separate spaces
+        window.level = NSScreen.displaysHaveSeparateSpaces 
+            ? NSWindow.Level.popUpMenu + 12  // Higher level for separate spaces
+            : NSWindow.Level.popUpMenu + 12  // Regular level otherwise
+            
         window.appearance = NSApp.effectiveAppearance
+        
+        // Configure window behavior for multiple spaces
+        if NSScreen.displaysHaveSeparateSpaces {
+            window.collectionBehavior = [.transient, .ignoresCycle, .canJoinAllSpaces]
+        } else {
+            window.collectionBehavior = [.transient, .ignoresCycle]
+        }
         
         // Disable mouse moved events by default
         window.acceptsMouseMovedEvents = false
@@ -343,7 +366,7 @@ class WindowChooserController: NSWindowController {
         
         // Ensure window stays above previews
         window.level = NSWindow.Level.popUpMenu + 12  // Higher than thumbnail's level of +9
-        window.collectionBehavior = [.transient, .ignoresCycle, .moveToActiveSpace]
+        window.collectionBehavior = [.transient, .ignoresCycle, .canJoinAllSpaces]
         window.hidesOnDeactivate = false
         window.canHide = false
         window.orderFront(nil)
@@ -420,8 +443,8 @@ class WindowChooserController: NSWindowController {
         newWindow.appearance = NSApp.effectiveAppearance
         newWindow.alphaValue = 0
         
-        // Ensure window stays above others
-        newWindow.collectionBehavior = [.transient, .ignoresCycle]
+        // Ensure window stays above others and is visible on all spaces
+        newWindow.collectionBehavior = [.transient, .ignoresCycle, .canJoinAllSpaces]
         
         // Create container view for shadow
         let containerView = NSView(frame: newWindow.contentView!.bounds)
@@ -593,7 +616,7 @@ class WindowChooserController: NSWindowController {
         
         // Ensure proper window level and behavior
         window.level = NSWindow.Level.popUpMenu + 12  // Higher than thumbnail's level of +9
-        window.collectionBehavior = [.transient, .ignoresCycle, .moveToActiveSpace]
+        window.collectionBehavior = [.transient, .ignoresCycle, .canJoinAllSpaces]
         window.hidesOnDeactivate = false
         window.canHide = false
         
@@ -635,5 +658,18 @@ class WindowChooserController: NSWindowController {
         let x = (screenFrame.width - windowFrame.width) / 2 + screenFrame.minX
         let y = (screenFrame.height - windowFrame.height) / 2 + screenFrame.minY
         window?.setFrameOrigin(NSPoint(x: x, y: y))
+    }
+    
+    override func showWindow(_ sender: Any?) {
+        super.showWindow(sender)
+        
+        // Ensure window is visible on all spaces if needed
+        if NSScreen.displaysHaveSeparateSpaces, let window = window {
+            MultiDisplayManager.shared.ensureWindowVisibleOnAllSpaces(window)
+            Logger.debug("Ensuring window chooser is visible on all spaces")
+        }
+        
+        // Animate appearance
+        animateAppearance()
     }
 } 
