@@ -63,19 +63,41 @@ mkdir -p "$FRAMEWORKS_DIR"
 # Build the Swift package
 print_status "Building Swift package..."
 swift package resolve
-if ! swift build -c release; then
-    print_error "Swift build failed"
+
+# Build for Apple Silicon (arm64)
+print_status "Building for Apple Silicon (arm64)..."
+if ! swift build -c release -Xswiftc "-swift-version" -Xswiftc "5.9" --arch arm64; then
+    print_error "Swift build for arm64 failed"
     exit 1
 fi
 
+# Build for Intel (x86_64)
+print_status "Building for Intel (x86_64)..."
+if ! swift build -c release -Xswiftc "-swift-version" -Xswiftc "5.9" --arch x86_64; then
+    print_error "Swift build for x86_64 failed"
+    exit 1
+fi
+
+# Create universal binary
+print_status "Creating universal binary..."
+mkdir -p "$BUILD_DIR/universal/release"
+lipo -create \
+    "$BUILD_DIR/arm64-apple-macosx/release/$APP_NAME" \
+    "$BUILD_DIR/x86_64-apple-macosx/release/$APP_NAME" \
+    -output "$BUILD_DIR/universal/release/$APP_NAME"
+
 # Copy binary to app bundle
-print_status "Copying binary to app bundle..."
-BINARY_PATH="$(swift build -c release --show-bin-path)/$APP_NAME"
+print_status "Copying universal binary to app bundle..."
+BINARY_PATH="$BUILD_DIR/universal/release/$APP_NAME"
 if [ ! -f "$BINARY_PATH" ]; then
-    print_error "Binary not found at: $BINARY_PATH"
+    print_error "Universal binary not found at: $BINARY_PATH"
     exit 1
 fi
 cp "$BINARY_PATH" "$MACOS_DIR/"
+
+# Verify architecture support
+print_status "Verifying architecture support..."
+lipo -info "$MACOS_DIR/$APP_NAME"
 
 # Copy resources and Info.plist
 print_status "Copying resources and Info.plist..."

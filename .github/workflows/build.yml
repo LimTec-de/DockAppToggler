@@ -49,12 +49,27 @@ jobs:
         # Create app bundle structure
         mkdir -p DockAppToggler.app/Contents/{MacOS,Resources,Frameworks}
         
-        # Resolve dependencies and build
+        # Resolve dependencies
         swift package resolve
-        swift build -c release
         
-        # Copy binary
-        cp .build/release/DockAppToggler DockAppToggler.app/Contents/MacOS/
+        # Build for Apple Silicon (arm64)
+        echo "Building for Apple Silicon (arm64)..."
+        swift build -c release -Xswiftc "-swift-version" -Xswiftc "5.9" --arch arm64
+        
+        # Build for Intel (x86_64)
+        echo "Building for Intel (x86_64)..."
+        swift build -c release -Xswiftc "-swift-version" -Xswiftc "5.9" --arch x86_64
+        
+        # Create universal binary
+        echo "Creating universal binary..."
+        mkdir -p .build/universal/release
+        lipo -create \
+          .build/arm64-apple-macosx/release/DockAppToggler \
+          .build/x86_64-apple-macosx/release/DockAppToggler \
+          -output .build/universal/release/DockAppToggler
+        
+        # Copy universal binary
+        cp .build/universal/release/DockAppToggler DockAppToggler.app/Contents/MacOS/
         chmod +x DockAppToggler.app/Contents/MacOS/DockAppToggler
         
         # Copy resources and Info.plist
@@ -87,7 +102,10 @@ jobs:
           --deep \
           DockAppToggler.app/Contents/Frameworks/Sparkle.framework
         
-        # Sign the main app
+        # Ensure entitlements file exists and has proper permissions
+        cat Sources/DockAppToggler/DockAppToggler.entitlements
+        
+        # Sign the main app with hardened runtime and entitlements
         codesign --force \
           --options runtime \
           --entitlements Sources/DockAppToggler/DockAppToggler.entitlements \
@@ -100,6 +118,10 @@ jobs:
         
         # Verify signing
         codesign -vv --deep --strict DockAppToggler.app
+        
+        # Verify architecture support
+        echo "Verifying architecture support..."
+        lipo -info DockAppToggler.app/Contents/MacOS/DockAppToggler
         
         # Create initial zip for notarization
         ditto -c -k --keepParent DockAppToggler.app DockAppToggler.zip
