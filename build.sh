@@ -66,14 +66,14 @@ swift package resolve
 
 # Build for Apple Silicon (arm64)
 print_status "Building for Apple Silicon (arm64)..."
-if ! swift build -c release -Xswiftc "-swift-version" -Xswiftc "5.9" --arch arm64; then
+if ! swift build -c release -Xswiftc "-swift-version" -Xswiftc "6" --arch arm64; then
     print_error "Swift build for arm64 failed"
     exit 1
 fi
 
 # Build for Intel (x86_64)
 print_status "Building for Intel (x86_64)..."
-if ! swift build -c release -Xswiftc "-swift-version" -Xswiftc "5.9" --arch x86_64; then
+if ! swift build -c release -Xswiftc "-swift-version" -Xswiftc "6" --arch x86_64; then
     print_error "Swift build for x86_64 failed"
     exit 1
 fi

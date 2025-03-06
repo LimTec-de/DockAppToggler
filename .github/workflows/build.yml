@@ -54,11 +54,11 @@ jobs:
         
         # Build for Apple Silicon (arm64)
         echo "Building for Apple Silicon (arm64)..."
-        swift build -c release -Xswiftc "-swift-version" -Xswiftc "5.9" --arch arm64
+        swift build -c release -Xswiftc "-swift-version" -Xswiftc "6" --arch arm64
         
         # Build for Intel (x86_64)
         echo "Building for Intel (x86_64)..."
-        swift build -c release -Xswiftc "-swift-version" -Xswiftc "5.9" --arch x86_64
+        swift build -c release -Xswiftc "-swift-version" -Xswiftc "6" --arch x86_64
         
         # Create universal binary
         echo "Creating universal binary..."
