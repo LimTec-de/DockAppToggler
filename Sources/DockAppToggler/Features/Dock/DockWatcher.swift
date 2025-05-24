@@ -400,6 +400,10 @@ class DockWatcher: NSObject, NSMenuDelegate {
             self?.heartbeatTimer?.invalidate()
             self?.memoryCleanupTimer = nil
             self?.heartbeatTimer = nil
+            self?.historyCheckTimer?.invalidate()
+            self?.historyCheckTimer = nil
+            self?.cleanupTimer?.invalidate()
+            self?.cleanupTimer = nil
         }
     }
     
@@ -1246,9 +1250,39 @@ class DockWatcher: NSObject, NSMenuDelegate {
     }
     
     private func startHistoryCheck() {
-        historyCheckTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
+        // Create a timer that checks more frequently when displays have separate spaces
+        let checkInterval = NSScreen.displaysHaveSeparateSpaces ? 0.03 : 0.05
+        
+        historyCheckTimer = Timer.scheduledTimer(withTimeInterval: checkInterval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.checkMouseForHistory()
+            }
+        }
+        
+        // Also observe screen configuration changes
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                
+                // Update timer interval based on current screen configuration
+                let newInterval = NSScreen.displaysHaveSeparateSpaces ? 0.03 : 0.05
+                
+                // Recreate timer with new interval
+                self.historyCheckTimer?.invalidate()
+                self.historyCheckTimer = Timer.scheduledTimer(withTimeInterval: newInterval, repeats: true) { [weak self] _ in
+                    Task { @MainActor [weak self] in
+                        self?.checkMouseForHistory()
+                    }
+                }
+                
+                // Force check for multiple displays
+                if NSScreen.displaysHaveSeparateSpaces {
+                    self.handleMultipleDisplays()
+                }
             }
         }
     }
@@ -1256,6 +1290,11 @@ class DockWatcher: NSObject, NSMenuDelegate {
     private func checkMouseForHistory() {
         let mouseLocation = NSEvent.mouseLocation
         let currentTime = ProcessInfo.processInfo.systemUptime
+        
+        // Handle multiple displays if needed
+        if NSScreen.displaysHaveSeparateSpaces {
+            handleMultipleDisplays()
+        }
         
         // Only check window chooser's window visibility
         if let chooserWindow = windowChooser?.window, chooserWindow.isVisible {
@@ -1270,35 +1309,172 @@ class DockWatcher: NSObject, NSMenuDelegate {
             return
         }
         
-        guard NSScreen.main != nil else {
-            Logger.debug("  - No main screen available")
-            mouseNearBottomSince = nil  // Reset timer when no screen
+        // Get the screen containing the mouse cursor
+        guard let mouseScreen = DockService.shared.getScreenContainingPoint(mouseLocation) else {
+            Logger.debug("Mouse not on any screen")
+            mouseNearBottomSince = nil
+            return
+        }
+
+        // In macOS, the origin (0,0) is at the bottom-left corner of the screen
+        // Calculate distance from top by subtracting y from screen height
+        let mouseDistanceFromTop = mouseScreen.frame.height - (mouseLocation.y - mouseScreen.frame.minY)
+
+        // Check if mouse is near the bottom edge of the current screen
+        if (mouseDistanceFromTop < (mouseScreen.frame.height - 5)) {
+            //Logger.debug("Mouse is not near bottom of screen, not showing history menu")
+            mouseNearBottomSince = nil
+            return
+        }
+
+        // Get the screen containing the dock
+        let dockScreen = DockService.shared.getScreenWithDock()
+        
+        // Check if dock is on the same screen as the mouse cursor
+        let isOnDockScreen = (mouseScreen == dockScreen)
+        
+        // If displays have separate spaces, we should allow history menu on any screen
+        let shouldAllowOnThisScreen = isOnDockScreen || NSScreen.displaysHaveSeparateSpaces
+        
+        if !shouldAllowOnThisScreen {
+            Logger.debug("Mouse not on dock screen and displays don't have separate spaces")
+            mouseNearBottomSince = nil
             return
         }
         
-        // Check if mouse is at bottom of screen
-        let distanceFromBottom = mouseLocation.y
+        // Check if dock process is running
+        let dockProcess = DockService.shared.findDockProcess()
+        let isDockRunning = (dockProcess != nil)
+        if !isDockRunning {
+            Logger.debug("Dock process not running")
+            mouseNearBottomSince = nil
+            return
+        }
         
-        // Properly check if mouse is within main screen bounds
-        if let mainScreen = NSScreen.main,
-           distanceFromBottom < 2,
-           mainScreen.frame.contains(mouseLocation) {
+        // Check if dock is set to autohide in preferences - do not show history menu if autohide is enabled
+        let isAutohideEnabled = isDockAutohidden()
+        if isAutohideEnabled {
+            Logger.debug("Dock autohide is enabled, not showing history menu")
+            mouseNearBottomSince = nil
+            return
+        }
+        
+        // Get dock orientation
+        let orientation = DockService.shared.getDockOrientation()
+        
+        // Check if mouse is near the dock edge based on orientation
+        var isNearDockEdge = false
+        
+        if orientation == "bottom" {
+            // For bottom dock, check if mouse is at bottom of screen
+            isNearDockEdge = mouseDistanceFromTop >= (mouseScreen.frame.height - 5)
+        } else if orientation == "left" {
+            // For left dock, check if mouse is at left edge of screen
+            isNearDockEdge = mouseLocation.x <= 5
+        } else if orientation == "right" {
+            // For right dock, check if mouse is at right edge of screen
+            isNearDockEdge = mouseLocation.x >= (mouseScreen.frame.width - 5)
+        }
+        
+        // Log all conditions
+        Logger.debug("""
+            History menu conditions:
+            - Distance from top: \(mouseDistanceFromTop)
+            - On dock screen: \(isOnDockScreen)
+            - Displays have separate spaces: \(NSScreen.displaysHaveSeparateSpaces)
+            - Should allow on this screen: \(shouldAllowOnThisScreen)
+            - Dock autohide enabled: \(isAutohideEnabled)
+            - Dock running: \(isDockRunning)
+            - Dock orientation: \(orientation)
+            - Near dock edge: \(isNearDockEdge)
+        """)
+        
+        // Simplified check: just ensure mouse is near dock edge and on appropriate screen
+        if isNearDockEdge && shouldAllowOnThisScreen && isDockRunning {
             // Start tracking time if not already tracking
             if mouseNearBottomSince == nil {
                 mouseNearBottomSince = currentTime
+                Logger.debug("Started tracking mouse at dock edge")
             }
             
             // Check if enough time has passed
             if let startTime = mouseNearBottomSince,
                currentTime - startTime >= historyShowDelay {
-                Logger.debug("  - Mouse held at bottom for required duration, showing history menu")
+                Logger.debug("  - Mouse held at dock edge for required duration, showing history menu")
                 showHistoryMenu(at: mouseLocation)
                 mouseNearBottomSince = nil  // Reset timer after showing menu
             }
         } else {
-            // Reset timer if mouse moves away from bottom
-            mouseNearBottomSince = nil
+            // Reset timer if mouse moves away from dock edge
+            if mouseNearBottomSince != nil {
+                Logger.debug("Mouse moved away from dock edge")
+                mouseNearBottomSince = nil
+            }
         }
+    }
+    
+    // Check if the dock is autohidden
+    private func isDockAutohidden() -> Bool {
+        let defaults = UserDefaults(suiteName: "com.apple.dock")
+        return defaults?.bool(forKey: "autohide") ?? false
+    }
+    
+    // Simplified check for dock visibility
+    private func isSimplifiedDockVisible() -> Bool {
+        // Get the dock process
+        guard let dockProcess = DockService.shared.findDockProcess() else {
+            return false
+        }
+        
+        // For debugging, just assume dock is visible if process is running
+        return true
+    }
+    
+    // Original more complex check
+    private func isDockVisible() -> Bool {
+        // Get the dock process
+        guard let dockProcess = DockService.shared.findDockProcess() else {
+            return false
+        }
+        
+        // Get the dock element
+        let dockElement = AXUIElementCreateApplication(dockProcess.processIdentifier)
+        
+        // Get dock position and size
+        var position: CFTypeRef?
+        var size: CFTypeRef?
+        
+        guard AXUIElementCopyAttributeValue(dockElement, kAXPositionAttribute as CFString, &position) == .success,
+              AXUIElementCopyAttributeValue(dockElement, kAXSizeAttribute as CFString, &size) == .success,
+              let positionRef = position,
+              let sizeRef = size,
+              CFGetTypeID(positionRef) == AXValueGetTypeID(),
+              CFGetTypeID(sizeRef) == AXValueGetTypeID() else {
+            return false
+        }
+        
+        var point = CGPoint.zero
+        var dockSize = CGSize.zero
+        
+        // Get the position and size values
+        AXValueGetValue(positionRef as! AXValue, .cgPoint, &point)
+        AXValueGetValue(sizeRef as! AXValue, .cgSize, &dockSize)
+        
+        // Check if dock has a reasonable size (not hidden)
+        let orientation = DockService.shared.getDockOrientation()
+        
+        if orientation == "bottom" {
+            // For bottom dock, check height
+            return dockSize.height > 10
+        } else if orientation == "left" {
+            // For left dock, check width
+            return dockSize.width > 10
+        } else if orientation == "right" {
+            // For right dock, check width
+            return dockSize.width > 10
+        }
+        
+        return false
     }
     
     private func showHistoryMenu(at mouseLocation: NSPoint) {
@@ -1327,14 +1503,53 @@ class DockWatcher: NSObject, NSMenuDelegate {
             }
         )
         
-        // Position at bottom of screen at mouse x position
+        // Position based on dock orientation
         if let window = controller.window {
-            let xPos = mouseLocation.x - window.frame.width / 2  // Center on mouse x position
-            window.setFrameOrigin(NSPoint(x: xPos, y: 0))
+            let orientation = DockService.shared.getDockOrientation()
+            
+            // Get the screen containing the mouse cursor
+            let screenWithMouse = DockService.shared.getScreenContainingPoint(mouseLocation) ?? NSScreen.main ?? NSScreen.screens.first!
+            
+            // Use the screen with the mouse cursor if displays have separate spaces
+            // Otherwise use the screen with the dock
+            let screenToUse = NSScreen.displaysHaveSeparateSpaces 
+                ? screenWithMouse 
+                : (DockService.shared.getScreenWithDock() ?? NSScreen.main ?? NSScreen.screens.first!)
+            
+            switch orientation {
+            case "bottom":
+                // Position at bottom of screen at mouse x position
+                let xPos = mouseLocation.x - window.frame.width / 2  // Center on mouse x position
+                let yPos: CGFloat = screenToUse.frame.minY  // Bottom of screen
+                window.setFrameOrigin(NSPoint(x: xPos, y: yPos))
+                
+            case "left":
+                // Position at left of screen at mouse y position
+                let xPos: CGFloat = screenToUse.frame.minX  // Left edge of screen
+                let yPos = mouseLocation.y - window.frame.height / 2  // Center on mouse y position
+                window.setFrameOrigin(NSPoint(x: xPos, y: yPos))
+                
+            case "right":
+                // Position at right of screen at mouse y position
+                let xPos = screenToUse.frame.maxX - window.frame.width  // Right edge of screen
+                let yPos = mouseLocation.y - window.frame.height / 2  // Center on mouse y position
+                window.setFrameOrigin(NSPoint(x: xPos, y: yPos))
+                
+            default:
+                // Default to bottom positioning
+                let xPos = mouseLocation.x - window.frame.width / 2  // Center on mouse x position
+                let yPos: CGFloat = screenToUse.frame.minY  // Bottom of screen
+                window.setFrameOrigin(NSPoint(x: xPos, y: yPos))
+            }
             
             // Configure window
-            window.level = NSWindow.Level.popUpMenu
+            window.level = NSScreen.displaysHaveSeparateSpaces 
+                ? NSWindow.Level.floating  // Higher level for separate spaces
+                : NSWindow.Level.popUpMenu
             window.collectionBehavior = NSWindow.CollectionBehavior([.transient, .canJoinAllSpaces])
+            
+            // Log position for debugging
+            Logger.debug("Positioned history menu at \(window.frame.origin) with orientation \(orientation) on screen \(screenToUse)")
         }
         
         // Store and show the controller
@@ -1350,5 +1565,47 @@ class DockWatcher: NSObject, NSMenuDelegate {
             return false
         }
         return window.isVisible
+    }
+    
+    // Handle multiple displays with separate spaces
+    private func handleMultipleDisplays() {
+        // Only take action if displays have separate spaces
+        guard NSScreen.displaysHaveSeparateSpaces else { return }
+        
+        //Logger.debug("Handling multiple displays with separate spaces")
+        
+        // Ensure event tap is active on all screens
+        if !_isEventTapActive {
+            Logger.warning("Event tap not active, reinitializing for multiple displays")
+            Task { @MainActor in
+                await reinitializeEventTap()
+            }
+        }
+        
+        // Ensure window chooser is configured for all spaces
+        if let chooser = windowChooser,
+           let window = chooser.window {
+            // Make sure window is configured to be visible on all spaces
+            if !window.collectionBehavior.contains(.canJoinAllSpaces) {
+                Logger.debug("Updating window chooser to be visible on all spaces")
+                window.collectionBehavior = [.transient, .ignoresCycle, .canJoinAllSpaces]
+                window.level = NSWindow.Level.floating + 12
+                
+                // Force window to front to ensure visibility
+                window.orderFront(nil)
+            }
+        }
+        
+        // Ensure MultiDisplayManager is aware of the current screen configuration
+        MultiDisplayManager.shared.ensureAppPresenceOnAllScreens()
+    }
+    
+    // Check if mouse is on a different screen than the dock
+    private func isMouseOnDifferentScreenThanDock() -> Bool {
+        let mouseLocation = NSEvent.mouseLocation
+        let mouseScreen = DockService.shared.getScreenContainingPoint(mouseLocation)
+        let dockScreen = DockService.shared.getScreenWithDock()
+        
+        return mouseScreen != nil && dockScreen != nil && mouseScreen != dockScreen
     }
 }

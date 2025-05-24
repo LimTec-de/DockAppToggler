@@ -6,6 +6,7 @@
 /// - Single-click to hide active apps
 /// - Double-click to terminate active apps
 /// - Modern UI with hover effects and animations
+/// - Visible on all spaces when "displays have separate spaces" is active
 
 @preconcurrency import Foundation
 import AppKit
@@ -30,6 +31,18 @@ let app = NSApplication.shared
 // Run the accessibility check once at startup
 _ = AccessibilityService.shared.requestAccessibilityPermissions()
 
+// Check if displays have separate spaces and log the status
+Logger.info("Displays have separate spaces: \(NSScreen.displaysHaveSeparateSpaces)")
+
+// Initialize multi-display manager to handle separate spaces
+let multiDisplayManager = MultiDisplayManager.shared
+
+// Ensure app presence on all screens if needed
+if NSScreen.displaysHaveSeparateSpaces {
+    Logger.info("Configuring app for multiple displays with separate spaces")
+    multiDisplayManager.ensureAppPresenceOnAllScreens()
+}
+
 // Show help screen on first launch
 DispatchQueue.main.async {
     HelpWindowController.showIfNeeded()
@@ -47,7 +60,8 @@ let appController = (
     watcher: DockWatcher(),
     statusBar: StatusBarController(updater: sharedUpdater),
     statusBarWatcher: StatusBarWatcher(),
-    updater: sharedUpdater
+    updater: sharedUpdater,
+    multiDisplay: multiDisplayManager  // Add the multi-display manager to the tuple
 )
 
 // Configure the app to be a background application

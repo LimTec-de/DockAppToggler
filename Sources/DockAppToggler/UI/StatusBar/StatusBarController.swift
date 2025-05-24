@@ -18,6 +18,9 @@ class StatusBarController {
     // Add menu item property to track state
     private var previewsMenuItem: NSMenuItem?
     
+    // Add property to track screen observer
+    private var screenObserver: Any?
+    
     init(updater: SPUStandardUpdaterController?) {
         statusBar = NSStatusBar.system
         statusItem = statusBar.statusItem(withLength: NSStatusItem.variableLength)
@@ -77,7 +80,89 @@ class StatusBarController {
         
         setupMenu()
         updateAutostartState()
-        //setupMouseEventMonitoring()
+        setupScreenObserver()
+    }
+    
+    // Add method to observe screen changes
+    private func setupScreenObserver() {
+        // Remove existing observer if any
+        if let observer = screenObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        
+        // Add observer for screen changes
+        screenObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            // Use Task to call the actor-isolated method from a non-isolated context
+            Task { @MainActor [weak self] in
+                self?.handleScreenConfigurationChange()
+            }
+        }
+    }
+    
+    // Add method to handle screen configuration changes
+    private func handleScreenConfigurationChange() {
+        // Log the change
+        Logger.debug("Screen configuration changed in StatusBarController")
+        
+        // Update status bar item visibility if needed
+        if NSScreen.displaysHaveSeparateSpaces {
+            // When displays have separate spaces, ensure status bar item is visible
+            Logger.debug("Ensuring status bar item visibility with separate spaces")
+            
+            // The system should automatically handle status bar item visibility
+            // but we can force a refresh by recreating it if needed
+            if statusItem.button?.superview == nil {
+                Logger.debug("Status bar item not visible, recreating")
+                recreateStatusItem()
+            }
+        }
+    }
+    
+    // Add method to recreate status item if needed
+    private func recreateStatusItem() {
+        // Store current state
+        let currentMenu = statusItem.menu
+        
+        // Create new status item
+        statusItem = statusBar.statusItem(withLength: NSStatusItem.variableLength)
+        
+        // Restore menu
+        statusItem.menu = currentMenu
+        
+        // Restore icon
+        if let button = statusItem.button {
+            // Try multiple paths to find the icon
+            let iconImage: NSImage?
+            if let bundleIconPath = Bundle.main.path(forResource: "trayicon", ofType: "png") {
+                // App bundle path
+                iconImage = NSImage(contentsOfFile: bundleIconPath)
+            } else {
+                // Development path
+                let devIconPath = "Sources/DockAppToggler/Resources/trayicon.png"
+                iconImage = NSImage(contentsOfFile: devIconPath)
+            }
+            
+            if let image = iconImage {
+                // Create a copy of the image at the desired size
+                let resizedImage = NSImage(size: NSSize(width: 18, height: 18))
+                resizedImage.lockFocus()
+                image.draw(in: NSRect(origin: .zero, size: NSSize(width: 18, height: 18)))
+                resizedImage.unlockFocus()
+                
+                // Set as template
+                resizedImage.isTemplate = true
+                button.image = resizedImage
+                
+                // Add tooltip
+                button.toolTip = Bundle.main.infoDictionary?[kCFBundleNameKey as String] as? String ?? "DockAppToggler"
+            }
+        }
+        
+        Logger.debug("Status bar item recreated")
     }
     
     private func setupMenu() {
@@ -225,6 +310,13 @@ class StatusBarController {
         // Since we're using nonisolated(unsafe), we need to be careful about thread safety
         if let monitor = mouseEventMonitor {
             NSEvent.removeMonitor(monitor)
+        }
+        
+        // Remove screen observer using Task to access actor-isolated property
+        Task { @MainActor [weak self] in
+            if let self = self, let observer = self.screenObserver {
+                NotificationCenter.default.removeObserver(observer)
+            }
         }
     }
 }
