@@ -14,7 +14,7 @@ class BubbleVisualEffectView: NSVisualEffectView {
         // Create bubble shape with arrow
         let path = NSBezierPath()
         let bounds = self.bounds
-        let radius: CGFloat = 6
+        let radius: CGFloat = 10
         
         // Start from bottom center (arrow tip)
         let arrowTipX = bounds.midX
@@ -97,9 +97,12 @@ class BubbleVisualEffectView: NSVisualEffectView {
         // Add border layer only for the custom rounded rectangle path
         let borderLayer = CAShapeLayer()
         borderLayer.path = roundedRect.cgPath
-        borderLayer.lineWidth = 0.5
+        borderLayer.lineWidth = 0.9
         borderLayer.fillColor = nil
-        borderLayer.strokeColor = NSColor(white: 1.0, alpha: 0.3).cgColor
+        let isDark = effectiveAppearance.isDarkMode
+        borderLayer.strokeColor = (isDark
+            ? NSColor(white: 1.0, alpha: 0.12)
+            : NSColor(white: 0.0, alpha: 0.10)).cgColor
         
         // Remove any existing border layers
         self.layer?.sublayers?.removeAll(where: { $0.name == "borderLayer" })
@@ -114,7 +117,10 @@ class BubbleVisualEffectView: NSVisualEffectView {
         
         // Update border color when appearance changes
         if let borderLayer = self.layer?.sublayers?.first(where: { $0.name == "borderLayer" }) as? CAShapeLayer {
-            borderLayer.strokeColor = NSColor(white: 1.0, alpha: 0.3).cgColor
+            let isDark = effectiveAppearance.isDarkMode
+            borderLayer.strokeColor = (isDark
+                ? NSColor(white: 1.0, alpha: 0.12)
+                : NSColor(white: 0.0, alpha: 0.10)).cgColor
         }
     }
-} 
+}

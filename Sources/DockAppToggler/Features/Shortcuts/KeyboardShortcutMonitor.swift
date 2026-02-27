@@ -28,6 +28,10 @@ class KeyboardShortcutMonitor {
     private var isOptionTabEnabled: Bool {
         UserDefaults.standard.bool(forKey: "OptionTabEnabled", defaultValue: true)
     }
+
+    private var isOptionTabScreenshotEnabled: Bool {
+        UserDefaults.standard.bool(forKey: "OptionTabScreenshotEnabled", defaultValue: true)
+    }
     
     private init() {
         setupEventTap()
@@ -220,13 +224,10 @@ class KeyboardShortcutMonitor {
                 // Handle window selection
                 Task { @MainActor in
                     var pid: pid_t = 0
-                    if AXUIElementGetPid(element, &pid) == .success,
-                       let app = NSRunningApplication(processIdentifier: pid) {
-                        app.activate(options: .activateIgnoringOtherApps)
-                        let _ = AXUIElementPerformAction(element, "AXRaise" as CFString)
-                    } else {
-                        AXUIElementPerformAction(element, "AXRaise" as CFString)
-                    }
+                    let selectedApp = AXUIElementGetPid(element, &pid) == .success
+                        ? NSRunningApplication(processIdentifier: pid)
+                        : nil
+                    AccessibilityService.shared.focusWindow(element, for: selectedApp)
                     self?.hideWindowChooser()
                 }
             }
@@ -316,6 +317,18 @@ class KeyboardShortcutMonitor {
     }
     
     private func handleEventTap(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        // Global screenshot shortcut: Option + P
+        if type == .keyDown,
+           let nsEvent = NSEvent(cgEvent: event),
+           nsEvent.keyCode == 35,
+           nsEvent.modifierFlags.intersection(.deviceIndependentFlagsMask) == [.option],
+           isOptionTabScreenshotEnabled {
+            Task { @MainActor in
+                ScreenCaptureService.captureInteractiveToClipboard()
+            }
+            return nil
+        }
+
         // Check if feature is enabled first
         guard isOptionTabEnabled else {
             return Unmanaged.passRetained(event)

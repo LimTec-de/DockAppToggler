@@ -73,7 +73,12 @@ class DockWatcher: NSObject, NSMenuDelegate {
     private var lastRightClickedDockIcon: NSRunningApplication?
     private var showingWindowChooserOnClick: Bool = false
     private var skipNextClickProcessing: Bool = false
-    private let eventTimeoutInterval: TimeInterval = 5.0  // 5 seconds timeout
+    private let eventTimeoutInterval: TimeInterval = 15.0
+    private let heartbeatMissesBeforeReinit: Int = 3
+    private let minReinitInterval: TimeInterval = 60.0
+    private var consecutiveEventTapMisses: Int = 0
+    private var lastReinitTime: TimeInterval = 0
+    private var isReinitializingEventTap = false
     
     // Add currentApp property
     @MainActor private var currentApp: NSRunningApplication?
@@ -420,14 +425,26 @@ class DockWatcher: NSObject, NSMenuDelegate {
                 let timeSinceLastEvent = currentTime - self._lastEventTime
                 
                 if timeSinceLastEvent > self.eventTimeoutInterval {
-                    Logger.warning("Event tap appears inactive (no events for \(Int(timeSinceLastEvent)) seconds). Reinitializing...")
-                    await self.reinitializeEventTap()
+                    self.consecutiveEventTapMisses += 1
+                    if self.consecutiveEventTapMisses >= self.heartbeatMissesBeforeReinit,
+                       currentTime - self.lastReinitTime >= self.minReinitInterval {
+                        Logger.warning("Event tap appears inactive (no events for \(Int(timeSinceLastEvent)) seconds). Reinitializing...")
+                        await self.reinitializeEventTap()
+                        self.lastReinitTime = currentTime
+                        self.consecutiveEventTapMisses = 0
+                    }
+                } else {
+                    self.consecutiveEventTapMisses = 0
                 }
             }
         }
     }
 
     @MainActor private func reinitializeEventTap() async {
+        guard !isReinitializingEventTap else { return }
+        isReinitializingEventTap = true
+        defer { isReinitializingEventTap = false }
+
         Logger.info("Reinitializing event tap...")
         
         // First clean up existing resources
@@ -464,6 +481,8 @@ class DockWatcher: NSObject, NSMenuDelegate {
         
         // Reset event time after successful reinitialization
         _lastEventTime = ProcessInfo.processInfo.systemUptime
+        _isEventTapActive = true
+        consecutiveEventTapMisses = 0
         
         Logger.success("Event tap and window chooser resources reinitialized successfully")
     }
@@ -574,7 +593,10 @@ class DockWatcher: NSObject, NSMenuDelegate {
                     watcher.updateLastEventTime()
                     
                     if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-                        await watcher.reinitializeEventTap()
+                        if let tap = watcher.eventTap {
+                            CGEvent.tapEnable(tap: tap, enable: true)
+                        }
+                        watcher.updateLastEventTime()
                         return
                     }
                     
@@ -777,29 +799,13 @@ class DockWatcher: NSObject, NSMenuDelegate {
                             // Hide the selected window
                             AccessibilityService.shared.hideWindow(window: window, for: app)
                         } else {
-                            // First activate the app
-                            app.activate(options: [.activateIgnoringOtherApps])
-                            
-                            // Then unminimize if needed
+                            // Unminimize and raise only the selected window
                             AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
-                            
-                            // Get window info for raising
-                            var titleValue: AnyObject?
-                            AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleValue)
-                            let windowName = (titleValue as? String) ?? ""
-                            let windowInfo = WindowInfo(window: window, name: windowName)
-                            
-                            // Raise window
-                            AccessibilityService.shared.raiseWindow(windowInfo: windowInfo, for: app)
+                            AXUIElementPerformAction(window, kAXRaiseAction as CFString)
                             
                             // Ensure window gets focus
                             AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, true as CFTypeRef)
                             AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, true as CFTypeRef)
-                            
-                            // Final app activation to ensure focus
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                                app.activate(options: [.activateIgnoringOtherApps])
-                            }
                         }
                     }
                 }
@@ -1497,7 +1503,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
                     if isHideAction {
                         AccessibilityService.shared.hideWindow(window: window, for: app)
                     } else {
-                        AccessibilityService.shared.raiseWindow(windowInfo: windowInfo, for: app)
+                        AccessibilityService.shared.focusWindow(windowInfo.window, for: app)
                     }
                 }
             }

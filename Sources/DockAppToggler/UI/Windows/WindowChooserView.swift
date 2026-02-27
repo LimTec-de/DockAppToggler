@@ -759,11 +759,10 @@ class WindowChooserView: NSView {
                 // Try to find matching window by ID or name
                 if let matchingWindow = windows.first(where: { $0.cgWindowID == cgWindowID }) ?? 
                                       windows.first(where: { $0.name == windowInfo.name }) {
-                    // Use AccessibilityService to raise the window properly
-                    AccessibilityService.shared.raiseWindow(windowInfo: matchingWindow, for: app)
+                    AccessibilityService.shared.focusWindow(matchingWindow.window, for: app)
                 } else {
-                    // Fallback: just activate the app if window not found
-                    AccessibilityService.shared.activateApp(app)
+                    // Fallback: attempt to raise the originally selected AX window directly
+                    AccessibilityService.shared.focusWindow(windowInfo.window, for: app)
                 }
                 
                 // Close the history window chooser
@@ -776,8 +775,7 @@ class WindowChooserView: NSView {
         
         var pid: pid_t = 0
         if windowInfo.cgWindowID != nil && AXUIElementGetPid(windowInfo.window, &pid) != .success {
-            // For CGWindow entries, just activate the app
-            targetApp.activate(options: [.activateIgnoringOtherApps])
+            // For pure CGWindow entries we still use callback fallback handling
             callback?(windowInfo.window, false)  // This will trigger the window raise through CGWindow
             
             // Update topmost window and refresh menu
@@ -833,18 +831,14 @@ class WindowChooserView: NSView {
             
             
             
-            // First activate the app
-            targetApp.activate(options: [.activateIgnoringOtherApps])
-            
-            // Then unminimize if needed and raise the window
+            // Unminimize if needed and raise only the selected window
             var minimizedValue: AnyObject?
             let isMinimized = AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success &&
                              (minimizedValue as? Bool == true)
             
             if isMinimized {
                 // Unminimize and raise
-                AXUIElementSetAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
-                AXUIElementPerformAction(windowInfo.window, kAXRaiseAction as CFString)
+                AccessibilityService.shared.focusWindow(windowInfo.window, for: targetApp)
                 
                 // Update minimize button state
                 if let hideButton = hideButtons.first(where: { $0.tag == sender.tag }) as? MinimizeButton {
@@ -854,12 +848,6 @@ class WindowChooserView: NSView {
                 // Update topmost window
                 self.topmostWindow = windowInfo.window
                 self.updateButtonStates()
-                
-                // Ensure window gets focus
-                AXUIElementSetAttributeValue(windowInfo.window, kAXMainAttribute as CFString, true as CFTypeRef)
-                AXUIElementSetAttributeValue(windowInfo.window, kAXFocusedAttribute as CFString, true as CFTypeRef)
-                
-                self.callback?(windowInfo.window, false)
                 
                 // Close window chooser in history mode
                 if self.isHistoryMode {
@@ -879,13 +867,7 @@ class WindowChooserView: NSView {
                 }
             } else {
                 // Just raise the window
-                AXUIElementPerformAction(windowInfo.window, kAXRaiseAction as CFString)
-                
-                // Ensure window gets focus
-                AXUIElementSetAttributeValue(windowInfo.window, kAXMainAttribute as CFString, true as CFTypeRef)
-                AXUIElementSetAttributeValue(windowInfo.window, kAXFocusedAttribute as CFString, true as CFTypeRef)
-                
-                callback?(windowInfo.window, false)
+                AccessibilityService.shared.focusWindow(windowInfo.window, for: targetApp)
 
                 Logger.debug("Updating topmost windowy")
                 // Update topmost window
@@ -2039,11 +2021,9 @@ class WindowChooserView: NSView {
         // Get the app for this window
         var pid: pid_t = 0
         if AXUIElementGetPid(windowInfo.window, &pid) == .success,
-           let app = NSRunningApplication(processIdentifier: pid) {
-            
-            // First activate the app
-            app.activate(options: .activateIgnoringOtherApps)
-            
+           NSRunningApplication(processIdentifier: pid) != nil {
+            let selectedApp = NSRunningApplication(processIdentifier: pid)
+
             // Unminimize if needed
             var minimizedValue: AnyObject?
             let isMinimized = AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success &&
@@ -2054,26 +2034,10 @@ class WindowChooserView: NSView {
             }
             
             // Ensure window gets focus and is frontmost
-            AXUIElementSetAttributeValue(windowInfo.window, kAXMainAttribute as CFString, true as CFTypeRef)
-            AXUIElementSetAttributeValue(windowInfo.window, kAXFocusedAttribute as CFString, true as CFTypeRef)
-            AXUIElementPerformAction(windowInfo.window, kAXRaiseAction as CFString)
-            
-            // Additional raise action after a tiny delay to ensure it takes effect
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                AXUIElementPerformAction(windowInfo.window, kAXRaiseAction as CFString)
-                self.callback?(windowInfo.window, false)
-            }
+            AccessibilityService.shared.focusWindow(windowInfo.window, for: selectedApp)
         } else {
-            // Fallback to CGWindow-based activation
-            targetApp.activate(options: .activateIgnoringOtherApps)
-            
-            // Try to raise window using accessibility API even for CGWindow
-            AXUIElementPerformAction(windowInfo.window, kAXRaiseAction as CFString)
-            
-            // Call callback after a tiny delay
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                self.callback?(windowInfo.window, false)
-            }
+            // Fallback for non-AX entries
+            callback?(windowInfo.window, false)
         }
         
         // Update topmost window and refresh menu

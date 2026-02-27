@@ -81,8 +81,8 @@ enum Constants {
             // Base colors that adapt to the theme
             static let backgroundColor = NSColor(name: nil) { appearance in
                 appearance.isDarkMode ? 
-                    NSColor(calibratedWhite: 0.2, alpha: 0.95) : 
-                    NSColor(calibratedWhite: 0.95, alpha: 0.95)
+                    NSColor(calibratedWhite: 0.14, alpha: 0.78) : 
+                    NSColor(calibratedWhite: 0.98, alpha: 0.78)
             }
             
             static let primaryTextColor = NSColor(name: nil) { appearance in
@@ -91,8 +91,8 @@ enum Constants {
             
             static let secondaryTextColor = NSColor(name: nil) { appearance in
                 appearance.isDarkMode ? 
-                    NSColor(calibratedWhite: 0.6, alpha: 1.0) : 
-                    NSColor(calibratedWhite: 0.4, alpha: 1.0)
+                    NSColor(calibratedWhite: 0.74, alpha: 1.0) : 
+                    NSColor(calibratedWhite: 0.28, alpha: 1.0)
             }
             
             static let iconTintColor = NSColor(name: nil) { appearance in
@@ -107,8 +107,8 @@ enum Constants {
             
             static let hoverBackgroundColor = NSColor(name: nil) { appearance in
                 appearance.isDarkMode ? 
-                    NSColor(white: 1.0, alpha: 0.05) :
-                    NSColor(white: 0.0, alpha: 0.001)
+                    NSColor(white: 1.0, alpha: 0.09) :
+                    NSColor(white: 0.0, alpha: 0.06)
             }
             
             static let minimizedTextColor = NSColor(name: nil) { appearance in

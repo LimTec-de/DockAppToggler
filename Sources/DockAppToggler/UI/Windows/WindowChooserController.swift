@@ -150,7 +150,7 @@ class WindowChooserController: NSWindowController {
         guard let window = window else { return }
         window.backgroundColor = .clear
         window.isOpaque = false
-        window.hasShadow = true
+        window.hasShadow = false
         
         // Set appropriate window level based on whether displays have separate spaces
         window.level = NSScreen.displaysHaveSeparateSpaces 
@@ -174,14 +174,15 @@ class WindowChooserController: NSWindowController {
         containerView.wantsLayer = true
         containerView.layer?.masksToBounds = false
         containerView.layer?.shadowColor = NSColor.black.cgColor
-        containerView.layer?.shadowOpacity = 0.15
-        containerView.layer?.shadowRadius = 3.0
+        containerView.layer?.shadowOpacity = 0.34
+        containerView.layer?.shadowRadius = 24.0
         containerView.layer?.shadowOffset = .zero
         
         // Create and configure the visual effect view with bubble arrow
         let visualEffect = BubbleVisualEffectView(frame: containerView.bounds)
         visualEffect.material = .menu
         visualEffect.state = .active
+        visualEffect.blendingMode = .withinWindow
         visualEffect.wantsLayer = true
         visualEffect.layer?.masksToBounds = true
         visualEffect.showsArrow = !isHistoryMenu
