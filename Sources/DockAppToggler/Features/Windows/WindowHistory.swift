@@ -33,14 +33,13 @@ class WindowHistory {
     }
     
     private func setupActiveWindowTimer() {
-        // Check active window every 1 second
-        let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+        let timer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.captureActiveWindow()
             }
         }
         activeWindowTimer = timer
-        cleanupTimerRef = SendableTimerRef(timer)  // Store in Sendable wrapper
+        cleanupTimerRef = SendableTimerRef(timer)
     }
     
     private func captureActiveWindow() {

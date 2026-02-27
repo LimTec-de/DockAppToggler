@@ -160,10 +160,31 @@ class StatusBarWatcher {
         return AXIsProcessTrustedWithOptions(options)
     }
     
+    private var _lastStatusBarCheckTime: TimeInterval = 0
+    
     private func startWatching() {
         eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved]) { [weak self] event in
+            guard let self = self, self.isEnabled else { return }
+            
+            let now = ProcessInfo.processInfo.systemUptime
+            guard now - self._lastStatusBarCheckTime >= 0.1 else { return }
+            self._lastStatusBarCheckTime = now
+            
+            let mouseY = NSEvent.mouseLocation.y
+            let screenMaxY = NSScreen.main?.frame.maxY ?? 0
+            guard mouseY > screenMaxY - 30 else {
+                Task { @MainActor in
+                    if self.lastHoveredPid != 0 {
+                        self.lastHoveredPid = 0
+                        self.lastHoveredElement = nil
+                        self.tooltipWindow.hide()
+                    }
+                }
+                return
+            }
+            
             Task { @MainActor in
-                self?.handleMouseMove(event)
+                self.handleMouseMove(event)
             }
         }
     }
