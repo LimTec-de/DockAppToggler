@@ -7,6 +7,11 @@ enum ScreenCaptureState {
     @MainActor static var isOverlayActive = false
 }
 
+private class KeyableWindow: NSWindow {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+}
+
 struct ContentView: View {
     private static let trustedCheckOptionPrompt = "AXTrustedCheckOptionPrompt"
 
@@ -221,7 +226,7 @@ struct ContentView: View {
         initialSelectionRect: CGRect? = nil
     ) {
         ScreenCaptureState.isOverlayActive = true
-        let window = NSWindow(
+        let window = KeyableWindow(
             contentRect: frame,
             styleMask: [.borderless],
             backing: .buffered,
@@ -233,6 +238,7 @@ struct ContentView: View {
         window.backgroundColor = .clear
         window.isOpaque = true
         window.hasShadow = false
+        window.acceptsMouseMovedEvents = true
         
         // Make window available on all spaces.
         window.collectionBehavior = coversEntireScreen
@@ -504,6 +510,7 @@ struct ContentView: View {
         }
         
         window.contentView = NSHostingView(rootView: captureView)
+        NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
     }
 
