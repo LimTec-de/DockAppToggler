@@ -350,6 +350,26 @@ class AccessibilityService {
         //Logger.success("Adding window (fallback): '\(windowName)' ID: \(windowID)")
         return WindowInfo(window: window, name: windowName)
     }
+
+    func focusWindow(_ window: AXUIElement, for app: NSRunningApplication?) {
+        AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
+        AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, true as CFTypeRef)
+        AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, true as CFTypeRef)
+        AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+
+        guard let app = app else { return }
+
+        // Some apps (including Finder) only honor AXRaise reliably once active.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
+            let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+            guard frontmostPID != app.processIdentifier else { return }
+
+            app.activate(options: [.activateIgnoringOtherApps])
+            AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, true as CFTypeRef)
+            AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, true as CFTypeRef)
+            AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+        }
+    }
     
     func raiseWindow(windowInfo: WindowInfo, for app: NSRunningApplication) {
         Logger.debug("=== RAISING WINDOW/APP ===")

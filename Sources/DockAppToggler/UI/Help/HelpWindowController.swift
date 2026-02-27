@@ -13,7 +13,7 @@ class HelpWindowController: NSWindowController {
             backing: .buffered,
             defer: false
         )
-        window.title = "DockAppToggler Help"
+        window.title = "DockAppToggler Hilfe"
         window.center()
         
         // Create and set the view controller

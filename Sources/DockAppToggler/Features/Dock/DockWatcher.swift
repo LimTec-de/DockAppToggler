@@ -46,13 +46,21 @@ class DockWatcher: NSObject, NSMenuDelegate {
     
     @MainActor var windowChooser: WindowChooserController? {
         get { _windowChooser }
-        set { _windowChooser = newValue }
+        set {
+            _windowChooser = newValue
+            _isChooserVisibleUnsafe = newValue != nil
+        }
     }
     
     @MainActor var menuShowTask: DispatchWorkItem? {
         get { _menuShowTask }
         set { _menuShowTask = newValue }
     }
+    
+    // Cross-thread state for event tap callback filtering (reduces MainActor dispatch overhead)
+    nonisolated(unsafe) private var _lastMouseEventTimeUnsafe: TimeInterval = 0
+    nonisolated(unsafe) private var _lastEventTimeUnsafe: TimeInterval = 0
+    nonisolated(unsafe) private var _isChooserVisibleUnsafe: Bool = false
     
     // Other properties
     nonisolated(unsafe) private var eventTap: CFMachPort?
@@ -73,7 +81,12 @@ class DockWatcher: NSObject, NSMenuDelegate {
     private var lastRightClickedDockIcon: NSRunningApplication?
     private var showingWindowChooserOnClick: Bool = false
     private var skipNextClickProcessing: Bool = false
-    private let eventTimeoutInterval: TimeInterval = 5.0  // 5 seconds timeout
+    private let eventTimeoutInterval: TimeInterval = 15.0
+    private let heartbeatMissesBeforeReinit: Int = 3
+    private let minReinitInterval: TimeInterval = 60.0
+    private var consecutiveEventTapMisses: Int = 0
+    private var lastReinitTime: TimeInterval = 0
+    private var isReinitializingEventTap = false
     
     // Add currentApp property
     @MainActor private var currentApp: NSRunningApplication?
@@ -165,9 +178,9 @@ class DockWatcher: NSObject, NSMenuDelegate {
     
     // Update setupMemoryMonitoring to use detailed memory reporting
     private func setupMemoryMonitoring() {
-        memoryCleanupTimer = Timer.scheduledTimer(withTimeInterval: 15.0, repeats: true) { [weak self] _ in
+        memoryCleanupTimer = Timer.scheduledTimer(withTimeInterval: 60.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
-                guard let self = self else { return }
+                guard let self = self, !ScreenCaptureState.isOverlayActive else { return }
                 let usage = self.reportDetailedMemoryUsage()
                 
                 // Use static strings and format once
@@ -197,12 +210,17 @@ class DockWatcher: NSObject, NSMenuDelegate {
     private var menuWatchdogTimer: Timer?
     private let menuTimeoutInterval: TimeInterval = 30.0 // 30 seconds timeout
     
-    // Add method to start menu watchdog
     private func startMenuWatchdog() {
-        menuWatchdogTimer?.invalidate()
+        guard menuWatchdogTimer == nil else { return }
         menuWatchdogTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self = self else { return }
+                
+                guard self.windowChooser != nil else {
+                    self.menuWatchdogTimer?.invalidate()
+                    self.menuWatchdogTimer = nil
+                    return
+                }
                 
                 let currentTime = ProcessInfo.processInfo.systemUptime
                 if let chooser = self.windowChooser,
@@ -215,6 +233,9 @@ class DockWatcher: NSObject, NSMenuDelegate {
                     self.lastHoveredApp = nil
                     self.isMouseOverDock = false
                     await self.cleanupResources()
+                    
+                    self.menuWatchdogTimer?.invalidate()
+                    self.menuWatchdogTimer = nil
                 }
             }
         }
@@ -244,13 +265,12 @@ class DockWatcher: NSObject, NSMenuDelegate {
     
     override init() {
         super.init()
-        windowChooser = nil  // Ensure it starts nil
+        windowChooser = nil
         setupEventTap()
         setupNotifications()
         setupDockMenuTracking()
         startHeartbeat()
         setupMemoryMonitoring()
-        startMenuWatchdog()
         startHistoryCheck()
     }
     
@@ -294,7 +314,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
     }
 
     @MainActor private func cleanupResources() async {
-        guard !isMouseOverDock else { return }
+        guard !isMouseOverDock, !ScreenCaptureState.isOverlayActive else { return }
         
         Logger.debug("Starting memory cleanup")
         
@@ -408,26 +428,37 @@ class DockWatcher: NSObject, NSMenuDelegate {
     }
     
     private func startHeartbeat() {
-        // Stop existing timer if any
         heartbeatTimer?.invalidate()
         
-        // Create new timer
         heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
             guard let self = self else { return }
             
             Task { @MainActor in
                 let currentTime = ProcessInfo.processInfo.systemUptime
-                let timeSinceLastEvent = currentTime - self._lastEventTime
+                // Use the nonisolated(unsafe) timestamp set directly in the event tap callback
+                let timeSinceLastEvent = currentTime - self._lastEventTimeUnsafe
                 
                 if timeSinceLastEvent > self.eventTimeoutInterval {
-                    Logger.warning("Event tap appears inactive (no events for \(Int(timeSinceLastEvent)) seconds). Reinitializing...")
-                    await self.reinitializeEventTap()
+                    self.consecutiveEventTapMisses += 1
+                    if self.consecutiveEventTapMisses >= self.heartbeatMissesBeforeReinit,
+                       currentTime - self.lastReinitTime >= self.minReinitInterval {
+                        Logger.warning("Event tap appears inactive (no events for \(Int(timeSinceLastEvent)) seconds). Reinitializing...")
+                        await self.reinitializeEventTap()
+                        self.lastReinitTime = currentTime
+                        self.consecutiveEventTapMisses = 0
+                    }
+                } else {
+                    self.consecutiveEventTapMisses = 0
                 }
             }
         }
     }
 
     @MainActor private func reinitializeEventTap() async {
+        guard !isReinitializingEventTap, !ScreenCaptureState.isOverlayActive else { return }
+        isReinitializingEventTap = true
+        defer { isReinitializingEventTap = false }
+
         Logger.info("Reinitializing event tap...")
         
         // First clean up existing resources
@@ -464,6 +495,8 @@ class DockWatcher: NSObject, NSMenuDelegate {
         
         // Reset event time after successful reinitialization
         _lastEventTime = ProcessInfo.processInfo.systemUptime
+        _isEventTapActive = true
+        consecutiveEventTapMisses = 0
         
         Logger.success("Event tap and window chooser resources reinitialized successfully")
     }
@@ -567,28 +600,56 @@ class DockWatcher: NSObject, NSMenuDelegate {
                 }
                 
                 let watcher = Unmanaged<DockWatcher>.fromOpaque(refconUnwrapped).takeUnretainedValue()
-                let location = event.location // Capture location before async work
+                let location = event.location
                 
-                // Update last event time for heartbeat
+                // For mouse moved events: throttle + proximity filter BEFORE creating Task
+                if type == .mouseMoved {
+                    let now = ProcessInfo.processInfo.systemUptime
+                    watcher._lastEventTimeUnsafe = now
+                    
+                    if now - watcher._lastMouseEventTimeUnsafe < 0.05 {
+                        return Unmanaged.passUnretained(event)
+                    }
+                    watcher._lastMouseEventTimeUnsafe = now
+                    
+                    if !watcher._isChooserVisibleUnsafe {
+                        let screenHeight = CGFloat(CGDisplayPixelsHigh(CGMainDisplayID()))
+                        let screenWidth = CGFloat(CGDisplayPixelsWide(CGMainDisplayID()))
+                        let threshold: CGFloat = 200
+                        let isNearEdge = location.y > screenHeight - threshold ||
+                                         location.x < threshold ||
+                                         location.x > screenWidth - threshold
+                        if !isNearEdge {
+                            return Unmanaged.passUnretained(event)
+                        }
+                    }
+                    
+                    Task { @MainActor in
+                        watcher.processMouseMovement(at: location)
+                    }
+                    return Unmanaged.passUnretained(event)
+                }
+                
+                // For non-mouse-moved events (clicks, tap re-enable), always dispatch
                 Task { @MainActor in
                     watcher.updateLastEventTime()
                     
                     if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-                        await watcher.reinitializeEventTap()
+                        if let tap = watcher.eventTap {
+                            CGEvent.tapEnable(tap: tap, enable: true)
+                        }
+                        watcher.updateLastEventTime()
                         return
                     }
                     
-                    // Use another autoreleasepool for event processing
                     autoreleasepool {
                         switch type {
                         case .leftMouseDown, .rightMouseDown:
                             if let (app, _, _) = DockService.shared.findAppUnderCursor(at: location) {
-                                // Check if this is a touchpad click by examining the event flags
                                 let isTouchpadClick = event.flags.contains(.maskSecondaryFn) || 
                                                     event.flags.contains(.maskControl) ||
                                                     event.getIntegerValueField(.eventSourceUserData) != 0
                                 
-                                // Get current time and use appropriate debounce interval
                                 let currentTime = ProcessInfo.processInfo.systemUptime
                                 let lastTime = isTouchpadClick ? watcher.lastTouchpadClickTime : watcher.lastClickTime
                                 let debounceInterval = isTouchpadClick ? watcher.touchpadClickDebounceInterval : watcher.clickDebounceInterval
@@ -596,8 +657,6 @@ class DockWatcher: NSObject, NSMenuDelegate {
                                 if currentTime - lastTime >= debounceInterval {
                                     watcher.menuBlocked = true
                                     watcher.lastClickedIconApp = app
-                                    
-                                    // Hide window chooser
                                     
                                     watcher.windowChooser?.chooserView?.thumbnailView?.hideThumbnail()
                                     watcher.windowChooser?.close()
@@ -607,7 +666,6 @@ class DockWatcher: NSObject, NSMenuDelegate {
                                     if type == .leftMouseDown {
                                         Logger.debug("Left mouse down - \(isTouchpadClick ? "Touchpad" : "Mouse") click")
                                         
-                                        // Update appropriate timestamp
                                         if isTouchpadClick {
                                             watcher.lastTouchpadClickTime = currentTime
                                         } else {
@@ -620,7 +678,6 @@ class DockWatcher: NSObject, NSMenuDelegate {
                                         watcher.showingWindowChooserOnClick = false
                                     }
                                 } else {
-                                    // If click is too soon after previous, block it
                                     Logger.debug("Ignoring \(isTouchpadClick ? "touchpad" : "mouse") click - too soon after previous (\(currentTime - lastTime)s)")
                                     watcher.skipNextClickProcessing = true
                                 }
@@ -637,18 +694,15 @@ class DockWatcher: NSObject, NSMenuDelegate {
                             }
                             watcher.clickedApp = nil
                         case .rightMouseUp:
-                            // Add a delay before showing the window chooser again
                             let showWork = DispatchWorkItem { [weak watcher] in
                                 Task { @MainActor in
                                     guard let watcher = watcher else { return }
                                     watcher.isMouseOverDock = false
                                     
-                                    // Show the window chooser again if it exists and mouse is still over dock
                                     if let chooser = watcher.windowChooser,
                                        let app = watcher.lastHoveredApp,
                                        let (hoveredApp, _, iconCenter) = DockService.shared.findAppUnderCursor(at: NSEvent.mouseLocation) {
                                         if hoveredApp == app {
-                                            // Update position and show
                                             chooser.updatePosition(iconCenter)
                                             chooser.window?.makeKeyAndOrderFront(nil)
                                         }
@@ -656,15 +710,12 @@ class DockWatcher: NSObject, NSMenuDelegate {
                                 }
                             }
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: showWork)
-                        case .mouseMoved:
-                            watcher.processMouseMovement(at: location)
                         default:
                             break
                         }
                     }
                 }
                 
-                // Return the event without retaining it
                 return Unmanaged.passUnretained(event)
             }
         }
@@ -777,29 +828,13 @@ class DockWatcher: NSObject, NSMenuDelegate {
                             // Hide the selected window
                             AccessibilityService.shared.hideWindow(window: window, for: app)
                         } else {
-                            // First activate the app
-                            app.activate(options: [.activateIgnoringOtherApps])
-                            
-                            // Then unminimize if needed
+                            // Unminimize and raise only the selected window
                             AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
-                            
-                            // Get window info for raising
-                            var titleValue: AnyObject?
-                            AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleValue)
-                            let windowName = (titleValue as? String) ?? ""
-                            let windowInfo = WindowInfo(window: window, name: windowName)
-                            
-                            // Raise window
-                            AccessibilityService.shared.raiseWindow(windowInfo: windowInfo, for: app)
+                            AXUIElementPerformAction(window, kAXRaiseAction as CFString)
                             
                             // Ensure window gets focus
                             AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, true as CFTypeRef)
                             AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, true as CFTypeRef)
-                            
-                            // Final app activation to ensure focus
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                                app.activate(options: [.activateIgnoringOtherApps])
-                            }
                         }
                     }
                 }
@@ -814,16 +849,12 @@ class DockWatcher: NSObject, NSMenuDelegate {
             windowChooser = chooser
             currentApp = app
             
-            // Ensure window is shown on main thread
             DispatchQueue.main.async {
                 chooser.window?.makeKeyAndOrderFront(nil)
             }
 
-            //print("chooser.window?.frame: \(chooser.window?.frame)")
-
-            
-            // Reset interaction time when creating new chooser
             lastMenuInteractionTime = ProcessInfo.processInfo.systemUptime
+            startMenuWatchdog()
         }
     }
     
@@ -938,33 +969,29 @@ class DockWatcher: NSObject, NSMenuDelegate {
         } else {
             // Mouse not over dock or chooser
             if !isOverChooserArea {
-                // Update state once
                 isMouseOverDock = false
                 lastHoveredApp = nil
                 lastProcessedApp = nil
                 lastProcessedWindows = nil
                 lastProcessedTime = 0
+                
+                updateHistoryTracking(mouseLocation: mouseLocation)
 
                 let currentTime = ProcessInfo.processInfo.systemUptime
                 if currentTime - lastDockAccessTime > 2.0 {
                     return
                 }
 
-
-                //Logger.debug("Performing cleanup of window chooser and thumbnail resources1")
-                // Hide both window chooser and thumbnail immediately
                 windowChooser?.chooserView?.thumbnailView?.hideThumbnail()
                 windowChooser?.chooserView?.thumbnailView?.cleanup()
                 windowChooser?.window?.orderOut(nil)
                 
-                // Start cleanup timer
                 cleanupTimer?.invalidate()
                 cleanupTimer = Timer.scheduledTimer(withTimeInterval: cleanupDelay, repeats: false) { [weak self] _ in
                     Task { @MainActor [weak self] in
                         guard let self = self, !self.isMouseOverDock else { return }
                         Logger.debug("Performing cleanup of window chooser and thumbnail resources")
                         
-                        // Ensure thumbnail is hidden and cleaned up
                         self.windowChooser?.chooserView?.thumbnailView?.hideThumbnail()
                         self.windowChooser?.chooserView?.thumbnailView?.cleanup()
                         self.windowChooser?.close()
@@ -972,6 +999,8 @@ class DockWatcher: NSObject, NSMenuDelegate {
                         await self.cleanupResources()
                     }
                 }
+            } else {
+                updateHistoryTracking(mouseLocation: mouseLocation)
             }
         }
     }
@@ -1250,16 +1279,6 @@ class DockWatcher: NSObject, NSMenuDelegate {
     }
     
     private func startHistoryCheck() {
-        // Create a timer that checks more frequently when displays have separate spaces
-        let checkInterval = NSScreen.displaysHaveSeparateSpaces ? 0.03 : 0.05
-        
-        historyCheckTimer = Timer.scheduledTimer(withTimeInterval: checkInterval, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.checkMouseForHistory()
-            }
-        }
-        
-        // Also observe screen configuration changes
         NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
             object: nil,
@@ -1267,23 +1286,58 @@ class DockWatcher: NSObject, NSMenuDelegate {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self = self else { return }
-                
-                // Update timer interval based on current screen configuration
-                let newInterval = NSScreen.displaysHaveSeparateSpaces ? 0.03 : 0.05
-                
-                // Recreate timer with new interval
-                self.historyCheckTimer?.invalidate()
-                self.historyCheckTimer = Timer.scheduledTimer(withTimeInterval: newInterval, repeats: true) { [weak self] _ in
-                    Task { @MainActor [weak self] in
-                        self?.checkMouseForHistory()
-                    }
-                }
-                
-                // Force check for multiple displays
                 if NSScreen.displaysHaveSeparateSpaces {
                     self.handleMultipleDisplays()
                 }
             }
+        }
+    }
+    
+    /// Called from processMouseMovement to handle history menu triggering event-driven
+    /// instead of polling with a continuous timer.
+    private func updateHistoryTracking(mouseLocation: NSPoint) {
+        guard let mouseScreen = DockService.shared.getScreenContainingPoint(mouseLocation) else {
+            stopHistoryTracking()
+            return
+        }
+        
+        let orientation = DockService.shared.getDockOrientation()
+        let edgeThreshold: CGFloat = 5
+        var isNearDockEdge = false
+        
+        switch orientation {
+        case "bottom":
+            let mouseDistanceFromBottom = mouseLocation.y - mouseScreen.frame.minY
+            isNearDockEdge = mouseDistanceFromBottom <= edgeThreshold
+        case "left":
+            isNearDockEdge = mouseLocation.x - mouseScreen.frame.minX <= edgeThreshold
+        case "right":
+            isNearDockEdge = mouseScreen.frame.maxX - mouseLocation.x <= edgeThreshold
+        default:
+            let mouseDistanceFromBottom = mouseLocation.y - mouseScreen.frame.minY
+            isNearDockEdge = mouseDistanceFromBottom <= edgeThreshold
+        }
+        
+        if isNearDockEdge {
+            if mouseNearBottomSince == nil {
+                mouseNearBottomSince = ProcessInfo.processInfo.systemUptime
+                historyCheckTimer?.invalidate()
+                historyCheckTimer = Timer.scheduledTimer(withTimeInterval: historyShowDelay, repeats: false) { [weak self] _ in
+                    Task { @MainActor [weak self] in
+                        self?.checkMouseForHistory()
+                    }
+                }
+            }
+        } else {
+            stopHistoryTracking()
+        }
+    }
+    
+    private func stopHistoryTracking() {
+        if mouseNearBottomSince != nil {
+            mouseNearBottomSince = nil
+            historyCheckTimer?.invalidate()
+            historyCheckTimer = nil
         }
     }
     
@@ -1497,7 +1551,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
                     if isHideAction {
                         AccessibilityService.shared.hideWindow(window: window, for: app)
                     } else {
-                        AccessibilityService.shared.raiseWindow(windowInfo: windowInfo, for: app)
+                        AccessibilityService.shared.focusWindow(windowInfo.window, for: app)
                     }
                 }
             }
