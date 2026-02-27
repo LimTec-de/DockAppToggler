@@ -172,7 +172,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
     private func setupMemoryMonitoring() {
         memoryCleanupTimer = Timer.scheduledTimer(withTimeInterval: 15.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
-                guard let self = self else { return }
+                guard let self = self, !ScreenCaptureState.isOverlayActive else { return }
                 let usage = self.reportDetailedMemoryUsage()
                 
                 // Use static strings and format once
@@ -299,7 +299,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
     }
 
     @MainActor private func cleanupResources() async {
-        guard !isMouseOverDock else { return }
+        guard !isMouseOverDock, !ScreenCaptureState.isOverlayActive else { return }
         
         Logger.debug("Starting memory cleanup")
         
@@ -441,7 +441,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
     }
 
     @MainActor private func reinitializeEventTap() async {
-        guard !isReinitializingEventTap else { return }
+        guard !isReinitializingEventTap, !ScreenCaptureState.isOverlayActive else { return }
         isReinitializingEventTap = true
         defer { isReinitializingEventTap = false }
 

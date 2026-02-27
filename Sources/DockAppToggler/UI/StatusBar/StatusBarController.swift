@@ -215,6 +215,14 @@ class StatusBarController {
         screenshotItem.target = self
         menu.addItem(screenshotItem)
 
+        let pickWindowScreenshotItem = NSMenuItem(
+            title: "Take Screenshot (Pick Window)",
+            action: #selector(takeWindowPickScreenshot),
+            keyEquivalent: ""
+        )
+        pickWindowScreenshotItem.target = self
+        menu.addItem(pickWindowScreenshotItem)
+
         let screenPermissionItem = NSMenuItem(
             title: "Request Screen Recording Access",
             action: #selector(requestScreenRecordingAccess),
@@ -295,6 +303,10 @@ class StatusBarController {
 
     @objc private func takeScreenshot() {
         ScreenCaptureService.captureInteractiveToClipboard()
+    }
+
+    @objc private func takeWindowPickScreenshot() {
+        ScreenCaptureService.captureWindowPickToClipboard()
     }
 
     @objc private func requestScreenRecordingAccess() {

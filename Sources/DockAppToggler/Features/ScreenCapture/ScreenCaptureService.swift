@@ -8,4 +8,11 @@ enum ScreenCaptureService {
             captureView.captureScreen()
         }
     }
+
+    static func captureWindowPickToClipboard() {
+        Task { @MainActor in
+            let captureView = ContentView()
+            captureView.capturePickedWindowForEditing()
+        }
+    }
 }

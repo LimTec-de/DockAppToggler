@@ -3,6 +3,10 @@ import AppKit
 import Carbon
 import UniformTypeIdentifiers
 
+enum ScreenCaptureState {
+    @MainActor static var isOverlayActive = false
+}
+
 struct ContentView: View {
     private static let trustedCheckOptionPrompt = "AXTrustedCheckOptionPrompt"
 
@@ -123,7 +127,78 @@ struct ContentView: View {
         print("Screen captured, creating NSImage...")
         let image = NSImage(cgImage: cgImage, size: screen.frame.size)
         print("NSImage created with size: \(image.size)")
-        showCaptureWindow(with: image, on: screen)
+        showCaptureWindow(with: image, frame: screen.frame, coversEntireScreen: true)
+    }
+
+    func capturePickedWindowForEditing() {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+            // Use the native system window picker for selection, then ignore the captured image
+            // and use only the selected window coordinates for our own fullscreen editor workflow.
+            task.arguments = ["-i", "-w", "-c"]
+
+            do {
+                try task.run()
+                task.waitUntilExit()
+            } catch {
+                print("Failed to run window picker capture: \(error)")
+                return
+            }
+
+            guard task.terminationStatus == 0 else {
+                // User likely cancelled.
+                return
+            }
+
+            DispatchQueue.main.async {
+                openEditorForPickedWindow(retryCount: 0)
+            }
+        }
+    }
+
+    private func openEditorForPickedWindow(retryCount: Int) {
+        if let windowBounds = focusedWindowBounds() {
+            let center = CGPoint(x: windowBounds.midX, y: windowBounds.midY)
+            guard let screen = NSScreen.screens.first(where: { NSPointInRect(center, $0.frame) }) ?? NSScreen.main else {
+                print("Failed to resolve screen for focused window")
+                return
+            }
+
+            let displayID = getDisplayIDForPoint(center)
+            guard let cgImage = CGDisplayCreateImage(displayID) else {
+                print("Failed to capture full screen image for pick-window flow")
+                return
+            }
+
+            let image = NSImage(cgImage: cgImage, size: screen.frame.size)
+            let localSelection = clampSelectionToImage(
+                CGRect(
+                    x: windowBounds.origin.x - screen.frame.origin.x,
+                    y: windowBounds.origin.y - screen.frame.origin.y,
+                    width: windowBounds.width,
+                    height: windowBounds.height
+                ),
+                imageSize: image.size
+            )
+
+            showCaptureWindow(
+                with: image,
+                frame: screen.frame,
+                coversEntireScreen: true,
+                autoSelectVisibleImage: false,
+                initialSelectionRect: localSelection
+            )
+            return
+        }
+
+        if retryCount < 10 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                openEditorForPickedWindow(retryCount: retryCount + 1)
+            }
+        } else {
+            print("Failed to determine focused window bounds after pick")
+        }
     }
     
     // Helper function to get the display ID for a point
@@ -138,9 +213,16 @@ struct ContentView: View {
         return displayID
     }
     
-    private func showCaptureWindow(with image: NSImage, on screen: NSScreen) {
+    private func showCaptureWindow(
+        with image: NSImage,
+        frame: NSRect,
+        coversEntireScreen: Bool,
+        autoSelectVisibleImage: Bool = false,
+        initialSelectionRect: CGRect? = nil
+    ) {
+        ScreenCaptureState.isOverlayActive = true
         let window = NSWindow(
-            contentRect: screen.frame,
+            contentRect: frame,
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
@@ -152,11 +234,18 @@ struct ContentView: View {
         window.isOpaque = true
         window.hasShadow = false
         
-        // Make window cover the entire screen including dock and menu bar
-        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        // Make window available on all spaces.
+        window.collectionBehavior = coversEntireScreen
+            ? [.canJoinAllSpaces, .fullScreenAuxiliary]
+            : [.canJoinAllSpaces]
         
-        let captureView = CaptureView(image: image) { selectedArea, drawings in
-            if let cropped = image.crop(to: selectedArea) {
+        let initialRect = initialSelectionRect ?? (coversEntireScreen ? nil : CGRect(origin: .zero, size: image.size))
+        let captureView = CaptureView(
+            image: image,
+            initialSelectionRect: initialRect,
+            autoSelectVisibleImage: autoSelectVisibleImage
+        ) { baseImage, selectedArea, drawings, preferredBaseName in
+            if let cropped = baseImage.crop(to: selectedArea) {
                 let finalImage = NSImage(size: selectedArea.size)
                 finalImage.lockFocus()
                 
@@ -188,7 +277,7 @@ struct ContentView: View {
                         ]
                         text.draw(at: adjustedPosition, withAttributes: attributes)
                         
-                    case .arrow(let start, let end, let color):
+                    case .arrow(let start, let end, let color, let lineWidth):
                         let adjustedStart = CGPoint(
                             x: start.x - offsetX,
                             y: height - (start.y - offsetY) // Flip Y coordinate
@@ -199,7 +288,7 @@ struct ContentView: View {
                         )
                         
                         context.setStrokeColor(color.cgColor)
-                        context.setLineWidth(2)
+                        context.setLineWidth(lineWidth)
                         context.move(to: adjustedStart)
                         context.addLine(to: adjustedEnd)
                         
@@ -222,7 +311,7 @@ struct ContentView: View {
                         context.addLine(to: arrowPoint2)
                         context.strokePath()
                         
-                    case .numberedArrow(let start, let end, let number, let color):
+                    case .numberedArrow(let start, let end, let number, let color, let lineWidth):
                         let adjustedStart = CGPoint(
                             x: start.x - offsetX,
                             y: height - (start.y - offsetY) // Flip Y coordinate
@@ -234,7 +323,7 @@ struct ContentView: View {
                         
                         // Draw arrow
                         context.setStrokeColor(color.cgColor)
-                        context.setLineWidth(2)
+                        context.setLineWidth(lineWidth)
                         context.move(to: adjustedStart)
                         context.addLine(to: adjustedEnd)
                         
@@ -366,31 +455,38 @@ struct ContentView: View {
                     print("Image with drawings copied to clipboard")
                 }
                 
-                // Create ScreenCapture directory if it doesn't exist
-                if let picturesURL = FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask).first {
-                    let screenCaptureURL = picturesURL.appendingPathComponent("ScreenCapture", isDirectory: true)
-                    
-                    do {
-                        // Create directory if it doesn't exist
-                        try FileManager.default.createDirectory(at: screenCaptureURL, withIntermediateDirectories: true)
-                        
-                        // Create filename with timestamp
-                        let dateFormatter = DateFormatter()
-                        dateFormatter.dateFormat = "yy_MM_dd_H_m_s"
-                        let timestamp = dateFormatter.string(from: Date())
-                        let filename = "screenshot_\(timestamp).png"
-                        
-                        // Save to ScreenCapture folder
-                        let fileURL = screenCaptureURL.appendingPathComponent(filename)
-                        
-                        if let bitmapRep = createHighResolutionBitmap(from: finalImage),
-                           let pngData = bitmapRep.representation(using: .png, properties: [:]) {
-                            try pngData.write(to: fileURL)
-                            print("Image saved to: \(fileURL.path)")
-                        }
-                    } catch {
-                        print("Error saving image: \(error)")
+                do {
+                    let screenCaptureURL = try screenCaptureDirectoryURL()
+                    let screenCaptureDataURL = try screenCaptureDataDirectoryURL()
+
+                    // Create filename with timestamp
+                    let dateFormatter = DateFormatter()
+                    dateFormatter.dateFormat = "yy_MM_dd_H_m_s"
+                    let timestamp = dateFormatter.string(from: Date())
+                    let baseName = preferredBaseName ?? "screenshot_\(timestamp)"
+
+                    let editedURL = screenCaptureURL.appendingPathComponent("\(baseName).png")
+                    let originalURL = screenCaptureDataURL.appendingPathComponent("\(baseName)_orig.png")
+                    let capURL = screenCaptureDataURL.appendingPathComponent("\(baseName)_cap.json")
+
+                    if let editedRep = createHighResolutionBitmap(from: finalImage),
+                       let editedPngData = editedRep.representation(using: .png, properties: [:]) {
+                        try editedPngData.write(to: editedURL)
+                        print("Image saved to: \(editedURL.path)")
                     }
+
+                    if let originalRep = createHighResolutionBitmap(from: baseImage),
+                       let originalPngData = originalRep.representation(using: .png, properties: [:]) {
+                        try originalPngData.write(to: originalURL)
+                        print("Original image saved to: \(originalURL.path)")
+                    }
+
+                    let captureDocument = makeCaptureDocument(from: drawings, selectedArea: selectedArea)
+                    let capData = try JSONEncoder().encode(captureDocument)
+                    try capData.write(to: capURL, options: .atomic)
+                    print("Capture metadata saved to: \(capURL.path)")
+                } catch {
+                    print("Error saving image or metadata: \(error)")
                 }
 
                 
@@ -409,6 +505,54 @@ struct ContentView: View {
         
         window.contentView = NSHostingView(rootView: captureView)
         window.makeKeyAndOrderFront(nil)
+    }
+
+    private func focusedWindowBounds() -> CGRect? {
+        guard let frontmostApp = NSWorkspace.shared.frontmostApplication else { return nil }
+        let appRef = AXUIElementCreateApplication(frontmostApp.processIdentifier)
+
+        var windowRef: CFTypeRef?
+        let focusedResult = AXUIElementCopyAttributeValue(appRef, kAXFocusedWindowAttribute as CFString, &windowRef)
+        if focusedResult != .success {
+            _ = AXUIElementCopyAttributeValue(appRef, kAXMainWindowAttribute as CFString, &windowRef)
+        }
+        guard let rawWindowRef = windowRef,
+              CFGetTypeID(rawWindowRef) == AXUIElementGetTypeID() else {
+            return nil
+        }
+        let window = rawWindowRef as! AXUIElement
+
+        var positionRef: CFTypeRef?
+        var sizeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &positionRef) == .success,
+              AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &sizeRef) == .success,
+              let rawPositionRef = positionRef,
+              let rawSizeRef = sizeRef,
+              CFGetTypeID(rawPositionRef) == AXValueGetTypeID(),
+              CFGetTypeID(rawSizeRef) == AXValueGetTypeID() else {
+            return nil
+        }
+        let positionAX = rawPositionRef as! AXValue
+        let sizeAX = rawSizeRef as! AXValue
+
+        var position = CGPoint.zero
+        var size = CGSize.zero
+        guard AXValueGetValue(positionAX, .cgPoint, &position),
+              AXValueGetValue(sizeAX, .cgSize, &size),
+              size.width > 1, size.height > 1 else {
+            return nil
+        }
+
+        return CGRect(origin: position, size: size)
+    }
+
+    private func clampSelectionToImage(_ rect: CGRect, imageSize: NSSize) -> CGRect {
+        let imageRect = CGRect(origin: .zero, size: imageSize)
+        let intersection = rect.intersection(imageRect)
+        if intersection.isNull || intersection.isEmpty {
+            return imageRect
+        }
+        return intersection
     }
     
     private func checkAccessibilityPermissions() -> Bool {
@@ -476,27 +620,251 @@ struct ContentView: View {
     }
 
     private func closeCaptureWindows() {
+        ScreenCaptureState.isOverlayActive = false
         NSApp.windows.forEach { window in
             if window.contentView is NSHostingView<CaptureView> {
                 window.close()
             }
         }
     }
+
+    private func screenCaptureDirectoryURL() throws -> URL {
+        guard let picturesURL = FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask).first else {
+            throw NSError(domain: "ScreenCapture", code: 1, userInfo: [NSLocalizedDescriptionKey: "Pictures directory not found"])
+        }
+        let screenCaptureURL = picturesURL.appendingPathComponent("ScreenCapture", isDirectory: true)
+        try FileManager.default.createDirectory(at: screenCaptureURL, withIntermediateDirectories: true)
+        return screenCaptureURL
+    }
+
+    private func screenCaptureDataDirectoryURL() throws -> URL {
+        let screenCaptureURL = try screenCaptureDirectoryURL()
+        let dataURL = screenCaptureURL.appendingPathComponent("_data", isDirectory: true)
+        try FileManager.default.createDirectory(at: dataURL, withIntermediateDirectories: true)
+        return dataURL
+    }
+
+    private func makeCaptureDocument(from drawings: [Drawing], selectedArea: NSRect) -> CaptureDocument {
+        var texts: [CaptureText] = []
+        var arrows: [CaptureArrow] = []
+        var numberedArrows: [CaptureNumberedArrow] = []
+        var rectangles: [CaptureRectangle] = []
+        var pixelates: [CapturePixelate] = []
+        var smileys: [CaptureSmiley] = []
+
+        for drawing in drawings {
+            switch drawing {
+            case .text(let text, let position, let color, let fontSize):
+                texts.append(
+                    CaptureText(
+                        text: text,
+                        position: CodablePoint(x: position.x, y: position.y),
+                        fontSize: fontSize,
+                        color: CodableColor(color)
+                    )
+                )
+            case .arrow(let start, let end, let color, let lineWidth):
+                arrows.append(
+                    CaptureArrow(
+                        start: CodablePoint(x: start.x, y: start.y),
+                        end: CodablePoint(x: end.x, y: end.y),
+                        lineWidth: lineWidth,
+                        color: CodableColor(color)
+                    )
+                )
+            case .numberedArrow(let start, let end, let number, let color, let lineWidth):
+                numberedArrows.append(
+                    CaptureNumberedArrow(
+                        start: CodablePoint(x: start.x, y: start.y),
+                        end: CodablePoint(x: end.x, y: end.y),
+                        number: number,
+                        lineWidth: lineWidth,
+                        color: CodableColor(color)
+                    )
+                )
+            case .rectangle(let rect, let color):
+                rectangles.append(
+                    CaptureRectangle(
+                        rect: CodableRect(
+                            x: rect.origin.x,
+                            y: rect.origin.y,
+                            width: rect.width,
+                            height: rect.height
+                        ),
+                        color: CodableColor(color)
+                    )
+                )
+            case .pixelatedRect(let rect, _):
+                pixelates.append(
+                    CapturePixelate(
+                        rect: CodableRect(
+                            x: rect.origin.x,
+                            y: rect.origin.y,
+                            width: rect.width,
+                            height: rect.height
+                        )
+                    )
+                )
+            case .smiley(let emoji, let position, let size, let color):
+                smileys.append(
+                    CaptureSmiley(
+                        emoji: emoji,
+                        position: CodablePoint(x: position.x, y: position.y),
+                        size: size,
+                        color: CodableColor(color)
+                    )
+                )
+            }
+        }
+
+        return CaptureDocument(
+            canvasSize: CodableSize(width: selectedArea.width, height: selectedArea.height),
+            selectedRect: CodableRect(
+                x: selectedArea.origin.x,
+                y: selectedArea.origin.y,
+                width: selectedArea.width,
+                height: selectedArea.height
+            ),
+            texts: texts,
+            arrows: arrows,
+            numberedArrows: numberedArrows,
+            rectangles: rectangles,
+            pixelates: pixelates,
+            smileys: smileys
+        )
+    }
 }
 
 // Add Drawing enum to represent different types of drawings
 enum Drawing {
     case text(String, CGPoint, NSColor, CGFloat)
-    case arrow(CGPoint, CGPoint, NSColor)
-    case numberedArrow(CGPoint, CGPoint, Int, NSColor)
+    case arrow(CGPoint, CGPoint, NSColor, CGFloat)
+    case numberedArrow(CGPoint, CGPoint, Int, NSColor, CGFloat)
     case rectangle(CGRect, NSColor)
     case pixelatedRect(CGRect, NSImage)  // New case for pixelated rectangles
     case smiley(String, CGPoint, CGFloat, NSColor)  // New case for smileys with emoji, position, size, and color
 }
 
+struct CodablePoint: Codable {
+    var x: CGFloat
+    var y: CGFloat
+}
+
+struct CodableSize: Codable {
+    var width: CGFloat
+    var height: CGFloat
+}
+
+struct CodableRect: Codable {
+    var x: CGFloat
+    var y: CGFloat
+    var width: CGFloat
+    var height: CGFloat
+}
+
+struct CodableColor: Codable {
+    var red: CGFloat
+    var green: CGFloat
+    var blue: CGFloat
+    var alpha: CGFloat
+
+    init(_ color: NSColor) {
+        let rgb = color.usingColorSpace(.deviceRGB) ?? color
+        self.red = rgb.redComponent
+        self.green = rgb.greenComponent
+        self.blue = rgb.blueComponent
+        self.alpha = rgb.alphaComponent
+    }
+
+    var nsColor: NSColor {
+        return NSColor(
+            calibratedRed: max(0, min(1, red)),
+            green: max(0, min(1, green)),
+            blue: max(0, min(1, blue)),
+            alpha: max(0, min(1, alpha))
+        )
+    }
+
+    mutating func normalizeLegacy255IfNeeded() -> Bool {
+        let needsNormalization = red > 1 || green > 1 || blue > 1 || alpha > 1
+        if !needsNormalization { return false }
+        red = max(0, min(1, red / 255.0))
+        green = max(0, min(1, green / 255.0))
+        blue = max(0, min(1, blue / 255.0))
+        alpha = max(0, min(1, alpha / 255.0))
+        return true
+    }
+}
+
+struct CaptureText: Codable {
+    var text: String
+    var position: CodablePoint
+    var fontSize: CGFloat
+    var color: CodableColor
+}
+
+struct CaptureArrow: Codable {
+    var start: CodablePoint
+    var end: CodablePoint
+    var lineWidth: CGFloat
+    var color: CodableColor
+}
+
+struct CaptureNumberedArrow: Codable {
+    var start: CodablePoint
+    var end: CodablePoint
+    var number: Int
+    var lineWidth: CGFloat
+    var color: CodableColor
+}
+
+struct CaptureRectangle: Codable {
+    var rect: CodableRect
+    var color: CodableColor
+}
+
+struct CapturePixelate: Codable {
+    var rect: CodableRect
+}
+
+struct CaptureSmiley: Codable {
+    var emoji: String
+    var position: CodablePoint
+    var size: CGFloat
+    var color: CodableColor
+}
+
+struct CaptureDocument: Codable {
+    var canvasSize: CodableSize
+    var selectedRect: CodableRect?
+    var texts: [CaptureText]
+    var arrows: [CaptureArrow]
+    var numberedArrows: [CaptureNumberedArrow]
+    var rectangles: [CaptureRectangle]
+    var pixelates: [CapturePixelate]
+    var smileys: [CaptureSmiley]
+}
+
+struct ScreenshotHistoryItem: Identifiable {
+    var id: String { baseName }
+    let baseName: String
+    let editedURL: URL
+    let originalURL: URL
+    let capURL: URL
+    let modifiedAt: Date
+}
+
 struct CaptureView: View {
-    let image: NSImage
-    let onSelection: (NSRect, [Drawing]) -> Void
+    private static let legacyColorMigrationKey = "ScreenCaptureLegacyColorMigrationDoneV1"
+    private static let historyDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "dd.MM.yyyy HH:mm"
+        return f
+    }()
+
+    let initialSelectionRect: CGRect?
+    let autoSelectVisibleImage: Bool
+    let onSelection: (NSImage, NSRect, [Drawing], String?) -> Void
     @State private var firstPoint: CGPoint?
     @State private var currentPoint: CGPoint?
     @State private var isSelecting = false
@@ -505,6 +873,15 @@ struct CaptureView: View {
     @State private var deleteMonitor: Any?
     @State private var showMagnifyingGlass = false
     @State private var cursorPosition: CGPoint = .zero
+    @State private var workingImage: NSImage
+    private let capturedImage: NSImage
+    @State private var showHistoryPanel = false
+    @State private var screenshotHistory: [ScreenshotHistoryItem] = []
+    @State private var isHoveringHistoryPanel = false
+    @State private var hoveredHistoryItemId: String?
+    @State private var hoveredHistoryPreviewImage: NSImage?
+    @State private var loadedBaseName: String?
+    @State private var suppressNextToolHelpUpdate = false
     
     // Drawing states
     @State private var currentTool: DrawingTool = .select
@@ -515,6 +892,8 @@ struct CaptureView: View {
     @State var rectangles: [(rect: CGRect, id: UUID)] = []
     @State var pixelatedRects: [(rect: CGRect, image: NSImage, id: UUID)] = []
     @State var numberedArrows: [(start: CGPoint, end: CGPoint, number: Int, id: UUID)] = []
+    @State private var arrowLineWidths: [UUID: CGFloat] = [:]
+    @State private var elementColors: [UUID: Color] = [:]
     @State var selectedElementId: UUID?
     @State private var isDraggingElement = false
     @State private var dragOffset: CGPoint?
@@ -530,12 +909,26 @@ struct CaptureView: View {
     @State private var currentEditingFontSize: CGFloat = 20
     @State private var showCursor: Bool = true
     @State private var canDragCurrentElement = false
+    @State private var selectedDrawingColor: Color = .red
+    private let drawingPalette: [Color] = [
+        .red,
+        .orange,
+        .yellow,
+        .green,
+        .blue
+    ]
     private let minTextEditorWidth: CGFloat = 220
     private let maxTextEditorWidth: CGFloat = 520
     private let textEditorPadding: CGFloat = 16
     private let minTextFontSize: CGFloat = 12
     private let maxTextFontSize: CGFloat = 56
-    private let textFontStep: CGFloat = 2
+    private let textFontStep: CGFloat = 4
+    private let minArrowLineWidth: CGFloat = 1
+    private let maxArrowLineWidth: CGFloat = 12
+    private let arrowLineWidthStep: CGFloat = 2
+    private let minSmileySize: CGFloat = 20
+    private let maxSmileySize: CGFloat = 120
+    private let smileySizeStep: CGFloat = 8
     
     // Add a new state property for the help text
     @State private var helpText: String = "Select an area to capture"
@@ -547,45 +940,40 @@ struct CaptureView: View {
     @State private var selectedSmileySize: CGFloat = 40
     
     let timer = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
+
+    init(
+        image: NSImage,
+        initialSelectionRect: CGRect?,
+        autoSelectVisibleImage: Bool,
+        onSelection: @escaping (NSImage, NSRect, [Drawing], String?) -> Void
+    ) {
+        self.initialSelectionRect = initialSelectionRect
+        self.autoSelectVisibleImage = autoSelectVisibleImage
+        self.onSelection = onSelection
+        self.capturedImage = image
+        _workingImage = State(initialValue: image)
+    }
     
     enum DrawingTool {
         case select, text, arrow, rectangle, numberedArrow, elementSelect, pixelate, numberedText, changeSelection, smiley
     }
     
-    private func getDrawingColor(at point: CGPoint, isSelected: Bool = false) -> Color {
-        if isSelected {
-            return Color.green
-        }
-        
-        // Convert point to image coordinates
-        if let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
-            let imageSize = image.size
-            let x = Int((point.x / imageSize.width) * CGFloat(cgImage.width))
-            let y = Int(((imageSize.height - point.y) / imageSize.height) * CGFloat(cgImage.height))
-            
-            if let provider = cgImage.dataProvider,
-               let data = provider.data,
-               let ptr = CFDataGetBytePtr(data) {
-                let bytesPerPixel = 4
-                let index = (y * cgImage.bytesPerRow) + (x * bytesPerPixel)
-                
-                if index >= 0 && index < CFDataGetLength(data) - 4 {
-                    let brightness = (Int(ptr[index]) + Int(ptr[index + 1]) + Int(ptr[index + 2])) / 3
-                    return brightness < 128 ? Color(red: 1.0, green: 0.3, blue: 0.3) : Color.red
-                }
-            }
-        }
-        return Color.red
+    private func getDrawingColor(at _: CGPoint, isSelected _: Bool = false) -> Color {
+        return selectedDrawingColor
+    }
+
+    private func drawingColor(for elementId: UUID, fallbackPoint _: CGPoint) -> Color {
+        elementColors[elementId] ?? selectedDrawingColor
     }
     
     var body: some View {
         GeometryReader { geometry in
-            ZStack {
-                    Image(nsImage: image)
+                ZStack {
+                    Image(nsImage: workingImage)
                         .resizable()
-                        .aspectRatio(contentMode: .fit)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                
+                        .frame(width: workingImage.size.width, height: workingImage.size.height)
+                        .position(x: workingImage.size.width / 2, y: workingImage.size.height / 2)
+
                 // Dimming overlay with cutout for selection
                 if let rect = selectionRect ?? makeRect(from: firstPoint, to: currentPoint) {
                     Path { path in
@@ -612,10 +1000,34 @@ struct CaptureView: View {
                             .position(x: rect.midX, y: rect.maxY + 30)
                     }
                     
+                    // FullScreen button above the selection frame
+                    if !isSelecting, selectionRect != nil {
+                        Button(action: {
+                            selectionRect = CGRect(origin: .zero, size: geometry.size)
+                        }) {
+                            HStack(spacing: 3) {
+                                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                    .font(.system(size: 9))
+                                Text("FullScreen")
+                                    .font(.system(size: 10))
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color(.windowBackgroundColor).opacity(0.9))
+                            .cornerRadius(4)
+                            .shadow(color: Color.black.opacity(0.15), radius: 2, x: 0, y: 1)
+                        }
+                        .buttonStyle(.plain)
+                        .position(
+                            x: rect.midX,
+                            y: max(14, rect.minY - 14)
+                        )
+                    }
+
                     // Drawing tools buttons
                     if !isSelecting, let rect = selectionRect {
                         VStack(spacing: 8) {
-                            toolbarView(for: rect)
+                            toolbarView(for: rect, in: geometry.size)
                             
                             // Help text below toolbar
                             Text(helpText)
@@ -636,12 +1048,19 @@ struct CaptureView: View {
 
                         ZStack {
                             Text(texts[index].text)
-                                .foregroundColor(getDrawingColor(at: texts[index].position, isSelected: isSelected))
+                                .foregroundColor(drawingColor(for: textId, fallbackPoint: texts[index].position))
                                 .font(.system(size: fontSize))
                                 .lineLimit(nil)
                                 .fixedSize(horizontal: false, vertical: true)
                                 .frame(width: textSize.width, height: textSize.height, alignment: .leading)
                                 .position(x: texts[index].position.x + textSize.width / 2, y: texts[index].position.y)
+
+                            if isSelected {
+                                Rectangle()
+                                    .stroke(Color.green, style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
+                                    .frame(width: textSize.width + 8, height: textSize.height + 8)
+                                    .position(x: texts[index].position.x + textSize.width / 2, y: texts[index].position.y)
+                            }
 
                             if isSelected {
                                 HStack(spacing: 6) {
@@ -698,6 +1117,7 @@ struct CaptureView: View {
                                     // Remove the text
                                     texts.removeAll { $0.id == deletedId }
                                     textFontSizes.removeValue(forKey: deletedId)
+                                    elementColors.removeValue(forKey: deletedId)
                                     
                                     // If we deleted a numbered text, renumber all texts with higher numbers
                                     if let deletedNumber = deletedTextNumber {
@@ -805,8 +1225,10 @@ struct CaptureView: View {
                             .overlay(
                                 ZStack {
                                     Rectangle()
-                                        .stroke(isSelected ? Color.green : Color.clear, 
-                                               lineWidth: isSelected ? 2 : 0)
+                                        .stroke(
+                                            isSelected ? Color.green : Color.clear,
+                                            style: StrokeStyle(lineWidth: isSelected ? 2 : 0, dash: [6, 4])
+                                        )
                                     
                                     // Show drag handle and delete button when selected
                                     if isSelected {
@@ -816,7 +1238,9 @@ struct CaptureView: View {
                                                 
                                                 Button(action: {
                                                     // Delete this pixelated rectangle
+                                                    let deletedId = pixelatedRects[index].id
                                                     pixelatedRects.remove(at: index)
+                                                    elementColors.removeValue(forKey: deletedId)
                                                     selectedElementId = nil
                                                 }) {
                                                     Image(systemName: "trash")
@@ -848,7 +1272,9 @@ struct CaptureView: View {
                             .contextMenu {
                                 Button(action: {
                                     // Delete this pixelated rectangle
+                                    let deletedId = pixelatedRects[index].id
                                     pixelatedRects.remove(at: index)
+                                    elementColors.removeValue(forKey: deletedId)
                                     selectedElementId = nil
                                 }) {
                                     Label("Delete", systemImage: "trash")
@@ -860,26 +1286,61 @@ struct CaptureView: View {
                     // Draw smileys
                     ForEach(smileys.indices, id: \.self) { index in
                         let isSelected = smileys[index].id == selectedElementId
-                        Text(smileys[index].emoji)
-                            .font(.system(size: smileys[index].size))
-                            .foregroundColor(getDrawingColor(at: smileys[index].position, isSelected: isSelected))
-                            .background(
-                                Circle()
-                                    .stroke(isSelected ? Color.green : Color.clear, lineWidth: isSelected ? 2 : 0)
-                                    .background(isSelected ? Color.green.opacity(0.2) : Color.clear)
-                                    .frame(width: smileys[index].size * 1.2, height: smileys[index].size * 1.2)
-                            )
-                            .position(smileys[index].position)
-                            .contextMenu {
-                                Button(action: {
-                                    // Delete this smiley
-                                    smileys.removeAll { $0.id == smileys[index].id }
-                                    selectedElementId = nil
-                                }) {
-                                    Label("Delete", systemImage: "trash")
+                        ZStack {
+                            Text(smileys[index].emoji)
+                                .font(.system(size: smileys[index].size))
+                                .foregroundColor(drawingColor(for: smileys[index].id, fallbackPoint: smileys[index].position))
+                                .position(smileys[index].position)
+                                .contextMenu {
+                                    Button(action: {
+                                        // Delete this smiley
+                                        let deletedId = smileys[index].id
+                                        smileys.removeAll { $0.id == deletedId }
+                                        elementColors.removeValue(forKey: deletedId)
+                                        selectedElementId = nil
+                                    }) {
+                                        Label("Delete", systemImage: "trash")
+                                    }
                                 }
+                                .help("Click to select, drag to move, or right-click to delete this smiley. You can also press Delete key to remove it.")
+
+                            if isSelected {
+                                Rectangle()
+                                    .stroke(Color.green, style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
+                                    .frame(width: smileys[index].size * 1.2, height: smileys[index].size * 1.2)
+                                    .position(smileys[index].position)
                             }
-                            .help("Click to select, drag to move, or right-click to delete this smiley. You can also press Delete key to remove it.")
+
+                            if isSelected {
+                                HStack(spacing: 6) {
+                                    Button(action: {
+                                        smileys[index].size = max(minSmileySize, smileys[index].size - smileySizeStep)
+                                    }) {
+                                        Image(systemName: "minus.circle.fill")
+                                            .font(.system(size: 13, weight: .semibold))
+                                            .foregroundColor(.white)
+                                    }
+                                    .buttonStyle(.plain)
+
+                                    Button(action: {
+                                        smileys[index].size = min(maxSmileySize, smileys[index].size + smileySizeStep)
+                                    }) {
+                                        Image(systemName: "plus.circle.fill")
+                                            .font(.system(size: 13, weight: .semibold))
+                                            .foregroundColor(.white)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 4)
+                                .background(Color.black.opacity(0.35))
+                                .clipShape(Capsule())
+                                .position(
+                                    x: smileys[index].position.x - smileys[index].size / 2 + 22,
+                                    y: smileys[index].position.y - smileys[index].size / 2 - 18
+                                )
+                            }
+                        }
                     }
                     
                     // Show smiley picker if active
@@ -904,19 +1365,61 @@ struct CaptureView: View {
                     
                     ForEach(arrows.indices, id: \.self) { index in
                         let isSelected = arrows[index].id == selectedElementId
-                        ArrowShape(start: arrows[index].start, end: arrows[index].end)
-                            .stroke(getDrawingColor(at: arrows[index].start, isSelected: isSelected), 
-                                   lineWidth: isSelected ? 4 : 2)
-                            .contextMenu {
-                                Button(action: {
-                                    // Delete this arrow
-                                    arrows.removeAll { $0.id == arrows[index].id }
-                                    selectedElementId = nil
-                                }) {
-                                    Label("Delete", systemImage: "trash")
+                        let lineWidth = arrowLineWidths[arrows[index].id] ?? 2
+                        ZStack {
+                            ArrowShape(start: arrows[index].start, end: arrows[index].end)
+                                .stroke(
+                                    drawingColor(for: arrows[index].id, fallbackPoint: arrows[index].start),
+                                    lineWidth: lineWidth
+                                )
+                                .contextMenu {
+                                    Button(action: {
+                                        // Delete this arrow
+                                        let deletedId = arrows[index].id
+                                        arrows.removeAll { $0.id == deletedId }
+                                        arrowLineWidths.removeValue(forKey: deletedId)
+                                        elementColors.removeValue(forKey: deletedId)
+                                        selectedElementId = nil
+                                    }) {
+                                        Label("Delete", systemImage: "trash")
+                                    }
                                 }
+                                .help("Click to select, drag to move, or right-click to delete this arrow. You can also press Delete key to remove it.")
+
+                            if isSelected {
+                                let bounds = boundingRectForLine(start: arrows[index].start, end: arrows[index].end, padding: 10)
+                                Rectangle()
+                                    .stroke(Color.green, style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
+                                    .frame(width: max(bounds.width, 16), height: max(bounds.height, 16))
+                                    .position(x: bounds.midX, y: bounds.midY)
+
+                                let controlPosition = adjustmentControlPositionForArrow(start: arrows[index].start, end: arrows[index].end)
+                                HStack(spacing: 6) {
+                                    Button(action: {
+                                        arrowLineWidths[arrows[index].id] = max(minArrowLineWidth, lineWidth - arrowLineWidthStep)
+                                    }) {
+                                        Image(systemName: "minus.circle.fill")
+                                            .font(.system(size: 13, weight: .semibold))
+                                            .foregroundColor(.white)
+                                    }
+                                    .buttonStyle(.plain)
+
+                                    Button(action: {
+                                        arrowLineWidths[arrows[index].id] = min(maxArrowLineWidth, lineWidth + arrowLineWidthStep)
+                                    }) {
+                                        Image(systemName: "plus.circle.fill")
+                                            .font(.system(size: 13, weight: .semibold))
+                                            .foregroundColor(.white)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 4)
+                                .background(Color.black.opacity(0.35))
+                                .clipShape(Capsule())
+                                .position(controlPosition)
                             }
-                            .help("Click to select, drag to move, or right-click to delete this arrow. You can also press Delete key to remove it.")
+                        }
                     }
                     
                     // Preview current arrow
@@ -930,10 +1433,13 @@ struct CaptureView: View {
                     // Draw numbered arrows
                     ForEach(numberedArrows.indices, id: \.self) { index in
                         let isSelected = numberedArrows[index].id == selectedElementId
+                        let lineWidth = arrowLineWidths[numberedArrows[index].id] ?? 2
                         Group {
                             ArrowShape(start: numberedArrows[index].start, end: numberedArrows[index].end)
-                                .stroke(getDrawingColor(at: numberedArrows[index].start, isSelected: isSelected), 
-                                      lineWidth: isSelected ? 4 : 2)
+                                .stroke(
+                                    drawingColor(for: numberedArrows[index].id, fallbackPoint: numberedArrows[index].start),
+                                    lineWidth: lineWidth
+                                )
                                 .contextMenu {
                                     Button(action: {
                                         // Delete this numbered arrow
@@ -960,6 +1466,8 @@ struct CaptureView: View {
                                             }
                                         }
                                         
+                                        arrowLineWidths.removeValue(forKey: deletedId)
+                                        elementColors.removeValue(forKey: deletedId)
                                         selectedElementId = nil
                                     }) {
                                         Label("Delete", systemImage: "trash")
@@ -969,12 +1477,51 @@ struct CaptureView: View {
                             let angle = atan2(numberedArrows[index].end.y - numberedArrows[index].start.y,
                                            numberedArrows[index].end.x - numberedArrows[index].start.x)
                             Text("\(numberedArrows[index].number)")
-                                .foregroundColor(getDrawingColor(at: numberedArrows[index].start, isSelected: isSelected))
+                                .foregroundColor(drawingColor(for: numberedArrows[index].id, fallbackPoint: numberedArrows[index].start))
                                 .font(.system(size: 16, weight: .bold))
-                                .background(isSelected ? Color.green.opacity(0.2) : Color.clear)
-                                .padding(isSelected ? 4 : 0)
                                 .position(x: numberedArrows[index].start.x - 30 * cos(angle),
                                         y: numberedArrows[index].start.y - 30 * sin(angle))
+
+                            if isSelected {
+                                let bounds = boundingRectForLine(
+                                    start: numberedArrows[index].start,
+                                    end: numberedArrows[index].end,
+                                    padding: 10
+                                )
+                                Rectangle()
+                                    .stroke(Color.green, style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
+                                    .frame(width: max(bounds.width, 16), height: max(bounds.height, 16))
+                                    .position(x: bounds.midX, y: bounds.midY)
+
+                                let controlPosition = adjustmentControlPositionForArrow(
+                                    start: numberedArrows[index].start,
+                                    end: numberedArrows[index].end
+                                )
+                                HStack(spacing: 6) {
+                                    Button(action: {
+                                        arrowLineWidths[numberedArrows[index].id] = max(minArrowLineWidth, lineWidth - arrowLineWidthStep)
+                                    }) {
+                                        Image(systemName: "minus.circle.fill")
+                                            .font(.system(size: 13, weight: .semibold))
+                                            .foregroundColor(.white)
+                                    }
+                                    .buttonStyle(.plain)
+
+                                    Button(action: {
+                                        arrowLineWidths[numberedArrows[index].id] = min(maxArrowLineWidth, lineWidth + arrowLineWidthStep)
+                                    }) {
+                                        Image(systemName: "plus.circle.fill")
+                                            .font(.system(size: 13, weight: .semibold))
+                                            .foregroundColor(.white)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 4)
+                                .background(Color.black.opacity(0.35))
+                                .clipShape(Capsule())
+                                .position(controlPosition)
+                            }
                         }
                     }
                     
@@ -997,22 +1544,32 @@ struct CaptureView: View {
                     // Draw rectangles after pixelated areas so they appear on top
                     ForEach(rectangles.indices, id: \.self) { index in
                         let isSelected = rectangles[index].id == selectedElementId
-                        Rectangle()
-                            .stroke(getDrawingColor(at: CGPoint(x: rectangles[index].rect.midX, y: rectangles[index].rect.midY), 
-                                  isSelected: isSelected), 
-                                   lineWidth: isSelected ? 4 : 2)
-                            .frame(width: rectangles[index].rect.width, height: rectangles[index].rect.height)
-                            .position(x: rectangles[index].rect.midX, y: rectangles[index].rect.midY)
-                            .contextMenu {
-                                Button(action: {
-                                    // Delete this rectangle
-                                    rectangles.removeAll { $0.id == rectangles[index].id }
-                                    selectedElementId = nil
-                                }) {
-                                    Label("Delete", systemImage: "trash")
+                        ZStack {
+                            Rectangle()
+                                .stroke(drawingColor(for: rectangles[index].id, fallbackPoint: CGPoint(x: rectangles[index].rect.midX, y: rectangles[index].rect.midY)),
+                                       lineWidth: 2)
+                                .frame(width: rectangles[index].rect.width, height: rectangles[index].rect.height)
+                                .position(x: rectangles[index].rect.midX, y: rectangles[index].rect.midY)
+                                .contextMenu {
+                                    Button(action: {
+                                        // Delete this rectangle
+                                        let deletedId = rectangles[index].id
+                                        rectangles.removeAll { $0.id == deletedId }
+                                        elementColors.removeValue(forKey: deletedId)
+                                        selectedElementId = nil
+                                    }) {
+                                        Label("Delete", systemImage: "trash")
+                                    }
                                 }
+                                .help("Click to select, drag to move, or right-click to delete this rectangle. You can also press Delete key to remove it.")
+
+                            if isSelected {
+                                Rectangle()
+                                    .stroke(Color.green, style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
+                                    .frame(width: rectangles[index].rect.width + 8, height: rectangles[index].rect.height + 8)
+                                    .position(x: rectangles[index].rect.midX, y: rectangles[index].rect.midY)
                             }
-                            .help("Click to select, drag to move, or right-click to delete this rectangle. You can also press Delete key to remove it.")
+                        }
                     }
                     
                     // Preview current rectangle
@@ -1054,6 +1611,48 @@ struct CaptureView: View {
                 } else {
                     Color.black.opacity(0.5)
                 }
+
+                HStack {
+                    Rectangle()
+                        .fill(Color.clear)
+                        .frame(width: 14)
+                        .contentShape(Rectangle())
+                        .onHover { isHovering in
+                            if isHovering {
+                                loadScreenshotHistory()
+                                withAnimation(.easeInOut(duration: 0.15)) {
+                                    showHistoryPanel = true
+                                }
+                            } else {
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+                                    if !isHoveringHistoryPanel {
+                                        withAnimation(.easeInOut(duration: 0.15)) {
+                                            showHistoryPanel = false
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    Spacer()
+                }
+                .zIndex(100)
+
+                if showHistoryPanel {
+                    screenshotHistoryPanel
+                        .transition(.move(edge: .leading).combined(with: .opacity))
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                        .padding(.leading, 10)
+                        .padding(.top, 12)
+                        .zIndex(101)
+                        .onHover { hovering in
+                            isHoveringHistoryPanel = hovering
+                            if !hovering {
+                                withAnimation(.easeInOut(duration: 0.15)) {
+                                    showHistoryPanel = false
+                                }
+                            }
+                        }
+                }
             }
             .simultaneousGesture(
                 TapGesture()
@@ -1064,6 +1663,11 @@ struct CaptureView: View {
                             let windowPoint = window.convertPoint(fromScreen: mouseLocation)
                             if let view = window.contentView {
                                 let viewPoint = view.convert(windowPoint, from: nil)
+
+                                // Keep text size controls interactive.
+                                if isPointInTextFontControl(point: viewPoint) {
+                                    return
+                                }
                                 
                                 // Check if we clicked on the toolbar
                                 if let rect = selectionRect {
@@ -1102,22 +1706,57 @@ struct CaptureView: View {
                             }
                         }
                     }
-            )
+            , including: .gesture)
             .gesture(
                 DragGesture(minimumDistance: 0.1, coordinateSpace: .local)
                     .onChanged { value in
+                            if isPointInTextFontControl(point: value.startLocation) {
+                                return
+                            }
                             handleDragChange(value)
                     }
                     .onEnded { value in
+                            if isPointInTextFontControl(point: value.startLocation) {
+                                return
+                            }
                             handleDragEnd(value)
                     }
-            )
+            , including: .gesture)
             .onAppear {
+                migrateLegacyCaptureColorDataIfNeeded()
+                loadScreenshotHistory()
+                if selectionRect == nil, let initialSelectionRect {
+                    selectionRect = initialSelectionRect
+                    currentTool = .select
+                    helpText = "Screenshot-Editor bereit. Waehle ein Tool oder klicke Done."
+                } else if selectionRect == nil, autoSelectVisibleImage,
+                          let window = NSApp.windows.first(where: { $0.contentView is NSHostingView<CaptureView> }),
+                          let contentSize = window.contentView?.bounds.size {
+                    selectionRect = fittedImageRect(in: contentSize)
+                    currentTool = .select
+                    helpText = "Screenshot-Editor bereit. Waehle ein Tool oder klicke Done."
+                }
+
                 // Setup delete key monitor
                 deleteMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
                     if event.keyCode == 53 { // ESC
+                        if selectionRect != nil {
+                            autoSaveCurrentCaptureIfNeeded()
+                        }
                         closeCaptureWindows()
                         return nil
+                    }
+                    switch event.keyCode {
+                    case 123, 126: // Left / Up -> previous (newer)
+                        if isEditingText { completeTextEditing() }
+                        navigateScreenshotHistory(step: -1)
+                        return nil
+                    case 124, 125: // Right / Down -> next (older)
+                        if isEditingText { completeTextEditing() }
+                        navigateScreenshotHistory(step: 1)
+                        return nil
+                    default:
+                        break
                     }
                     if event.keyCode == 51 || event.keyCode == 117 { // Backspace/Delete key
                         if selectedElementId != nil {
@@ -1141,6 +1780,10 @@ struct CaptureView: View {
                 }
             }
             .onChange(of: currentTool) { newTool in
+                if suppressNextToolHelpUpdate {
+                    suppressNextToolHelpUpdate = false
+                    return
+                }
                 // Update help text when tool changes
                 updateHelpText(for: newTool)
             }
@@ -1149,6 +1792,11 @@ struct CaptureView: View {
                 if isDrawing && (currentTool == .rectangle || currentTool == .arrow || 
                                currentTool == .numberedArrow || currentTool == .pixelate) {
                     helpText = "Drag to define area: Start \(formatPoint(firstPoint)), Current \(formatPoint(currentPoint)), Size: \(formatSize())"
+                }
+            }
+            .onChange(of: selectedElementId) { selectedId in
+                if let selectedId, let elementColor = elementColors[selectedId] {
+                    selectedDrawingColor = elementColor
                 }
             }
         }
@@ -1191,8 +1839,10 @@ struct CaptureView: View {
         let keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             print("Text monitor received key event: \(event.keyCode)")
             
-            // Add ESC key handling
             if event.keyCode == 53 { // ESC key
+                if selectionRect != nil {
+                    autoSaveCurrentCaptureIfNeeded()
+                }
                 closeCaptureWindows()
                 return nil
             }
@@ -1206,6 +1856,11 @@ struct CaptureView: View {
                 }
             }
             
+            // Arrow keys always navigate history, even during text editing
+            if [123, 124, 125, 126].contains(event.keyCode) {
+                return event
+            }
+
             guard isEditingText else {
                 return event
             }
@@ -1242,6 +1897,16 @@ struct CaptureView: View {
         let mouseMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { event in
             print("Mouse click detected, removing text monitor")
             if isEditingText {
+                if let window = NSApp.windows.first(where: { $0.contentView is NSHostingView<CaptureView> }) {
+                    let mouseLocation = NSEvent.mouseLocation
+                    let windowPoint = window.convertPoint(fromScreen: mouseLocation)
+                    if let view = window.contentView {
+                        let viewPoint = view.convert(windowPoint, from: nil)
+                        if isPointInTextFontControl(point: viewPoint) {
+                            return event
+                        }
+                    }
+                }
                 completeTextEditing()
             }
             return event
@@ -1278,6 +1943,7 @@ struct CaptureView: View {
             ))
             if let createdId = texts.last?.id {
                 textFontSizes[createdId] = currentEditingFontSize
+                elementColors[createdId] = selectedDrawingColor
             }
             
             // Always increment numCount for numbered text, regardless of whether text was entered
@@ -1306,6 +1972,7 @@ struct CaptureView: View {
     }
 
     private func closeCaptureWindows() {
+        ScreenCaptureState.isOverlayActive = false
         NSApp.windows.forEach { window in
             if window.contentView is NSHostingView<CaptureView> {
                 window.close()
@@ -1477,7 +2144,12 @@ struct CaptureView: View {
             
         case .arrow:
             if let start = firstPoint {
-                arrows.append((start: start, end: value.location, id: UUID()))
+                let newId = UUID()
+                arrows.append((start: start, end: value.location, id: newId))
+                arrowLineWidths[newId] = 2
+                elementColors[newId] = selectedDrawingColor
+                selectedElementId = newId
+                helpText = "Pfeil erstellt. +/- passt die Linienstaerke an."
             }
             isDrawing = false
             firstPoint = nil
@@ -1491,7 +2163,9 @@ struct CaptureView: View {
                     width: abs(value.location.x - first.x),
                     height: abs(value.location.y - first.y)
                 )
-                rectangles.append((rect, UUID()))
+                let newId = UUID()
+                rectangles.append((rect, newId))
+                elementColors[newId] = selectedDrawingColor
             }
             isDrawing = false
             firstPoint = nil
@@ -1501,12 +2175,17 @@ struct CaptureView: View {
             if let start = firstPoint {
                 let arrowNumber = numberedArrows.count + 1
                 let arrowEnd = value.location
+                let newId = UUID()
                 numberedArrows.append((
                     start: start,
                     end: arrowEnd,
                     number: arrowNumber,
-                    id: UUID()
+                    id: newId
                 ))
+                arrowLineWidths[newId] = 2
+                elementColors[newId] = selectedDrawingColor
+                selectedElementId = newId
+                helpText = "Nummerierter Pfeil erstellt. +/- passt die Linienstaerke an."
                 
                 // Optional immediate annotation after placing a numbered arrow.
                 if selectionRect != nil {
@@ -1560,7 +2239,10 @@ struct CaptureView: View {
     }
 
     private func beginElementDrag(at point: CGPoint) -> Bool {
-        if selectedElementId == nil || !isPointInsideSelectedElement(point, selectedElementId) {
+        if let selected = selectedElementId,
+           isPointInsideSelectedBoundingBox(point, selectedElement: selected) {
+            // Keep current selection and allow drag from anywhere inside the selected bounding box.
+        } else if selectedElementId == nil || !isPointInsideSelectedElement(point, selectedElementId) {
             selectedElementId = elementId(at: point)
         }
 
@@ -1578,16 +2260,8 @@ struct CaptureView: View {
     }
 
     private func canStartDraggingElement(_ selectedElement: UUID, at point: CGPoint) -> Bool {
-        if let index = texts.firstIndex(where: { $0.id == selectedElement }) {
-            let fontSize = textFontSizes[selectedElement] ?? 20
-            let textSize = textBlockSize(for: texts[index].text, fontSize: fontSize)
-            let textBox = CGRect(
-                x: texts[index].position.x,
-                y: texts[index].position.y - textSize.height / 2,
-                width: textSize.width,
-                height: textSize.height
-            )
-            return textBox.contains(point)
+        if let bounds = selectedElementBoundingRect(for: selectedElement) {
+            return bounds.contains(point)
         }
         return true
     }
@@ -1663,7 +2337,56 @@ struct CaptureView: View {
 
     private func isPointInsideSelectedElement(_ point: CGPoint, _ selectedElement: UUID?) -> Bool {
         guard let selectedElement else { return false }
+        if isPointInsideSelectedBoundingBox(point, selectedElement: selectedElement) {
+            return true
+        }
         return elementId(at: point) == selectedElement
+    }
+
+    private func isPointInsideSelectedBoundingBox(_ point: CGPoint, selectedElement: UUID) -> Bool {
+        guard let bounds = selectedElementBoundingRect(for: selectedElement) else { return false }
+        return bounds.contains(point)
+    }
+
+    private func selectedElementBoundingRect(for elementId: UUID) -> CGRect? {
+        if let text = texts.first(where: { $0.id == elementId }) {
+            let fontSize = textFontSizes[elementId] ?? 20
+            let textSize = textBlockSize(for: text.text, fontSize: fontSize)
+            return CGRect(
+                x: text.position.x - 4,
+                y: text.position.y - textSize.height / 2 - 4,
+                width: textSize.width + 8,
+                height: textSize.height + 8
+            )
+        }
+
+        if let pixelRect = pixelatedRects.first(where: { $0.id == elementId }) {
+            return pixelRect.rect.insetBy(dx: -4, dy: -4)
+        }
+
+        if let smiley = smileys.first(where: { $0.id == elementId }) {
+            let size = smiley.size * 1.2
+            return CGRect(
+                x: smiley.position.x - size / 2,
+                y: smiley.position.y - size / 2,
+                width: size,
+                height: size
+            )
+        }
+
+        if let arrow = arrows.first(where: { $0.id == elementId }) {
+            return boundingRectForLine(start: arrow.start, end: arrow.end, padding: 10)
+        }
+
+        if let arrow = numberedArrows.first(where: { $0.id == elementId }) {
+            return boundingRectForLine(start: arrow.start, end: arrow.end, padding: 10)
+        }
+
+        if let rect = rectangles.first(where: { $0.id == elementId }) {
+            return rect.rect.insetBy(dx: -4, dy: -4)
+        }
+
+        return nil
     }
 
     private func elementId(at point: CGPoint) -> UUID? {
@@ -1885,9 +2608,9 @@ struct CaptureView: View {
     
     private func createPixelatedImage(in rect: CGRect) -> NSImage? {
         // Get the portion of the image we want to pixelate
-        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
+        guard let cgImage = workingImage.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
         
-        let scale = CGFloat(cgImage.width) / image.size.width
+        let scale = CGFloat(cgImage.width) / workingImage.size.width
         let scaledRect = NSRect(
             x: rect.origin.x * scale,
             y: rect.origin.y * scale,
@@ -2173,7 +2896,7 @@ struct CaptureView: View {
         
         // Add texts
         for text in texts {
-            let color = getDrawingColor(at: text.position).nsColor
+            let color = (elementColors[text.id] ?? selectedDrawingColor).nsColor
             let fontSize = textFontSizes[text.id] ?? 20
             drawings.append(.text(text.text, text.position, color, fontSize))
         }
@@ -2185,25 +2908,27 @@ struct CaptureView: View {
         
         // Add arrows
         for arrow in arrows {
-            let color = getDrawingColor(at: arrow.start).nsColor
-            drawings.append(.arrow(arrow.start, arrow.end, color))
+            let color = (elementColors[arrow.id] ?? selectedDrawingColor).nsColor
+            let lineWidth = arrowLineWidths[arrow.id] ?? 2
+            drawings.append(.arrow(arrow.start, arrow.end, color, lineWidth))
         }
         
         // Add numbered arrows
         for arrow in numberedArrows {
-            let color = getDrawingColor(at: arrow.start).nsColor
-            drawings.append(.numberedArrow(arrow.start, arrow.end, arrow.number, color))
+            let color = (elementColors[arrow.id] ?? selectedDrawingColor).nsColor
+            let lineWidth = arrowLineWidths[arrow.id] ?? 2
+            drawings.append(.numberedArrow(arrow.start, arrow.end, arrow.number, color, lineWidth))
         }
         
         // Add rectangles after pixelated areas so they appear on top
         for rect in rectangles {
-            let color = getDrawingColor(at: CGPoint(x: rect.rect.midX, y: rect.rect.midY)).nsColor
+            let color = (elementColors[rect.id] ?? selectedDrawingColor).nsColor
             drawings.append(.rectangle(rect.rect, color))
         }
         
         // Add smileys
         for smiley in smileys {
-            let color = getDrawingColor(at: smiley.position).nsColor
+            let color = (elementColors[smiley.id] ?? selectedDrawingColor).nsColor
             drawings.append(.smiley(smiley.emoji, smiley.position, smiley.size, color))
         }
         
@@ -2254,6 +2979,8 @@ struct CaptureView: View {
             numberedArrows.removeAll { $0.id == selectedId }
             pixelatedRects.removeAll { $0.id == selectedId }
             smileys.removeAll { $0.id == selectedId }
+            arrowLineWidths.removeValue(forKey: selectedId)
+            elementColors.removeValue(forKey: selectedId)
             
             // If we deleted a numbered arrow, renumber the remaining arrows to maintain sequence
             if let deletedNumber = deletedArrowNumber {
@@ -2338,56 +3065,43 @@ struct CaptureView: View {
     }
 
     // Extract toolbar view to a separate function
-    @ViewBuilder
-    private func toolbarView(for rect: CGRect) -> some View {
-        // Get the current screen where the selection is
-        let selectionCenter = NSPoint(
-            x: rect.origin.x + rect.width / 2,
-            y: rect.origin.y + rect.height / 2
-        )
-        let currentScreen = NSScreen.screens.first { screen in
-            NSPointInRect(selectionCenter, screen.frame)
-        } ?? NSScreen.main
-        
-        let screenHeight = currentScreen?.frame.height ?? 0
-        let screenWidth = currentScreen?.frame.width ?? 0
-        let screenOriginX = currentScreen?.frame.origin.x ?? 0
-        let buttonsHeight: CGFloat = 36  // Height of buttons + padding
-        let margin: CGFloat = 16  // Margin from selection rect
-        
-        // Calculate space below the selection
-        let spaceBelow = screenHeight - rect.maxY
-        
-        // Calculate space above the selection
-        let spaceAbove = rect.minY
-        
-        // Determine if we should show above based on available space
-        // Only show above if there's not enough space below AND there's more space above than below
-        let shouldShowAbove = spaceBelow < (buttonsHeight + margin) && spaceAbove > spaceBelow
-        
-        // Calculate toolbar width - ensure it's never wider than the screen
-        let maxToolbarWidth: CGFloat = 700
-        let minToolbarWidth: CGFloat = 400 // Minimum width to ensure buttons are visible
-        let availableScreenWidth = screenWidth - 40 // Leave 20px margin on each side
-        let toolbarWidth = min(maxToolbarWidth, max(minToolbarWidth, min(rect.width, availableScreenWidth)))
-        
-        // Calculate horizontal position
-        // If selection is near screen edge or smaller than toolbar, position toolbar to stay fully on screen
-        /*let idealX: CGFloat = {
-            if rect.minX < (screenOriginX + toolbarWidth/2 + 20)  {
-                return screenOriginX + (toolbarWidth/2 + 20)
-            } else if rect.maxX > (screenOriginX + screenWidth - 20) {
-                return screenOriginX + (screenWidth - (toolbarWidth/2 + 20))
-            } else {
-                // Otherwise center on selection
-                return rect.midX
-            }
-        }()*/
-        let adjustedX = screenOriginX + toolbarWidth > rect.midX ? screenOriginX + (toolbarWidth + 50) : (rect.midX + toolbarWidth > screenOriginX + screenWidth ? screenOriginX + (screenWidth - toolbarWidth - 50) : rect.midX)
+    private func toolbarView(for rect: CGRect, in containerSize: CGSize) -> some View {
+        let buttonsHeight: CGFloat = 48 // content (36) + vertical padding (6+6)
+        let margin: CGFloat = 12
+        let edgePadding: CGFloat = 10
+        let maxToolbarWidth: CGFloat = 620
+        let minToolbarWidth: CGFloat = 300
+        let availableWidth = max(180, containerSize.width - edgePadding * 2)
+        let preferredWidth = min(maxToolbarWidth, max(minToolbarWidth, availableWidth))
+        let toolbarWidth = min(preferredWidth, availableWidth)
+
+        let halfW = toolbarWidth / 2
+        let halfH = buttonsHeight / 2
+        let minX = halfW + edgePadding
+        let maxX = max(minX, containerSize.width - halfW - edgePadding)
+        let adjustedX = min(max(rect.midX, minX), maxX)
+
+        let minY = halfH + edgePadding
+        let maxY = max(minY, containerSize.height - halfH - edgePadding)
+        let preferredBelow = rect.maxY + margin + halfH
+        let preferredAbove = rect.minY - margin - halfH
+
+        let adjustedY: CGFloat
+        if preferredBelow <= maxY {
+            adjustedY = preferredBelow
+        } else if preferredAbove >= minY {
+            adjustedY = preferredAbove
+        } else {
+            let clampedBelow = min(max(preferredBelow, minY), maxY)
+            let clampedAbove = min(max(preferredAbove, minY), maxY)
+            let belowDistance = abs(clampedBelow - rect.maxY)
+            let aboveDistance = abs(rect.minY - clampedAbove)
+            adjustedY = belowDistance <= aboveDistance ? clampedBelow : clampedAbove
+        }
 
         
         
-        HStack(spacing: 4) {
+        return HStack(spacing: 4) {
             // Modify the Adjust button to reset the selection process
             Button(action: { 
                 currentTool = .select
@@ -2481,7 +3195,7 @@ struct CaptureView: View {
                 selectedElementId = nil
             }) {
                 HStack(spacing: 2) {
-                    Image(systemName: "1.circle")
+                    Image(systemName: "arrowshape.turn.up.right.circle")
                         .font(.system(size: 10))
                     Text("N-Arrow")
                         .font(.system(size: 10))
@@ -2533,6 +3247,34 @@ struct CaptureView: View {
             .buttonStyle(ToolButtonStyle(isSelected: currentTool == .smiley))
             .help("Add Smiley")
 
+            HStack(spacing: 4) {
+                ForEach(Array(drawingPalette.enumerated()), id: \.offset) { _, color in
+                    Button(action: {
+                        if let selectedId = selectedElementId {
+                            elementColors[selectedId] = color
+                        } else if let hoveredId = elementId(at: cursorPosition) {
+                            elementColors[hoveredId] = color
+                            selectedElementId = hoveredId
+                        }
+                        selectedDrawingColor = color
+                    }) {
+                        Circle()
+                            .fill(color)
+                            .frame(width: 14, height: 14)
+                            .overlay(
+                                Circle()
+                                    .stroke(
+                                        selectedDrawingColor == color ? Color.white : Color.clear,
+                                        lineWidth: 2
+                                    )
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 6)
+            .help("Drawing Color")
+
             // Add a delete button that's only enabled when an element is selected
             if selectedElementId != nil {
                 Button(action: { 
@@ -2570,7 +3312,12 @@ struct CaptureView: View {
             
             Button(action: {
                 let drawings = collectDrawings()
-                onSelection(NSRect(x: rect.origin.x, y: rect.origin.y, width: rect.width, height: rect.height), drawings)
+                onSelection(
+                    workingImage,
+                    NSRect(x: rect.origin.x, y: rect.origin.y, width: rect.width, height: rect.height),
+                    drawings,
+                    loadedBaseName
+                )
             }) {
                 HStack(spacing: 2) {
                     Image(systemName: "checkmark.circle")
@@ -2590,7 +3337,7 @@ struct CaptureView: View {
         .frame(width: toolbarWidth)
         .position(
             x: adjustedX,
-            y: shouldShowAbove ? rect.minY - (buttonsHeight/2 + margin) : rect.maxY + (buttonsHeight/2 + margin)
+            y: adjustedY
         )
     }
     
@@ -2640,6 +3387,710 @@ struct CaptureView: View {
             helpText = "Click where you want to add a smiley"
         }
     }
+
+    @ViewBuilder
+    private var screenshotHistoryPanel: some View {
+        HStack(alignment: .top, spacing: 10) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Screenshots")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.95))
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 4) {
+                        // Current screenshot always at the top
+                        let isCurrent = (loadedBaseName == nil)
+                        Button(action: {
+                            restoreCurrentCapture()
+                        }) {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("Aktuell")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundColor(.white)
+                                    .lineLimit(1)
+                                Text("Aktiver Screenshot")
+                                    .font(.system(size: 9))
+                                    .foregroundColor(.white.opacity(0.55))
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 6)
+                            .background(Color.white.opacity(
+                                hoveredHistoryItemId == "__current__" ? 0.16 : (isCurrent ? 0.2 : 0.08)
+                            ))
+                            .cornerRadius(6)
+                            .overlay(
+                                isCurrent
+                                    ? RoundedRectangle(cornerRadius: 6)
+                                        .stroke(Color.blue.opacity(0.6), lineWidth: 1)
+                                    : nil
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .onHover { hovering in
+                            if hovering {
+                                hoveredHistoryItemId = "__current__"
+                                hoveredHistoryPreviewImage = workingImage
+                            } else if hoveredHistoryItemId == "__current__" {
+                                hoveredHistoryItemId = nil
+                                hoveredHistoryPreviewImage = nil
+                            }
+                        }
+
+                        ForEach(screenshotHistory) { item in
+                            let isLoaded = (loadedBaseName == item.baseName)
+                            Button(action: {
+                                loadScreenshot(item)
+                            }) {
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(item.baseName)
+                                        .font(.system(size: 11))
+                                        .foregroundColor(.white)
+                                        .lineLimit(1)
+                                    Text(Self.historyDateFormatter.string(from: item.modifiedAt))
+                                        .font(.system(size: 9))
+                                        .foregroundColor(.white.opacity(0.55))
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 6)
+                                .background(Color.white.opacity(hoveredHistoryItemId == item.id ? 0.16 : 0.08))
+                                .cornerRadius(6)
+                                .overlay(
+                                    isLoaded
+                                        ? RoundedRectangle(cornerRadius: 6)
+                                            .stroke(Color.blue.opacity(0.6), lineWidth: 1)
+                                        : nil
+                                )
+                            }
+                            .buttonStyle(.plain)
+                            .onHover { hovering in
+                                if hovering {
+                                    hoveredHistoryItemId = item.id
+                                    hoveredHistoryPreviewImage = previewImage(for: item)
+                                } else if hoveredHistoryItemId == item.id {
+                                    hoveredHistoryItemId = nil
+                                    hoveredHistoryPreviewImage = nil
+                                }
+                            }
+                        }
+                    }
+                }
+                .frame(maxHeight: 300)
+            }
+            .frame(width: 240)
+
+            ZStack {
+                Color.clear
+                    .frame(width: 520, height: 340)
+
+                if let preview = hoveredHistoryPreviewImage {
+                    Image(nsImage: preview)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 520, height: 340)
+                        .cornerRadius(6)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(Color.white.opacity(0.25), lineWidth: 1)
+                        )
+                }
+            }
+        }
+        .padding(10)
+        .frame(width: 810, alignment: .leading)
+        .background(Color.black.opacity(0.6))
+        .cornerRadius(8)
+    }
+
+    private func loadScreenshotHistory() {
+        do {
+            let screenCaptureURL = try screenCaptureDirectoryURL()
+            let dataDirectory = try screenCaptureDataDirectoryURL()
+            let files = try FileManager.default.contentsOfDirectory(
+                at: dataDirectory,
+                includingPropertiesForKeys: [.contentModificationDateKey],
+                options: [.skipsHiddenFiles]
+            )
+
+            let items: [ScreenshotHistoryItem] = files.compactMap { url in
+                guard url.pathExtension.lowercased() == "json",
+                      url.lastPathComponent.hasSuffix("_cap.json") else {
+                    return nil
+                }
+
+                let baseName = url.deletingPathExtension().lastPathComponent.replacingOccurrences(of: "_cap", with: "")
+                let originalURL = dataDirectory.appendingPathComponent("\(baseName)_orig.png")
+                let editedURL = screenCaptureURL.appendingPathComponent("\(baseName).png")
+
+                guard FileManager.default.fileExists(atPath: editedURL.path) else {
+                    try? FileManager.default.removeItem(at: url)
+                    if FileManager.default.fileExists(atPath: originalURL.path) {
+                        try? FileManager.default.removeItem(at: originalURL)
+                    }
+                    return nil
+                }
+                guard FileManager.default.fileExists(atPath: originalURL.path) else {
+                    return nil
+                }
+
+                let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date.distantPast
+                return ScreenshotHistoryItem(
+                    baseName: baseName,
+                    editedURL: editedURL,
+                    originalURL: originalURL,
+                    capURL: url,
+                    modifiedAt: modified
+                )
+            }
+
+            // Remove orphaned _orig.png files that no longer have a matching screenshot or metadata.
+            for originalURL in files where originalURL.lastPathComponent.hasSuffix("_orig.png") {
+                let baseName = originalURL.deletingPathExtension().lastPathComponent.replacingOccurrences(of: "_orig", with: "")
+                let editedURL = screenCaptureURL.appendingPathComponent("\(baseName).png")
+                let capURL = dataDirectory.appendingPathComponent("\(baseName)_cap.json")
+                if !FileManager.default.fileExists(atPath: editedURL.path) || !FileManager.default.fileExists(atPath: capURL.path) {
+                    try? FileManager.default.removeItem(at: originalURL)
+                    if FileManager.default.fileExists(atPath: capURL.path) {
+                        try? FileManager.default.removeItem(at: capURL)
+                    }
+                }
+            }
+
+            screenshotHistory = items.sorted { $0.modifiedAt > $1.modifiedAt }
+        } catch {
+            print("Failed to load screenshot history: \(error)")
+            screenshotHistory = []
+        }
+    }
+
+    private func migrateLegacyCaptureColorDataIfNeeded() {
+        if UserDefaults.standard.bool(forKey: Self.legacyColorMigrationKey) {
+            return
+        }
+
+        do {
+            let dataDirectory = try screenCaptureDataDirectoryURL()
+            let files = try FileManager.default.contentsOfDirectory(
+                at: dataDirectory,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            )
+
+            let capFiles = files.filter { $0.pathExtension.lowercased() == "json" && $0.lastPathComponent.hasSuffix("_cap.json") }
+            let decoder = JSONDecoder()
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+
+            for capURL in capFiles {
+                guard let data = try? Data(contentsOf: capURL),
+                      var document = try? decoder.decode(CaptureDocument.self, from: data) else {
+                    continue
+                }
+
+                if normalizeLegacyColors(in: &document),
+                   let migratedData = try? encoder.encode(document) {
+                    try? migratedData.write(to: capURL, options: .atomic)
+                }
+            }
+
+            UserDefaults.standard.set(true, forKey: Self.legacyColorMigrationKey)
+        } catch {
+            print("Legacy color migration failed: \(error)")
+        }
+    }
+
+    private func normalizeLegacyColors(in document: inout CaptureDocument) -> Bool {
+        var changed = false
+
+        for idx in document.texts.indices {
+            changed = document.texts[idx].color.normalizeLegacy255IfNeeded() || changed
+        }
+        for idx in document.arrows.indices {
+            changed = document.arrows[idx].color.normalizeLegacy255IfNeeded() || changed
+        }
+        for idx in document.numberedArrows.indices {
+            changed = document.numberedArrows[idx].color.normalizeLegacy255IfNeeded() || changed
+        }
+        for idx in document.rectangles.indices {
+            changed = document.rectangles[idx].color.normalizeLegacy255IfNeeded() || changed
+        }
+        for idx in document.smileys.indices {
+            changed = document.smileys[idx].color.normalizeLegacy255IfNeeded() || changed
+        }
+
+        return changed
+    }
+
+    private func restoreCurrentCapture() {
+        guard loadedBaseName != nil else { return }
+        autoSaveCurrentCaptureIfNeeded()
+
+        centerCaptureWindow(for: capturedImage.size)
+        workingImage = capturedImage
+        selectionRect = initialSelectionRect
+        firstPoint = nil
+        currentPoint = nil
+        isSelecting = false
+        isDrawing = false
+        isEditingText = false
+        selectedElementId = nil
+        texts = []
+        textFontSizes = [:]
+        arrows = []
+        numberedArrows = []
+        rectangles = []
+        pixelatedRects = []
+        smileys = []
+        elementColors = [:]
+        arrowLineWidths = [:]
+        numCount = 1
+        loadedBaseName = nil
+        suppressNextToolHelpUpdate = true
+        currentTool = selectionRect != nil ? .elementSelect : .select
+        helpText = selectionRect != nil
+            ? "Screenshot-Editor bereit. Waehle ein Tool oder klicke Done."
+            : "Select an area to capture"
+        showHistoryPanel = false
+    }
+
+    private func loadScreenshot(_ item: ScreenshotHistoryItem) {
+        autoSaveCurrentCaptureIfNeeded()
+
+        guard let loadedImage = NSImage(contentsOf: item.originalURL) else {
+            print("Failed to load original screenshot at: \(item.originalURL.path)")
+            return
+        }
+
+        do {
+            let data = try Data(contentsOf: item.capURL)
+            let document = try JSONDecoder().decode(CaptureDocument.self, from: data)
+            centerCaptureWindow(for: loadedImage.size)
+            applyCaptureDocument(document, image: loadedImage)
+            loadedBaseName = item.baseName
+            showHistoryPanel = false
+        } catch {
+            print("Failed to load capture document: \(error)")
+        }
+    }
+
+    private func previewImage(for item: ScreenshotHistoryItem) -> NSImage? {
+        if let edited = NSImage(contentsOf: item.editedURL) {
+            return edited
+        }
+        return NSImage(contentsOf: item.originalURL)
+    }
+
+    private func renderEditedImage(baseImage: NSImage, selectedArea: CGRect, drawings: [Drawing]) -> NSImage? {
+        guard let cropped = baseImage.crop(to: selectedArea) else { return nil }
+        let finalImage = NSImage(size: selectedArea.size)
+        finalImage.lockFocus()
+        cropped.draw(in: NSRect(origin: .zero, size: selectedArea.size))
+
+        guard let context = NSGraphicsContext.current?.cgContext else {
+            finalImage.unlockFocus()
+            return nil
+        }
+
+        let offsetX = selectedArea.origin.x
+        let offsetY = selectedArea.origin.y
+        let height = selectedArea.height
+
+        for drawing in drawings {
+            context.saveGState()
+            switch drawing {
+            case .text(let text, let position, let color, let fontSize):
+                let adjustedPosition = CGPoint(x: position.x - offsetX, y: height - (position.y - offsetY))
+                let attributes: [NSAttributedString.Key: Any] = [
+                    .font: NSFont.systemFont(ofSize: fontSize),
+                    .foregroundColor: color
+                ]
+                text.draw(at: adjustedPosition, withAttributes: attributes)
+            case .arrow(let start, let end, let color, let lineWidth):
+                let adjustedStart = CGPoint(x: start.x - offsetX, y: height - (start.y - offsetY))
+                let adjustedEnd = CGPoint(x: end.x - offsetX, y: height - (end.y - offsetY))
+                context.setStrokeColor(color.cgColor)
+                context.setLineWidth(lineWidth)
+                context.move(to: adjustedStart)
+                context.addLine(to: adjustedEnd)
+                let angle = atan2(adjustedEnd.y - adjustedStart.y, adjustedEnd.x - adjustedStart.x)
+                let arrowLength: CGFloat = 20
+                let arrowAngle: CGFloat = .pi / 6
+                let arrowPoint1 = CGPoint(
+                    x: adjustedEnd.x - arrowLength * cos(angle - arrowAngle),
+                    y: adjustedEnd.y - arrowLength * sin(angle - arrowAngle)
+                )
+                let arrowPoint2 = CGPoint(
+                    x: adjustedEnd.x - arrowLength * cos(angle + arrowAngle),
+                    y: adjustedEnd.y - arrowLength * sin(angle + arrowAngle)
+                )
+                context.move(to: arrowPoint1)
+                context.addLine(to: adjustedEnd)
+                context.addLine(to: arrowPoint2)
+                context.strokePath()
+            case .numberedArrow(let start, let end, let number, let color, let lineWidth):
+                let adjustedStart = CGPoint(x: start.x - offsetX, y: height - (start.y - offsetY))
+                let adjustedEnd = CGPoint(x: end.x - offsetX, y: height - (end.y - offsetY))
+                context.setStrokeColor(color.cgColor)
+                context.setLineWidth(lineWidth)
+                context.move(to: adjustedStart)
+                context.addLine(to: adjustedEnd)
+                let angle = atan2(adjustedEnd.y - adjustedStart.y, adjustedEnd.x - adjustedStart.x)
+                let arrowLength: CGFloat = 20
+                let arrowAngle: CGFloat = .pi / 6
+                let arrowPoint1 = CGPoint(
+                    x: adjustedEnd.x - arrowLength * cos(angle - arrowAngle),
+                    y: adjustedEnd.y - arrowLength * sin(angle - arrowAngle)
+                )
+                let arrowPoint2 = CGPoint(
+                    x: adjustedEnd.x - arrowLength * cos(angle + arrowAngle),
+                    y: adjustedEnd.y - arrowLength * sin(angle + arrowAngle)
+                )
+                context.move(to: arrowPoint1)
+                context.addLine(to: adjustedEnd)
+                context.addLine(to: arrowPoint2)
+                context.strokePath()
+                let numberText = "\(number)"
+                let attributes: [NSAttributedString.Key: Any] = [
+                    .font: NSFont.boldSystemFont(ofSize: 16),
+                    .foregroundColor: color
+                ]
+                let numberPoint = CGPoint(
+                    x: adjustedStart.x - 30 * cos(angle),
+                    y: adjustedStart.y - 30 * sin(angle)
+                )
+                numberText.draw(at: numberPoint, withAttributes: attributes)
+            case .rectangle(let rect, let color):
+                let adjustedRect = CGRect(
+                    x: rect.origin.x - offsetX,
+                    y: height - (rect.origin.y - offsetY) - rect.height,
+                    width: rect.width,
+                    height: rect.height
+                )
+                context.setStrokeColor(color.cgColor)
+                context.setLineWidth(2)
+                context.stroke(adjustedRect)
+            case .pixelatedRect(let rect, let pixelatedImage):
+                let adjustedRect = CGRect(
+                    x: rect.origin.x - offsetX,
+                    y: height - (rect.origin.y - offsetY) - rect.height,
+                    width: rect.width,
+                    height: rect.height
+                )
+                pixelatedImage.draw(in: adjustedRect)
+            case .smiley(let emoji, let position, let size, let color):
+                let adjustedPosition = CGPoint(x: position.x - offsetX, y: height - (position.y - offsetY))
+                let attributes: [NSAttributedString.Key: Any] = [
+                    .font: NSFont.systemFont(ofSize: size),
+                    .foregroundColor: color
+                ]
+                emoji.draw(at: adjustedPosition, withAttributes: attributes)
+            }
+            context.restoreGState()
+        }
+
+        finalImage.unlockFocus()
+        return finalImage
+    }
+
+    private func pngData(from image: NSImage) -> Data? {
+        guard let tiff = image.tiffRepresentation,
+              let bitmap = NSBitmapImageRep(data: tiff) else {
+            return nil
+        }
+        return bitmap.representation(using: .png, properties: [:])
+    }
+
+    private func makeCaptureDocument(from drawings: [Drawing], selectedArea: CGRect) -> CaptureDocument {
+        var texts: [CaptureText] = []
+        var arrows: [CaptureArrow] = []
+        var numberedArrows: [CaptureNumberedArrow] = []
+        var rectangles: [CaptureRectangle] = []
+        var pixelates: [CapturePixelate] = []
+        var smileys: [CaptureSmiley] = []
+
+        for drawing in drawings {
+            switch drawing {
+            case .text(let text, let position, let color, let fontSize):
+                texts.append(
+                    CaptureText(
+                        text: text,
+                        position: CodablePoint(x: position.x, y: position.y),
+                        fontSize: fontSize,
+                        color: CodableColor(color)
+                    )
+                )
+            case .arrow(let start, let end, let color, let lineWidth):
+                arrows.append(
+                    CaptureArrow(
+                        start: CodablePoint(x: start.x, y: start.y),
+                        end: CodablePoint(x: end.x, y: end.y),
+                        lineWidth: lineWidth,
+                        color: CodableColor(color)
+                    )
+                )
+            case .numberedArrow(let start, let end, let number, let color, let lineWidth):
+                numberedArrows.append(
+                    CaptureNumberedArrow(
+                        start: CodablePoint(x: start.x, y: start.y),
+                        end: CodablePoint(x: end.x, y: end.y),
+                        number: number,
+                        lineWidth: lineWidth,
+                        color: CodableColor(color)
+                    )
+                )
+            case .rectangle(let rect, let color):
+                rectangles.append(
+                    CaptureRectangle(
+                        rect: CodableRect(
+                            x: rect.origin.x,
+                            y: rect.origin.y,
+                            width: rect.width,
+                            height: rect.height
+                        ),
+                        color: CodableColor(color)
+                    )
+                )
+            case .pixelatedRect(let rect, _):
+                pixelates.append(
+                    CapturePixelate(
+                        rect: CodableRect(
+                            x: rect.origin.x,
+                            y: rect.origin.y,
+                            width: rect.width,
+                            height: rect.height
+                        )
+                    )
+                )
+            case .smiley(let emoji, let position, let size, let color):
+                smileys.append(
+                    CaptureSmiley(
+                        emoji: emoji,
+                        position: CodablePoint(x: position.x, y: position.y),
+                        size: size,
+                        color: CodableColor(color)
+                    )
+                )
+            }
+        }
+
+        return CaptureDocument(
+            canvasSize: CodableSize(width: selectedArea.width, height: selectedArea.height),
+            selectedRect: CodableRect(
+                x: selectedArea.origin.x,
+                y: selectedArea.origin.y,
+                width: selectedArea.width,
+                height: selectedArea.height
+            ),
+            texts: texts,
+            arrows: arrows,
+            numberedArrows: numberedArrows,
+            rectangles: rectangles,
+            pixelates: pixelates,
+            smileys: smileys
+        )
+    }
+
+    private func applyCaptureDocument(_ document: CaptureDocument, image loadedImage: NSImage) {
+        workingImage = loadedImage
+
+        if let selectedRect = document.selectedRect {
+            selectionRect = CGRect(
+                x: selectedRect.x,
+                y: selectedRect.y,
+                width: selectedRect.width,
+                height: selectedRect.height
+            )
+        } else {
+            selectionRect = CGRect(origin: .zero, size: loadedImage.size)
+        }
+        firstPoint = nil
+        currentPoint = nil
+        isSelecting = false
+        isDrawing = false
+        isEditingText = false
+        selectedElementId = nil
+
+        texts = []
+        textFontSizes = [:]
+        arrows = []
+        numberedArrows = []
+        rectangles = []
+        pixelatedRects = []
+        smileys = []
+        elementColors = [:]
+        arrowLineWidths = [:]
+
+        var maxNumberedArrow = 0
+        var maxNumberedText = 0
+
+        for text in document.texts {
+            let id = UUID()
+            let position = CGPoint(x: text.position.x, y: text.position.y)
+            let isNumberedText = text.text.range(of: #"^\d+\."#, options: .regularExpression) != nil
+            texts.append((text: text.text, position: position, id: id, isNumberedText: isNumberedText))
+            textFontSizes[id] = text.fontSize
+            elementColors[id] = Color(nsColor: text.color.nsColor)
+
+            if isNumberedText,
+               let match = text.text.range(of: #"^\d+"#, options: .regularExpression),
+               let number = Int(text.text[match]) {
+                maxNumberedText = max(maxNumberedText, number)
+            }
+        }
+
+        for arrow in document.arrows {
+            let id = UUID()
+            arrows.append((
+                start: CGPoint(x: arrow.start.x, y: arrow.start.y),
+                end: CGPoint(x: arrow.end.x, y: arrow.end.y),
+                id: id
+            ))
+            arrowLineWidths[id] = arrow.lineWidth
+            elementColors[id] = Color(nsColor: arrow.color.nsColor)
+        }
+
+        for arrow in document.numberedArrows {
+            let id = UUID()
+            numberedArrows.append((
+                start: CGPoint(x: arrow.start.x, y: arrow.start.y),
+                end: CGPoint(x: arrow.end.x, y: arrow.end.y),
+                number: arrow.number,
+                id: id
+            ))
+            maxNumberedArrow = max(maxNumberedArrow, arrow.number)
+            arrowLineWidths[id] = arrow.lineWidth
+            elementColors[id] = Color(nsColor: arrow.color.nsColor)
+        }
+
+        for rect in document.rectangles {
+            let id = UUID()
+            rectangles.append((
+                rect: CGRect(x: rect.rect.x, y: rect.rect.y, width: rect.rect.width, height: rect.rect.height),
+                id: id
+            ))
+            elementColors[id] = Color(nsColor: rect.color.nsColor)
+        }
+
+        for pixelate in document.pixelates {
+            let id = UUID()
+            let rect = CGRect(
+                x: pixelate.rect.x,
+                y: pixelate.rect.y,
+                width: pixelate.rect.width,
+                height: pixelate.rect.height
+            )
+            if let pixelated = createPixelatedImage(in: rect) {
+                pixelatedRects.append((rect: rect, image: pixelated, id: id))
+            }
+        }
+
+        for smiley in document.smileys {
+            let id = UUID()
+            smileys.append((
+                emoji: smiley.emoji,
+                position: CGPoint(x: smiley.position.x, y: smiley.position.y),
+                size: smiley.size,
+                id: id
+            ))
+            elementColors[id] = Color(nsColor: smiley.color.nsColor)
+        }
+
+        numCount = max(maxNumberedArrow, maxNumberedText) + 1
+        suppressNextToolHelpUpdate = true
+        currentTool = .elementSelect
+        helpText = "Screenshot geladen. Elemente koennen weiter bearbeitet werden."
+    }
+
+    private func autoSaveCurrentCaptureIfNeeded() {
+        let selectedArea = selectionRect ?? CGRect(origin: .zero, size: workingImage.size)
+        let drawings = collectDrawings()
+
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "yy_MM_dd_HH_mm_ss"
+        let timestamp = dateFormatter.string(from: Date())
+        let baseName = loadedBaseName ?? "screenshot_\(timestamp)"
+        persistCurrentCapture(baseName: baseName, selectedArea: selectedArea, drawings: drawings)
+        loadedBaseName = baseName
+    }
+
+    private func navigateScreenshotHistory(step: Int) {
+        if screenshotHistory.isEmpty {
+            loadScreenshotHistory()
+        }
+        guard !screenshotHistory.isEmpty else { return }
+
+        let currentIndex: Int
+        if let loadedBaseName,
+           let index = screenshotHistory.firstIndex(where: { $0.baseName == loadedBaseName }) {
+            currentIndex = index
+        } else {
+            currentIndex = 0
+        }
+
+        let targetIndex = max(0, min(screenshotHistory.count - 1, currentIndex + step))
+        guard targetIndex != currentIndex || loadedBaseName == nil else { return }
+
+        loadScreenshot(screenshotHistory[targetIndex])
+    }
+
+    private func persistCurrentCapture(baseName: String, selectedArea: CGRect, drawings: [Drawing]) {
+        do {
+            let screenCaptureURL = try screenCaptureDirectoryURL()
+            let dataDirectory = try screenCaptureDataDirectoryURL()
+            let editedURL = screenCaptureURL.appendingPathComponent("\(baseName).png")
+            let originalURL = dataDirectory.appendingPathComponent("\(baseName)_orig.png")
+            let capURL = dataDirectory.appendingPathComponent("\(baseName)_cap.json")
+
+            if let edited = renderEditedImage(baseImage: workingImage, selectedArea: selectedArea, drawings: drawings),
+               let editedData = pngData(from: edited) {
+                try editedData.write(to: editedURL, options: .atomic)
+            }
+
+            if let originalData = pngData(from: workingImage) {
+                try originalData.write(to: originalURL, options: .atomic)
+            }
+
+            let document = makeCaptureDocument(from: drawings, selectedArea: selectedArea)
+            let capData = try JSONEncoder().encode(document)
+            try capData.write(to: capURL, options: .atomic)
+        } catch {
+            print("Auto-save failed: \(error)")
+        }
+    }
+
+    private func screenCaptureDirectoryURL() throws -> URL {
+        guard let picturesURL = FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask).first else {
+            throw NSError(domain: "ScreenCapture", code: 1, userInfo: [NSLocalizedDescriptionKey: "Pictures directory not found"])
+        }
+        let screenCaptureURL = picturesURL.appendingPathComponent("ScreenCapture", isDirectory: true)
+        try FileManager.default.createDirectory(at: screenCaptureURL, withIntermediateDirectories: true)
+        return screenCaptureURL
+    }
+
+    private func screenCaptureDataDirectoryURL() throws -> URL {
+        let screenCaptureURL = try screenCaptureDirectoryURL()
+        let dataURL = screenCaptureURL.appendingPathComponent("_data", isDirectory: true)
+        try FileManager.default.createDirectory(at: dataURL, withIntermediateDirectories: true)
+        return dataURL
+    }
+
+    private func centerCaptureWindow(for imageSize: CGSize) {
+        guard let window = NSApp.windows.first(where: { $0.contentView is NSHostingView<CaptureView> }) else {
+            return
+        }
+
+        let screenFrame = (window.screen ?? NSScreen.main)?.visibleFrame ?? NSScreen.main?.visibleFrame ?? .zero
+        let width = imageSize.width
+        let height = imageSize.height
+        let origin = CGPoint(
+            x: screenFrame.midX - width / 2,
+            y: screenFrame.midY - height / 2
+        )
+        let targetFrame = CGRect(origin: origin, size: CGSize(width: width, height: height))
+        window.setFrame(targetFrame, display: true, animate: true)
+        window.makeKeyAndOrderFront(nil)
+    }
     
     // Smiley picker view
     @ViewBuilder
@@ -2655,13 +4106,18 @@ struct CaptureView: View {
                          "⭐", "🚀", "🎉", "🎯", "💯", "🤦‍♂️", "🤷‍♀️", "👏", "🙏", "💪"], id: \.self) { emoji in
                     Button(action: {
                         print("Adding emoji: \(emoji) at position: \(smileyPickerPosition)")
+                        let newSmileyId = UUID()
                         // Add the selected emoji at the position
                         smileys.append((
                             emoji: emoji,
                             position: smileyPickerPosition,
                             size: selectedSmileySize,
-                            id: UUID()
+                            id: newSmileyId
                         ))
+                        elementColors[newSmileyId] = selectedDrawingColor
+                        currentTool = .elementSelect
+                        selectedElementId = newSmileyId
+                        updateHelpText(for: .elementSelect)
                         // Explicitly set to false and print for debugging
                         showSmileyPicker = false
                         print("Set showSmileyPicker to false")
@@ -2682,18 +4138,11 @@ struct CaptureView: View {
             }
             .padding(.horizontal, 10)
             
-            // Size slider
-            HStack {
-                Text("Size:")
-                    .font(.system(size: 12))
-                Slider(value: $selectedSmileySize, in: 20...80, step: 5)
-                    .frame(width: 120)
-                Text("\(Int(selectedSmileySize))")
-                    .font(.system(size: 12))
-                    .frame(width: 30, alignment: .trailing)
-            }
-            .padding(.horizontal, 10)
-            .padding(.bottom, 10)
+            Text("Groesse mit +/- am ausgewaehlten Smiley anpassen")
+                .font(.system(size: 12))
+                .foregroundColor(.secondary)
+                .padding(.horizontal, 10)
+                .padding(.bottom, 10)
             
             // Close button
             Button("Cancel") {
@@ -2785,6 +4234,121 @@ struct CaptureView: View {
     private func updateTextFontSize(for textId: UUID, delta: CGFloat) {
         let current = textFontSizes[textId] ?? 20
         textFontSizes[textId] = min(max(current + delta, minTextFontSize), maxTextFontSize)
+    }
+
+    private func boundingRectForLine(start: CGPoint, end: CGPoint, padding: CGFloat = 0) -> CGRect {
+        let minX = min(start.x, end.x) - padding
+        let minY = min(start.y, end.y) - padding
+        let width = abs(end.x - start.x) + padding * 2
+        let height = abs(end.y - start.y) + padding * 2
+        return CGRect(x: minX, y: minY, width: width, height: height)
+    }
+
+    private func adjustmentControlPositionForArrow(start: CGPoint, end: CGPoint) -> CGPoint {
+        let minX = min(start.x, end.x)
+        let minY = min(start.y, end.y)
+        return CGPoint(x: minX + 22, y: minY - 18)
+    }
+
+    private func isPointInTextFontControl(point: CGPoint) -> Bool {
+        let controlSize = CGSize(width: 56, height: 24)
+        let halfWidth = controlSize.width / 2
+        let halfHeight = controlSize.height / 2
+
+        if let selectedId = selectedElementId,
+           let text = texts.first(where: { $0.id == selectedId }) {
+            let fontSize = textFontSizes[text.id] ?? 20
+            let textSize = textBlockSize(for: text.text, fontSize: fontSize)
+            let center = CGPoint(
+                x: text.position.x + 22,
+                y: text.position.y - textSize.height / 2 - 18
+            )
+            let frame = CGRect(
+                x: center.x - halfWidth,
+                y: center.y - halfHeight,
+                width: controlSize.width,
+                height: controlSize.height
+            )
+            if frame.contains(point) {
+                return true
+            }
+        }
+
+        if let selectedId = selectedElementId,
+           let smiley = smileys.first(where: { $0.id == selectedId }) {
+            let center = CGPoint(
+                x: smiley.position.x - smiley.size / 2 + 22,
+                y: smiley.position.y - smiley.size / 2 - 18
+            )
+            let frame = CGRect(
+                x: center.x - halfWidth,
+                y: center.y - halfHeight,
+                width: controlSize.width,
+                height: controlSize.height
+            )
+            if frame.contains(point) {
+                return true
+            }
+        }
+
+        if let selectedId = selectedElementId,
+           let arrow = arrows.first(where: { $0.id == selectedId }) {
+            let center = adjustmentControlPositionForArrow(start: arrow.start, end: arrow.end)
+            let frame = CGRect(
+                x: center.x - halfWidth,
+                y: center.y - halfHeight,
+                width: controlSize.width,
+                height: controlSize.height
+            )
+            if frame.contains(point) {
+                return true
+            }
+        }
+
+        if let selectedId = selectedElementId,
+           let numberedArrow = numberedArrows.first(where: { $0.id == selectedId }) {
+            let center = adjustmentControlPositionForArrow(start: numberedArrow.start, end: numberedArrow.end)
+            let frame = CGRect(
+                x: center.x - halfWidth,
+                y: center.y - halfHeight,
+                width: controlSize.width,
+                height: controlSize.height
+            )
+            if frame.contains(point) {
+                return true
+            }
+        }
+
+        if isEditingText, let position = textPosition {
+            let editorSize = textEditorSize()
+            let adjustedEditorPosition = adjustTextEditorPosition(
+                position: position,
+                width: editorSize.width,
+                height: editorSize.height
+            )
+            let center = CGPoint(
+                x: adjustedEditorPosition.x - editorSize.width / 2 + 22,
+                y: adjustedEditorPosition.y - editorSize.height / 2 - 18
+            )
+            let frame = CGRect(
+                x: center.x - halfWidth,
+                y: center.y - halfHeight,
+                width: controlSize.width,
+                height: controlSize.height
+            )
+            if frame.contains(point) {
+                return true
+            }
+        }
+
+        return false
+    }
+
+    private func fittedImageRect(in _: CGSize) -> CGRect {
+        guard workingImage.size.width > 0, workingImage.size.height > 0 else {
+            return CGRect(origin: .zero, size: workingImage.size)
+        }
+        return CGRect(origin: .zero, size: workingImage.size)
     }
 
     private func adjustTextEditorPosition(position: CGPoint, width: CGFloat, height: CGFloat) -> CGPoint {
