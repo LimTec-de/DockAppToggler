@@ -737,13 +737,13 @@ class WindowChooserView: NSView {
     @objc private func buttonClicked(_ sender: NSButton) {
         Logger.debug("Button clicked - tag: \(sender.tag)")
         
-        // Hide thumbnail immediately and force close
         thumbnailView?.hideThumbnail(removePanel: true)
         
         let windowInfo = options[sender.tag]
         Logger.debug("Selected window info - Name: \(windowInfo.name), ID: \(windowInfo.cgWindowID ?? 0)")
         
-        // In history mode, we need special handling
+        let windowController = self.window?.windowController as? WindowChooserController
+        
         if isHistoryMode {
             if let cgWindowID = windowInfo.cgWindowID,
                let windowList = CGWindowListCopyWindowInfo([.optionIncludingWindow], cgWindowID) as? [[CFString: Any]],
@@ -751,159 +751,44 @@ class WindowChooserView: NSView {
                let ownerPID = cgWindowInfo[kCGWindowOwnerPID] as? pid_t,
                let app = NSRunningApplication(processIdentifier: ownerPID) {
                 
-                // Get fresh window list for the app
                 let windows = AccessibilityService.shared.listApplicationWindows(for: app)
-
-                topmostWindow = windows[0].window
+                if !windows.isEmpty { topmostWindow = windows[0].window }
                 
-                // Try to find matching window by ID or name
                 if let matchingWindow = windows.first(where: { $0.cgWindowID == cgWindowID }) ?? 
                                       windows.first(where: { $0.name == windowInfo.name }) {
                     AccessibilityService.shared.focusWindow(matchingWindow.window, for: app)
                 } else {
-                    // Fallback: attempt to raise the originally selected AX window directly
                     AccessibilityService.shared.focusWindow(windowInfo.window, for: app)
                 }
                 
-                // Close the history window chooser
-                if let windowController = self.window?.windowController as? WindowChooserController {
-                    windowController.close()
-                }
+                windowController?.close()
                 return
             }
         }
         
         var pid: pid_t = 0
         if windowInfo.cgWindowID != nil && AXUIElementGetPid(windowInfo.window, &pid) != .success {
-            // For pure CGWindow entries we still use callback fallback handling
-            callback?(windowInfo.window, false)  // This will trigger the window raise through CGWindow
-            
-            // Update topmost window and refresh menu
-            topmostWindow = windowInfo.window
-            updateButtonStates()
-            
-            // Close window chooser after selection in history mode
-            if isHistoryMode {
-                if let windowController = self.window?.windowController as? WindowChooserController {
-                    windowController.close()
-                }
-                return
-            }
-            
-            // Refresh menu after a small delay to let window state update
-            /*DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-                if let windowController = self?.window?.windowController as? WindowChooserController {
-                    windowController.refreshMenu()
-                }
-            }
-            return*/
+            callback?(windowInfo.window, false)
+            windowController?.close()
+            return
         }
-        
-        // Check for double click
-        let currentTime = ProcessInfo.processInfo.systemUptime
-        let isDoubleClick = (currentTime - lastClickTime) < doubleClickInterval
-        lastClickTime = currentTime
-        
-        // Define handleDoubleClick closure
-        let handleDoubleClick = {
-            if isDoubleClick {
-                // Double click: minimize all other windows
-                for (index, otherWindow) in self.options.enumerated() {
-                    if index != sender.tag && !otherWindow.isAppElement {
-                        // Minimize other windows
-                        AXUIElementSetAttributeValue(otherWindow.window, kAXMinimizedAttribute as CFString, true as CFTypeRef)
-                    }
-                }
-            }
-        }
-
-        // Get window controller reference
-        let windowController = self.window?.windowController as? WindowChooserController
         
         if windowInfo.isAppElement {
             handleAppElementClick()
-        } else {
-            // Handle window click with new approach
-            Logger.debug("Window selection details:")
-            Logger.debug("  - Button tag: \(sender.tag)")
-            Logger.debug("  - Window name: \(windowInfo.name)")
-            Logger.debug("  - Window ID: \(windowInfo.cgWindowID ?? 0)")
-            
-            
-            
-            // Unminimize if needed and raise only the selected window
-            var minimizedValue: AnyObject?
-            let isMinimized = AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success &&
-                             (minimizedValue as? Bool == true)
-            
-            if isMinimized {
-                // Unminimize and raise
-                AccessibilityService.shared.focusWindow(windowInfo.window, for: targetApp)
-                
-                // Update minimize button state
-                if let hideButton = hideButtons.first(where: { $0.tag == sender.tag }) as? MinimizeButton {
-                    hideButton.updateMinimizedState(false)
-                }
-                
-                // Update topmost window
-                self.topmostWindow = windowInfo.window
-                self.updateButtonStates()
-                
-                // Close window chooser in history mode
-                if self.isHistoryMode {
-                    windowController?.close()
-                    return
-                }
-                
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                    handleDoubleClick()
-                    
-                    // Update menu after a short delay
-                    if let self = self {
-                        if let windowController = self.window?.windowController as? WindowChooserController {
-                            windowController.refreshMenu()
-                        }
-                    }
-                }
-            } else {
-                // Just raise the window
-                AccessibilityService.shared.focusWindow(windowInfo.window, for: targetApp)
-
-                Logger.debug("Updating topmost windowy")
-                // Update topmost window
-                //topmostWindow = windowInfo.window
-                
-                // Close window chooser in history mode
-                if isHistoryMode {
-                    windowController?.close()
-                    return
-                }
-                
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                    handleDoubleClick()
-                    
-                    
-                }
-
-            }
+            return
         }
-
-
-
-        // Update menu with new window states
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            guard let self = self else { return }
-
-            //self.topmostWindow = windowInfo.window
-
-            Logger.debug("Updating menu with new window states")
-
-            let updatedWindows = AccessibilityService.shared.listApplicationWindows(for: self.targetApp)
-            //windowController?.updateWindows(updatedWindows, for: self.targetApp, at: self.dockIconCenter)
-            
-            self.updateWindows(updatedWindows, forceNormalMode: true)  // Force normal mode
-            //self.refreshMenu()
+        
+        // Focus the selected window and close immediately
+        AccessibilityService.shared.focusWindow(windowInfo.window, for: targetApp)
+        
+        var minimizedValue: AnyObject?
+        let isMinimized = AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success &&
+                         (minimizedValue as? Bool == true)
+        if isMinimized {
+            AXUIElementSetAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
         }
+        
+        windowController?.close()
     }
     
     private func handleAppElementClick() {
@@ -2012,19 +1897,11 @@ class WindowChooserView: NSView {
         
         let windowInfo = options[selectedIndex]
         
-        // Hide thumbnail without destroying
         thumbnailView?.hideThumbnail(removePanel: true)
         
-        // Add window to history
-       //WindowHistory.shared.addWindow(windowInfo, for: targetApp)
-        
-        // Get the app for this window
         var pid: pid_t = 0
         if AXUIElementGetPid(windowInfo.window, &pid) == .success,
-           NSRunningApplication(processIdentifier: pid) != nil {
-            let selectedApp = NSRunningApplication(processIdentifier: pid)
-
-            // Unminimize if needed
+           let selectedApp = NSRunningApplication(processIdentifier: pid) {
             var minimizedValue: AnyObject?
             let isMinimized = AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success &&
                              (minimizedValue as? Bool == true)
@@ -2033,16 +1910,14 @@ class WindowChooserView: NSView {
                 AXUIElementSetAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
             }
             
-            // Ensure window gets focus and is frontmost
             AccessibilityService.shared.focusWindow(windowInfo.window, for: selectedApp)
         } else {
-            // Fallback for non-AX entries
             callback?(windowInfo.window, false)
         }
         
-        // Update topmost window and refresh menu
-        //topmostWindow = windowInfo.window
-        updateButtonStates()
+        if let windowController = self.window?.windowController as? WindowChooserController {
+            windowController.close()
+        }
     }
     
     private func updateSelection() {
