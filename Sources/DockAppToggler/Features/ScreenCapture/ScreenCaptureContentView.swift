@@ -888,6 +888,7 @@ struct CaptureView: View {
     @State private var hoveredHistoryItemId: String?
     @State private var hoveredHistoryPreviewImage: NSImage?
     @State private var loadedBaseName: String?
+    @State private var currentCaptureBaseName: String?
     @State private var suppressNextToolHelpUpdate = false
     
     // Drawing states
@@ -3406,9 +3407,11 @@ struct CaptureView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 4) {
                         // Current screenshot always at the top
-                        let isCurrent = (loadedBaseName == nil)
+                        let isCurrent = (loadedBaseName == nil || loadedBaseName == currentCaptureBaseName)
                         Button(action: {
-                            restoreCurrentCapture()
+                            if !isCurrent {
+                                restoreCurrentCapture()
+                            }
                         }) {
                             VStack(alignment: .leading, spacing: 1) {
                                 Text("Aktuell")
@@ -3437,14 +3440,20 @@ struct CaptureView: View {
                         .onHover { hovering in
                             if hovering {
                                 hoveredHistoryItemId = "__current__"
-                                hoveredHistoryPreviewImage = workingImage
+                                if let baseName = currentCaptureBaseName,
+                                   let item = screenshotHistory.first(where: { $0.baseName == baseName }),
+                                   let preview = previewImage(for: item) {
+                                    hoveredHistoryPreviewImage = preview
+                                } else {
+                                    hoveredHistoryPreviewImage = workingImage
+                                }
                             } else if hoveredHistoryItemId == "__current__" {
                                 hoveredHistoryItemId = nil
                                 hoveredHistoryPreviewImage = nil
                             }
                         }
 
-                        ForEach(screenshotHistory) { item in
+                        ForEach(screenshotHistory.filter { $0.baseName != currentCaptureBaseName }) { item in
                             let isLoaded = (loadedBaseName == item.baseName)
                             Button(action: {
                                 loadScreenshot(item)
@@ -3633,6 +3642,23 @@ struct CaptureView: View {
         guard loadedBaseName != nil else { return }
         autoSaveCurrentCaptureIfNeeded()
 
+        if let baseName = currentCaptureBaseName,
+           let item = screenshotHistory.first(where: { $0.baseName == baseName }) ??
+                      findHistoryItem(baseName: baseName) {
+            guard let loadedImage = NSImage(contentsOf: item.originalURL) else { return }
+            do {
+                let data = try Data(contentsOf: item.capURL)
+                let document = try JSONDecoder().decode(CaptureDocument.self, from: data)
+                centerCaptureWindow(for: loadedImage.size)
+                applyCaptureDocument(document, image: loadedImage)
+                loadedBaseName = baseName
+                showHistoryPanel = false
+                return
+            } catch {
+                print("Failed to restore current capture: \(error)")
+            }
+        }
+
         centerCaptureWindow(for: capturedImage.size)
         workingImage = capturedImage
         selectionRect = initialSelectionRect
@@ -3659,6 +3685,26 @@ struct CaptureView: View {
             ? "Screenshot-Editor bereit. Waehle ein Tool oder klicke Done."
             : "Select an area to capture"
         showHistoryPanel = false
+    }
+    
+    private func findHistoryItem(baseName: String) -> ScreenshotHistoryItem? {
+        do {
+            let dataDir = try screenCaptureDataDirectoryURL()
+            let screenDir = try screenCaptureDirectoryURL()
+            let capURL = dataDir.appendingPathComponent("\(baseName)_cap.json")
+            let originalURL = dataDir.appendingPathComponent("\(baseName)_orig.png")
+            let editedURL = screenDir.appendingPathComponent("\(baseName).png")
+            guard FileManager.default.fileExists(atPath: capURL.path),
+                  FileManager.default.fileExists(atPath: originalURL.path) else { return nil }
+            let attrs = try FileManager.default.attributesOfItem(atPath: capURL.path)
+            let modDate = attrs[.modificationDate] as? Date ?? Date()
+            return ScreenshotHistoryItem(
+                baseName: baseName, editedURL: editedURL,
+                originalURL: originalURL, capURL: capURL, modifiedAt: modDate
+            )
+        } catch {
+            return nil
+        }
     }
 
     private func loadScreenshot(_ item: ScreenshotHistoryItem) {
@@ -4018,13 +4064,15 @@ struct CaptureView: View {
         let timestamp = dateFormatter.string(from: Date())
         let baseName = loadedBaseName ?? "screenshot_\(timestamp)"
         persistCurrentCapture(baseName: baseName, selectedArea: selectedArea, drawings: drawings)
+        if currentCaptureBaseName == nil {
+            currentCaptureBaseName = baseName
+        }
         loadedBaseName = baseName
     }
 
     private func navigateScreenshotHistory(step: Int) {
-        if screenshotHistory.isEmpty {
-            loadScreenshotHistory()
-        }
+        autoSaveCurrentCaptureIfNeeded()
+        loadScreenshotHistory()
         guard !screenshotHistory.isEmpty else { return }
 
         let currentIndex: Int
@@ -4032,13 +4080,24 @@ struct CaptureView: View {
            let index = screenshotHistory.firstIndex(where: { $0.baseName == loadedBaseName }) {
             currentIndex = index
         } else {
-            currentIndex = 0
+            currentIndex = -1
         }
 
         let targetIndex = max(0, min(screenshotHistory.count - 1, currentIndex + step))
-        guard targetIndex != currentIndex || loadedBaseName == nil else { return }
+        guard targetIndex >= 0, targetIndex != currentIndex else { return }
 
-        loadScreenshot(screenshotHistory[targetIndex])
+        let item = screenshotHistory[targetIndex]
+        guard let loadedImage = NSImage(contentsOf: item.originalURL) else { return }
+        do {
+            let data = try Data(contentsOf: item.capURL)
+            let document = try JSONDecoder().decode(CaptureDocument.self, from: data)
+            centerCaptureWindow(for: loadedImage.size)
+            applyCaptureDocument(document, image: loadedImage)
+            loadedBaseName = item.baseName
+            showHistoryPanel = false
+        } catch {
+            print("Failed to load capture document: \(error)")
+        }
     }
 
     private func persistCurrentCapture(baseName: String, selectedArea: CGRect, drawings: [Drawing]) {
