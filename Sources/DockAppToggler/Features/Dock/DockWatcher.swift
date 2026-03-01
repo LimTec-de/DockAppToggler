@@ -977,32 +977,23 @@ class DockWatcher: NSObject, NSMenuDelegate {
                 
                 updateHistoryTracking(mouseLocation: mouseLocation)
 
-                let currentTime = ProcessInfo.processInfo.systemUptime
-                if currentTime - lastDockAccessTime > 2.0 {
-                    return
-                }
-
-                windowChooser?.chooserView?.thumbnailView?.hideThumbnail()
-                windowChooser?.chooserView?.thumbnailView?.cleanup()
-                windowChooser?.window?.orderOut(nil)
-                
-                cleanupTimer?.invalidate()
-                cleanupTimer = Timer.scheduledTimer(withTimeInterval: cleanupDelay, repeats: false) { [weak self] _ in
-                    Task { @MainActor [weak self] in
-                        guard let self = self, !self.isMouseOverDock else { return }
-                        Logger.debug("Performing cleanup of window chooser and thumbnail resources")
-                        
-                        self.windowChooser?.chooserView?.thumbnailView?.hideThumbnail()
-                        self.windowChooser?.chooserView?.thumbnailView?.cleanup()
-                        self.windowChooser?.close()
-                        self.windowChooser = nil
-                        await self.cleanupResources()
-                    }
-                }
+                dismissChooserAndThumbnail()
             } else {
                 updateHistoryTracking(mouseLocation: mouseLocation)
             }
         }
+    }
+    
+    @MainActor private func dismissChooserAndThumbnail() {
+        guard windowChooser != nil else { return }
+        
+        cleanupTimer?.invalidate()
+        cleanupTimer = nil
+        
+        windowChooser?.chooserView?.thumbnailView?.hideThumbnail(removePanel: true)
+        windowChooser?.chooserView?.thumbnailView?.cleanup()
+        windowChooser?.close()
+        windowChooser = nil
     }
     
     private func processDockIconClick(app: NSRunningApplication) -> Bool {
