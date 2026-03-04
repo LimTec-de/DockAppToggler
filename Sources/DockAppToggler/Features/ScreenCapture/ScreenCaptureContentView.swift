@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import Carbon
 import UniformTypeIdentifiers
+import Vision
 
 enum ScreenCaptureState {
     @MainActor static var isOverlayActive = false
@@ -455,10 +456,29 @@ struct ContentView: View {
                 if let clipboardRep = createHighResolutionBitmap(from: finalImage) {
                     let clipboardImage = NSImage(size: finalImage.size)
                     clipboardImage.addRepresentation(clipboardRep)
-                    
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.writeObjects([clipboardImage])
-                    print("Image with drawings copied to clipboard")
+
+                    let didCopyImageToPasteboard: Bool = {
+                        let pasteboard = NSPasteboard.general
+                        pasteboard.clearContents()
+
+                        if let pngData = clipboardRep.representation(using: .png, properties: [:]) {
+                            let item = NSPasteboardItem()
+                            item.setData(pngData, forType: .png)
+                            if let tiffData = clipboardImage.tiffRepresentation {
+                                item.setData(tiffData, forType: .tiff)
+                            }
+
+                            if pasteboard.writeObjects([item]) {
+                                return true
+                            }
+                        }
+
+                        return pasteboard.writeObjects([clipboardImage])
+                    }()
+
+                    print(didCopyImageToPasteboard
+                        ? "Image with drawings copied to clipboard"
+                        : "Failed to copy image to clipboard")
                 }
                 
                 do {
@@ -4445,11 +4465,95 @@ struct CaptureView: View {
         return CGPoint(x: adjustedX, y: adjustedY)
     }
 
+    private enum OCRFailure: LocalizedError {
+        case noSelection
+        case cropFailed
+        case noTextFound
+
+        var errorDescription: String? {
+            switch self {
+            case .noSelection:
+                return "Bitte zuerst einen Bereich auswaehlen."
+            case .cropFailed:
+                return "OCR-Bereich konnte nicht vorbereitet werden."
+            case .noTextFound:
+                return "Kein Text im ausgewaehlten Bereich gefunden."
+            }
+        }
+    }
+
+    private func recognizeText(in cgImage: CGImage) throws -> String {
+        var recognizedText = [String]()
+        let request = VNRecognizeTextRequest { request, error in
+            if let error {
+                print("OCR request failed: \(error.localizedDescription)")
+                return
+            }
+
+            let observations = request.results as? [VNRecognizedTextObservation] ?? []
+            recognizedText = observations.compactMap { observation in
+                observation.topCandidates(1).first?.string
+            }
+        }
+
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = true
+        request.minimumTextHeight = 0.015
+
+        let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+        try handler.perform([request])
+
+        return recognizedText
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+    }
+
     // Function to perform OCR on the selected area and copy text to clipboard
     private func performOCRAndCopyText() {
-        helpText = "OCR is currently unavailable in DockAppToggler build"
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-            self.updateHelpText(for: self.currentTool)
+        guard let selectedRect = selectionRect else {
+            helpText = OCRFailure.noSelection.errorDescription ?? "Kein Bereich ausgewaehlt."
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                self.updateHelpText(for: self.currentTool)
+            }
+            return
+        }
+
+        guard let croppedImage = workingImage.crop(to: selectedRect),
+              let cgImage = croppedImage.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            helpText = OCRFailure.cropFailed.errorDescription ?? "OCR fehlgeschlagen."
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                self.updateHelpText(for: self.currentTool)
+            }
+            return
+        }
+
+        helpText = "OCR laeuft..."
+
+        Task(priority: .userInitiated) {
+            do {
+                let extractedText = try recognizeText(in: cgImage)
+                guard !extractedText.isEmpty else {
+                    throw OCRFailure.noTextFound
+                }
+
+                await MainActor.run {
+                    let pasteboard = NSPasteboard.general
+                    pasteboard.clearContents()
+                    pasteboard.setString(extractedText, forType: .string)
+                    helpText = "Text in die Zwischenablage kopiert."
+                }
+            } catch {
+                await MainActor.run {
+                    helpText = (error as? LocalizedError)?.errorDescription ?? "OCR fehlgeschlagen."
+                }
+            }
+
+            await MainActor.run {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                    self.updateHelpText(for: self.currentTool)
+                }
+            }
         }
     }
 }
