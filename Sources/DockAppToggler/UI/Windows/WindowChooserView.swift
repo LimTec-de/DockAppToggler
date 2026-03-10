@@ -14,6 +14,7 @@ class WindowChooserView: NSView {
     private var buttons: [NSButton] = []
     private var hideButtons: [NSButton] = []
     private var closeButtons: [NSButton] = []
+    private var sideButtons: [NSButton] = []
     private var titleField: NSTextField!
     private let targetApp: NSRunningApplication
     private var lastMaximizeClickTime: TimeInterval = 0
@@ -247,9 +248,11 @@ class WindowChooserView: NSView {
         buttons.forEach { $0.removeFromSuperview() }
         hideButtons.forEach { $0.removeFromSuperview() }
         closeButtons.forEach { $0.removeFromSuperview() }
+        sideButtons.forEach { $0.removeFromSuperview() }
         buttons.removeAll()
         hideButtons.removeAll()
         closeButtons.removeAll()
+        sideButtons.removeAll()
         
         // Remove any existing app icons
         subviews.forEach { view in
@@ -302,6 +305,9 @@ class WindowChooserView: NSView {
                 addSubview(leftButton)
                 addSubview(centerButton)
                 addSubview(rightButton)
+                sideButtons.append(leftButton)
+                sideButtons.append(centerButton)
+                sideButtons.append(rightButton)
             }
         }
     }
@@ -674,24 +680,33 @@ class WindowChooserView: NSView {
                         isAppElement: windowInfo.isAppElement
                     )
                     
-                    // Create thumbnail view with the correct app and window info
-                    thumbnailView = WindowThumbnailView(
-                        targetApp: runningApp,
-                        dockIconCenter: dockIconCenter,
-                        options: [updatedWindowInfo],
-                        windowChooser: self.window?.windowController as? WindowChooserController
-                    )
+                    if thumbnailView == nil {
+                        thumbnailView = WindowThumbnailView(
+                            targetApp: runningApp,
+                            dockIconCenter: dockIconCenter,
+                            options: [updatedWindowInfo],
+                            windowChooser: self.window?.windowController as? WindowChooserController
+                        )
+                    } else {
+                        thumbnailView?.updateTargetApp(runningApp)
+                        thumbnailView?.updateOptions([updatedWindowInfo])
+                    }
                 } else {
                     // Fallback for AX windows
                     var pid: pid_t = 0
                     if AXUIElementGetPid(windowInfo.window, &pid) == .success,
                        let runningApp = NSRunningApplication(processIdentifier: pid) {
-                        thumbnailView = WindowThumbnailView(
-                            targetApp: runningApp,
-                            dockIconCenter: dockIconCenter,
-                            options: [windowInfo], // Use original windowInfo since it's already correct type
-                            windowChooser: self.window?.windowController as? WindowChooserController
-                        )
+                        if thumbnailView == nil {
+                            thumbnailView = WindowThumbnailView(
+                                targetApp: runningApp,
+                                dockIconCenter: dockIconCenter,
+                                options: [windowInfo], // Use original windowInfo since it's already correct type
+                                windowChooser: self.window?.windowController as? WindowChooserController
+                            )
+                        } else {
+                            thumbnailView?.updateTargetApp(runningApp)
+                            thumbnailView?.updateOptions([windowInfo])
+                        }
                     }
                 }
             }
@@ -756,12 +771,24 @@ class WindowChooserView: NSView {
                 
                 if let matchingWindow = windows.first(where: { $0.cgWindowID == cgWindowID }) ?? 
                                       windows.first(where: { $0.name == windowInfo.name }) {
-                    AccessibilityService.shared.focusWindow(matchingWindow.window, for: app)
+                    activateWindowSelection(
+                        WindowInfo(
+                            window: matchingWindow.window,
+                            name: matchingWindow.name,
+                            cgWindowID: matchingWindow.cgWindowID,
+                            isCGWindowOnly: matchingWindow.isCGWindowOnly ?? false,
+                            isAppElement: matchingWindow.isAppElement,
+                            bundleIdentifier: matchingWindow.bundleIdentifier,
+                            position: matchingWindow.position,
+                            size: matchingWindow.size,
+                            bounds: matchingWindow.bounds
+                        ),
+                        for: app,
+                        closing: windowController
+                    )
                 } else {
-                    AccessibilityService.shared.focusWindow(windowInfo.window, for: app)
+                    activateWindowSelection(windowInfo, for: app, closing: windowController)
                 }
-                
-                windowController?.close()
                 return
             }
         }
@@ -778,17 +805,25 @@ class WindowChooserView: NSView {
             return
         }
         
-        // Focus the selected window and close immediately
-        AccessibilityService.shared.focusWindow(windowInfo.window, for: targetApp)
-        
+        activateWindowSelection(windowInfo, for: targetApp, closing: windowController)
+    }
+
+    private func activateWindowSelection(_ windowInfo: WindowInfo, for app: NSRunningApplication, closing windowController: WindowChooserController?) {
         var minimizedValue: AnyObject?
         let isMinimized = AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success &&
                          (minimizedValue as? Bool == true)
+
         if isMinimized {
             AXUIElementSetAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
         }
-        
-        windowController?.close()
+
+        app.unhide()
+        AccessibilityService.shared.raiseWindow(windowInfo: windowInfo, for: app)
+
+        // Let the target app finish becoming active before tearing down the chooser.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+            windowController?.close()
+        }
     }
     
     private func handleAppElementClick() {
@@ -1745,8 +1780,9 @@ class WindowChooserView: NSView {
     }*/
 
     func cleanup() {
-        // Cleanup thumbnail view without destroying it
-        //thumbnailView?.hideThumbnail()
+        thumbnailView?.hideThumbnail(removePanel: true)
+        thumbnailView?.cleanup()
+        thumbnailView = nil
         
         // Remove tracking areas and clear event monitors
         buttons.forEach { button in
@@ -1760,6 +1796,11 @@ class WindowChooserView: NSView {
             button.action = nil
         }
         closeButtons.forEach { button in
+            button.trackingAreas.forEach { button.removeTrackingArea($0) }
+            button.target = nil
+            button.action = nil
+        }
+        sideButtons.forEach { button in
             button.trackingAreas.forEach { button.removeTrackingArea($0) }
             button.target = nil
             button.action = nil
@@ -1778,6 +1819,10 @@ class WindowChooserView: NSView {
             button.layer?.removeFromSuperlayer()
             button.removeFromSuperview()
         }
+        sideButtons.forEach { button in
+            button.layer?.removeFromSuperlayer()
+            button.removeFromSuperview()
+        }
         
         // Clear title field
         titleField?.stringValue = ""
@@ -1788,6 +1833,7 @@ class WindowChooserView: NSView {
         buttons.removeAll(keepingCapacity: false)
         hideButtons.removeAll(keepingCapacity: false)
         closeButtons.removeAll(keepingCapacity: false)
+        sideButtons.removeAll(keepingCapacity: false)
         options.removeAll(keepingCapacity: false)
         
         // Clear other references
@@ -1902,21 +1948,13 @@ class WindowChooserView: NSView {
         var pid: pid_t = 0
         if AXUIElementGetPid(windowInfo.window, &pid) == .success,
            let selectedApp = NSRunningApplication(processIdentifier: pid) {
-            var minimizedValue: AnyObject?
-            let isMinimized = AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success &&
-                             (minimizedValue as? Bool == true)
-            
-            if isMinimized {
-                AXUIElementSetAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
-            }
-            
-            AccessibilityService.shared.focusWindow(windowInfo.window, for: selectedApp)
+            let windowController = self.window?.windowController as? WindowChooserController
+            activateWindowSelection(windowInfo, for: selectedApp, closing: windowController)
         } else {
             callback?(windowInfo.window, false)
-        }
-        
-        if let windowController = self.window?.windowController as? WindowChooserController {
-            windowController.close()
+            if let windowController = self.window?.windowController as? WindowChooserController {
+                windowController.close()
+            }
         }
     }
     
