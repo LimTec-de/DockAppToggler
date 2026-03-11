@@ -645,6 +645,12 @@ class DockWatcher: NSObject, NSMenuDelegate {
                     autoreleasepool {
                         switch type {
                         case .leftMouseDown, .rightMouseDown:
+                            if watcher.isMouseOverOpenChooser() {
+                                watcher.clickedApp = nil
+                                watcher.skipNextClickProcessing = false
+                                return
+                            }
+
                             if let (app, _, _) = DockService.shared.findAppUnderCursor(at: location) {
                                 let isTouchpadClick = event.flags.contains(.maskSecondaryFn) || 
                                                     event.flags.contains(.maskControl) ||
@@ -683,6 +689,12 @@ class DockWatcher: NSObject, NSMenuDelegate {
                                 }
                             }
                         case .leftMouseUp:
+                            if watcher.isMouseOverOpenChooser() {
+                                watcher.clickedApp = nil
+                                watcher.showingWindowChooserOnClick = false
+                                return
+                            }
+
                             if let app = watcher.clickedApp {
                                 if watcher.processDockIconClick(app: app) {
                                     if !watcher.showingWindowChooserOnClick {
@@ -1245,6 +1257,17 @@ class DockWatcher: NSObject, NSMenuDelegate {
             }
             return true
         }
+    }
+
+    @MainActor private func isMouseOverOpenChooser() -> Bool {
+        guard let chooserFrame = windowChooser?.window?.frame else {
+            return false
+        }
+
+        return chooserFrame.insetBy(
+            dx: -Constants.UI.menuDismissalMargin,
+            dy: -Constants.UI.menuDismissalMargin
+        ).contains(NSEvent.mouseLocation)
     }
     
     private func setupDockMenuTracking() {

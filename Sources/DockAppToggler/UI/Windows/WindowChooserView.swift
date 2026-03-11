@@ -771,24 +771,12 @@ class WindowChooserView: NSView {
                 
                 if let matchingWindow = windows.first(where: { $0.cgWindowID == cgWindowID }) ?? 
                                       windows.first(where: { $0.name == windowInfo.name }) {
-                    activateWindowSelection(
-                        WindowInfo(
-                            window: matchingWindow.window,
-                            name: matchingWindow.name,
-                            cgWindowID: matchingWindow.cgWindowID,
-                            isCGWindowOnly: matchingWindow.isCGWindowOnly ?? false,
-                            isAppElement: matchingWindow.isAppElement,
-                            bundleIdentifier: matchingWindow.bundleIdentifier,
-                            position: matchingWindow.position,
-                            size: matchingWindow.size,
-                            bounds: matchingWindow.bounds
-                        ),
-                        for: app,
-                        closing: windowController
-                    )
+                    AccessibilityService.shared.focusWindow(matchingWindow.window, for: app)
                 } else {
-                    activateWindowSelection(windowInfo, for: app, closing: windowController)
+                    AccessibilityService.shared.focusWindow(windowInfo.window, for: app)
                 }
+                
+                windowController?.close()
                 return
             }
         }
@@ -805,25 +793,17 @@ class WindowChooserView: NSView {
             return
         }
         
-        activateWindowSelection(windowInfo, for: targetApp, closing: windowController)
-    }
-
-    private func activateWindowSelection(_ windowInfo: WindowInfo, for app: NSRunningApplication, closing windowController: WindowChooserController?) {
+        // Focus the selected window and close immediately
+        AccessibilityService.shared.focusWindow(windowInfo.window, for: targetApp)
+        
         var minimizedValue: AnyObject?
         let isMinimized = AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success &&
                          (minimizedValue as? Bool == true)
-
         if isMinimized {
             AXUIElementSetAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
         }
-
-        app.unhide()
-        AccessibilityService.shared.raiseWindow(windowInfo: windowInfo, for: app)
-
-        // Let the target app finish becoming active before tearing down the chooser.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
-            windowController?.close()
-        }
+        
+        windowController?.close()
     }
     
     private func handleAppElementClick() {
@@ -1948,13 +1928,21 @@ class WindowChooserView: NSView {
         var pid: pid_t = 0
         if AXUIElementGetPid(windowInfo.window, &pid) == .success,
            let selectedApp = NSRunningApplication(processIdentifier: pid) {
-            let windowController = self.window?.windowController as? WindowChooserController
-            activateWindowSelection(windowInfo, for: selectedApp, closing: windowController)
+            var minimizedValue: AnyObject?
+            let isMinimized = AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success &&
+                             (minimizedValue as? Bool == true)
+            
+            if isMinimized {
+                AXUIElementSetAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
+            }
+            
+            AccessibilityService.shared.focusWindow(windowInfo.window, for: selectedApp)
         } else {
             callback?(windowInfo.window, false)
-            if let windowController = self.window?.windowController as? WindowChooserController {
-                windowController.close()
-            }
+        }
+        
+        if let windowController = self.window?.windowController as? WindowChooserController {
+            windowController.close()
         }
     }
     
