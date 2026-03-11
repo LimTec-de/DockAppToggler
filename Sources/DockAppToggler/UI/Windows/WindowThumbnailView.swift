@@ -93,17 +93,18 @@ class WindowThumbnailView {
     @MainActor private static var thumbnailDebounceTimer: DispatchSourceTimer?
     @MainActor private static var pendingThumbnailRequest: PendingThumbnailRequest?
     @MainActor private static var lastThumbnailRequestTime: Date = Date.distantPast
-    private static let fastMovementThreshold: TimeInterval = 0.1 // If requests come faster than 100ms, we're moving fast
-    private static let stableHoverDelay: TimeInterval = 0.06
+    private static let fastMovementThreshold: TimeInterval = 0.18
+    private static let stableHoverDelay: TimeInterval = 0.18
+    private static let fastHoverDelay: TimeInterval = 0.24
 
     @MainActor private static var activeWindowSnapshot: [[String: Any]] = []
     @MainActor private static var lastWindowSnapshotTime: Date = .distantPast
-    private static let windowSnapshotTTL: TimeInterval = 0.2
+    private static let windowSnapshotTTL: TimeInterval = 0.35
     @MainActor private static var lastWindowSharingCheckTime: Date = .distantPast
     @MainActor private static var lastWindowSharingDetected = false
     private static let windowSharingCheckInterval: TimeInterval = 1.5
-    private static let smoothMoveDuration: TimeInterval = 0.12
-    private static let minMoveDelta: CGFloat = 2.0
+    private static let smoothMoveDuration: TimeInterval = 0.08
+    private static let minMoveDelta: CGFloat = 10.0
     
     // Add struct for pending requests
     private struct PendingThumbnailRequest {
@@ -232,7 +233,7 @@ class WindowThumbnailView {
     
     // Add at top of class
     private static var lastThumbnailCreationTime: [CGWindowID: Date] = [:]
-    private static let minimumThumbnailInterval: TimeInterval = 0.5  // Half second minimum between captures
+    private static let minimumThumbnailInterval: TimeInterval = 1.2
     
     // Add near top of class
     private static let maxCacheSize = 50  // Maximum number of cached thumbnails
@@ -998,8 +999,8 @@ class WindowThumbnailView {
                 timestamp: now
             )
 
-            // Avoid flashing icons between previews if a preview is already visible.
-            if shouldShowLoadingIconImmediately(), let appIcon = targetApp.icon {
+            // Avoid flashing icons while moving quickly across Dock items.
+            if !isMovingFast, shouldShowLoadingIconImmediately(), let appIcon = targetApp.icon {
                 displayThumbnailInSharedWindow(appIcon, for: windowInfo, isLoading: true)
             }
 
@@ -1009,7 +1010,7 @@ class WindowThumbnailView {
             }
 
             // Delay expensive capture until hover is stable.
-            let delay = isMovingFast ? 0.03 : Self.stableHoverDelay
+            let delay = isMovingFast ? Self.fastHoverDelay : Self.stableHoverDelay
             let timer = DispatchSource.makeTimerSource(queue: .main)
             timer.schedule(deadline: .now() + delay)
 
@@ -1209,7 +1210,7 @@ class WindowThumbnailView {
         
         // Create a dispatch timer that runs on main queue
         let timer = DispatchSource.makeTimerSource(queue: .main)
-        timer.schedule(deadline: .now() + 0.16, repeating: 0.16)
+        timer.schedule(deadline: .now() + 0.24, repeating: 0.24)
         
         timer.setEventHandler { [weak self] in
             guard let self = self else {
@@ -1229,6 +1230,26 @@ class WindowThumbnailView {
                 return
             }
 
+            // Check the cheap hover regions before doing an expensive Dock AX hit-test.
+            var isOverMenu = false
+            if let chooserWindow = self.windowChooser?.window {
+                isOverMenu = NSPointInRect(mouseLocation, chooserWindow.frame)
+            }
+
+            var isOverThumbnail = false
+            if let thumbnailWindow = self._thumbnailWindow {
+                isOverThumbnail = NSPointInRect(mouseLocation, thumbnailWindow.frame)
+            }
+
+            if let sharedWindow = Self.sharedThumbnailWindow {
+                isOverThumbnail = isOverThumbnail || NSPointInRect(mouseLocation, sharedWindow.frame)
+            }
+
+            if isOverMenu || isOverThumbnail {
+                Self.lastInteractiveHoverTime = Date()
+                return
+            }
+
             // Convert from global bottom-left coordinates to the coordinate space expected by Dock hit testing.
             let flippedY = screen.frame.maxY - mouseLocation.y
             let dockMouseLocation = CGPoint(x: mouseLocation.x, y: flippedY)
@@ -1237,26 +1258,6 @@ class WindowThumbnailView {
             let dockResult = DockService.shared.findAppUnderCursor(at: dockMouseLocation)
             let isOverAnyDockIcon = dockResult != nil
             let isInDockTransitionArea = self.isMouseInDockTransitionArea(mouseLocation, on: screen)
-            
-            // Improved menu detection
-            var isOverMenu = false
-            if let chooserWindow = self.windowChooser?.window {
-                let windowFrame = chooserWindow.frame
-                isOverMenu = NSPointInRect(mouseLocation, windowFrame)
-            }
-            
-            // Check if mouse is over the thumbnail itself
-            var isOverThumbnail = false
-            if let thumbnailWindow = self._thumbnailWindow {
-                let thumbnailFrame = thumbnailWindow.frame
-                isOverThumbnail = NSPointInRect(mouseLocation, thumbnailFrame)
-            }
-            
-            // Also check shared thumbnail window
-            if let sharedWindow = Self.sharedThumbnailWindow {
-                let sharedFrame = sharedWindow.frame
-                isOverThumbnail = isOverThumbnail || NSPointInRect(mouseLocation, sharedFrame)
-            }
 
             if isOverAnyDockIcon || isInDockTransitionArea || isOverMenu || isOverThumbnail {
                 Self.lastInteractiveHoverTime = Date()

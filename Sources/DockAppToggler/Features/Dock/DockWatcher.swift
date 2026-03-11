@@ -75,6 +75,9 @@ class DockWatcher: NSObject, NSMenuDelegate {
     private var clickedApp: NSRunningApplication?
     private let dismissalMargin: CGFloat = 20.0
     private var lastMouseMoveTime: TimeInterval = 0
+    private var lastDockHitTestTime: TimeInterval = 0
+    private var lastDockHitTestPoint: CGPoint = .zero
+    private var lastDockHitTestResult: (app: NSRunningApplication, url: URL, iconCenter: CGPoint)?
     private var contextMenuMonitor: Any?
     private var dockMenu: NSMenu?
     private var lastClickedDockIcon: NSRunningApplication?
@@ -82,6 +85,9 @@ class DockWatcher: NSObject, NSMenuDelegate {
     private var showingWindowChooserOnClick: Bool = false
     private var skipNextClickProcessing: Bool = false
     private let eventTimeoutInterval: TimeInterval = 15.0
+    private let mouseMoveThrottleInterval: TimeInterval = 0.08
+    private let dockHitTestCacheInterval: TimeInterval = 0.08
+    private let dockHitTestMinimumMovement: CGFloat = 6.0
     private let heartbeatMissesBeforeReinit: Int = 3
     private let minReinitInterval: TimeInterval = 60.0
     private var consecutiveEventTapMisses: Int = 0
@@ -871,18 +877,30 @@ class DockWatcher: NSObject, NSMenuDelegate {
     }
     
     @MainActor private func processMouseMovement(at point: CGPoint) {
-        // Throttle updates (60fps)
+        // Throttle updates to reduce continuous accessibility hit-testing.
         let currentTime = ProcessInfo.processInfo.systemUptime
-        if currentTime - lastMouseMoveTime < 0.05 {
+        if currentTime - lastMouseMoveTime < mouseMoveThrottleInterval {
             return
         }
         lastMouseMoveTime = currentTime
         lastMenuInteractionTime = currentTime
 
+        let mouseLocation = NSEvent.mouseLocation
+        let chooserFrame: NSRect? = windowChooser?.window?.frame
+        let isOverChooserArea = chooserFrame.map { frame in
+            frame.insetBy(dx: -Constants.UI.menuDismissalMargin,
+                          dy: -Constants.UI.menuDismissalMargin).contains(mouseLocation)
+        } ?? false
+
+        // Avoid expensive Dock hit-tests while the pointer is moving inside the chooser.
+        if isOverChooserArea {
+            updateHistoryTracking(mouseLocation: mouseLocation)
+            return
+        }
+
         // Early exit if menu is blocked
         if menuBlocked {
-            // Cache dock check result
-            let dockResult = DockService.shared.findAppUnderCursor(at: point)
+            let dockResult = cachedDockHitTest(at: point, now: currentTime)
             if let (app, _, _) = dockResult {
                 if app == lastClickedIconApp { return }
                 menuBlocked = false
@@ -893,17 +911,8 @@ class DockWatcher: NSObject, NSMenuDelegate {
             }
         }
 
-        // Cache mouse location and dock check once
-        let mouseLocation = NSEvent.mouseLocation
-        let dockCheckResult = DockService.shared.findAppUnderCursor(at: point)
+        let dockCheckResult = cachedDockHitTest(at: point, now: currentTime)
         let isOverDock = dockCheckResult != nil
-
-        // Optimize chooser area check with cached frame
-        let chooserFrame: NSRect? = windowChooser?.window?.frame
-        let isOverChooserArea = chooserFrame.map { frame in
-            frame.insetBy(dx: -Constants.UI.menuDismissalMargin, 
-                         dy: -Constants.UI.menuDismissalMargin).contains(mouseLocation)
-        } ?? false
         
         if isOverDock {
             guard let (app, _, iconCenter) = dockCheckResult else { return }
@@ -1268,6 +1277,26 @@ class DockWatcher: NSObject, NSMenuDelegate {
             dx: -Constants.UI.menuDismissalMargin,
             dy: -Constants.UI.menuDismissalMargin
         ).contains(NSEvent.mouseLocation)
+    }
+
+    @MainActor private func cachedDockHitTest(
+        at point: CGPoint,
+        now: TimeInterval
+    ) -> (app: NSRunningApplication, url: URL, iconCenter: CGPoint)? {
+        let deltaX = point.x - lastDockHitTestPoint.x
+        let deltaY = point.y - lastDockHitTestPoint.y
+        let movement = hypot(deltaX, deltaY)
+
+        if now - lastDockHitTestTime < dockHitTestCacheInterval,
+           movement < dockHitTestMinimumMovement {
+            return lastDockHitTestResult
+        }
+
+        let result = DockService.shared.findAppUnderCursor(at: point)
+        lastDockHitTestTime = now
+        lastDockHitTestPoint = point
+        lastDockHitTestResult = result
+        return result
     }
     
     private func setupDockMenuTracking() {
