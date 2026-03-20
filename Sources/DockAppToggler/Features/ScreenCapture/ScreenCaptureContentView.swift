@@ -1666,20 +1666,26 @@ struct CaptureView: View {
                 .zIndex(100)
 
                 if showHistoryPanel {
-                    screenshotHistoryPanel
-                        .transition(.move(edge: .leading).combined(with: .opacity))
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-                        .padding(.leading, 10)
-                        .padding(.top, 12)
-                        .zIndex(101)
-                        .onHover { hovering in
-                            isHoveringHistoryPanel = hovering
-                            if !hovering {
-                                withAnimation(.easeInOut(duration: 0.15)) {
-                                    showHistoryPanel = false
+                    // Only the panel receives hover/hits; a full-screen frame here would keep
+                    // onHover true over the whole editor so the menu never collapsed.
+                    HStack(alignment: .top, spacing: 0) {
+                        screenshotHistoryPanel
+                            .transition(.move(edge: .leading).combined(with: .opacity))
+                            .onHover { hovering in
+                                isHoveringHistoryPanel = hovering
+                                if !hovering {
+                                    withAnimation(.easeInOut(duration: 0.15)) {
+                                        showHistoryPanel = false
+                                    }
                                 }
                             }
-                        }
+                        Spacer(minLength: 0)
+                            .allowsHitTesting(false)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .padding(.leading, 10)
+                    .padding(.top, 12)
+                    .zIndex(101)
                 }
             }
             .simultaneousGesture(
@@ -3105,12 +3111,38 @@ struct CaptureView: View {
 
         let halfW = toolbarWidth / 2
         let halfH = buttonsHeight / 2
+        
+        // Simple bounds: ensure toolbar stays within container, accounting for full width
         let minX = halfW + edgePadding
-        let maxX = max(minX, containerSize.width - halfW - edgePadding)
-        let adjustedX = min(max(rect.midX, minX), maxX)
-
+        let maxX = containerSize.width - halfW - edgePadding
+        
+        // Calculate X position ensuring entire toolbar is visible
+        let preferredX = rect.midX
+        let adjustedX: CGFloat
+        if maxX < minX {
+            // Toolbar is wider than container - center it
+            adjustedX = containerSize.width / 2
+        } else {
+            // Check if toolbar centered on selection would go outside bounds
+            let leftEdge = preferredX - halfW
+            let rightEdge = preferredX + halfW
+            
+            if leftEdge < minX {
+                // Toolbar would go off left edge - align left edge to minX
+                adjustedX = minX + halfW
+            } else if rightEdge > maxX {
+                // Toolbar would go off right edge - align right edge to maxX
+                adjustedX = maxX - halfW
+            } else {
+                // Toolbar fits centered on selection
+                adjustedX = preferredX
+            }
+        }
+        
+        // Y bounds
         let minY = halfH + edgePadding
-        let maxY = max(minY, containerSize.height - halfH - edgePadding)
+        let maxY = containerSize.height - halfH - edgePadding
+
         let preferredBelow = rect.maxY + margin + halfH
         let preferredAbove = rect.minY - margin - halfH
 
@@ -4482,31 +4514,40 @@ struct CaptureView: View {
         }
     }
 
-    private func recognizeText(in cgImage: CGImage) throws -> String {
-        var recognizedText = [String]()
-        let request = VNRecognizeTextRequest { request, error in
-            if let error {
-                print("OCR request failed: \(error.localizedDescription)")
-                return
+    /// Vision OCR (not Tesseract). Uses continuation so results are collected even if the request
+    /// completion runs after `perform` returns (observed on some macOS versions / thread configurations).
+    private func recognizeText(in cgImage: CGImage) async throws -> String {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
+            let request = VNRecognizeTextRequest { request, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                    return
+                }
+
+                let observations = request.results as? [VNRecognizedTextObservation] ?? []
+                let lines = observations.compactMap { observation in
+                    observation.topCandidates(1).first?.string
+                }
+                let result = lines
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+                    .joined(separator: "\n")
+                continuation.resume(returning: result)
             }
 
-            let observations = request.results as? [VNRecognizedTextObservation] ?? []
-            recognizedText = observations.compactMap { observation in
-                observation.topCandidates(1).first?.string
+            request.recognitionLevel = .accurate
+            request.usesLanguageCorrection = true
+            // Default 0: 0.015 was filtering small UI text relative to crop height.
+            request.minimumTextHeight = 0
+            request.recognitionLanguages = ["de-DE", "en-US"]
+
+            let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+            do {
+                try handler.perform([request])
+            } catch {
+                continuation.resume(throwing: error)
             }
         }
-
-        request.recognitionLevel = .accurate
-        request.usesLanguageCorrection = true
-        request.minimumTextHeight = 0.015
-
-        let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-        try handler.perform([request])
-
-        return recognizedText
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-            .joined(separator: "\n")
     }
 
     // Function to perform OCR on the selected area and copy text to clipboard
@@ -4532,7 +4573,7 @@ struct CaptureView: View {
 
         Task(priority: .userInitiated) {
             do {
-                let extractedText = try recognizeText(in: cgImage)
+                let extractedText = try await recognizeText(in: cgImage)
                 guard !extractedText.isEmpty else {
                     throw OCRFailure.noTextFound
                 }
@@ -4540,8 +4581,16 @@ struct CaptureView: View {
                 await MainActor.run {
                     let pasteboard = NSPasteboard.general
                     pasteboard.clearContents()
+                    pasteboard.declareTypes([.string], owner: nil)
                     pasteboard.setString(extractedText, forType: .string)
-                    helpText = "Text in die Zwischenablage kopiert."
+                    // Verify text was copied
+                    if pasteboard.string(forType: .string) == extractedText {
+                        helpText = "Text in die Zwischenablage kopiert."
+                        // Close overlay after successful OCR
+                        closeCaptureWindows()
+                    } else {
+                        helpText = "Fehler beim Kopieren in die Zwischenablage."
+                    }
                 }
             } catch {
                 await MainActor.run {
@@ -4662,15 +4711,19 @@ extension NSImage {
     func crop(to rect: NSRect) -> NSImage? {
         guard let cgImage = self.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
         
-        let scale = CGFloat(cgImage.width) / self.size.width
+        let scaleX = CGFloat(cgImage.width) / self.size.width
+        let scaleY = CGFloat(cgImage.height) / self.size.height
         let scaledRect = NSRect(
-            x: rect.origin.x * scale,
-            y: rect.origin.y * scale,
-            width: rect.width * scale,
-            height: rect.height * scale
+            x: rect.origin.x * scaleX,
+            y: rect.origin.y * scaleY,
+            width: rect.width * scaleX,
+            height: rect.height * scaleY
         )
-        
-        guard let croppedCGImage = cgImage.cropping(to: scaledRect) else { return nil }
+        let imageBounds = CGRect(x: 0, y: 0, width: CGFloat(cgImage.width), height: CGFloat(cgImage.height))
+        let clipped = scaledRect.intersection(imageBounds)
+        guard clipped.width >= 1, clipped.height >= 1 else { return nil }
+
+        guard let croppedCGImage = cgImage.cropping(to: clipped) else { return nil }
         return NSImage(cgImage: croppedCGImage, size: rect.size)
     }
 }

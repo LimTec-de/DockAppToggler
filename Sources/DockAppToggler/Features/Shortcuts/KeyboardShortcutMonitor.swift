@@ -5,6 +5,13 @@ import ApplicationServices
 @MainActor
 class KeyboardShortcutMonitor {
     static let shared = KeyboardShortcutMonitor()
+
+    /// ⌃⌥P (Control+Option+P) für Screenshot.
+    private static func isControlOptionScreenshotChord(_ flags: CGEventFlags) -> Bool {
+        guard flags.contains(.maskControl), flags.contains(.maskAlternate) else { return false }
+        let blocked: CGEventFlags = [.maskCommand, .maskShift]
+        return blocked.intersection(flags).isEmpty
+    }
     
     private var optionKeyMonitor: Any?
     private var tabKeyMonitor: Any?
@@ -317,12 +324,21 @@ class KeyboardShortcutMonitor {
     }
     
     private func handleEventTap(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
-        // Global screenshot shortcut: Option + P
+        // Re-enable event tap if macOS disabled it (e.g. due to timeout)
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            if let tap = eventTap {
+                CGEvent.tapEnable(tap: tap, enable: true)
+                Logger.warning("Event tap was disabled by system, re-enabled")
+            }
+            return Unmanaged.passRetained(event)
+        }
+        
+        // Global screenshot shortcut: Control+Option+P (physical ANSI P, keyCode 35).
+        // Changed to avoid conflicts with Command/Shift shortcuts.
         if type == .keyDown,
-           let nsEvent = NSEvent(cgEvent: event),
-           nsEvent.keyCode == 35,
-           nsEvent.modifierFlags.intersection(.deviceIndependentFlagsMask) == [.option],
-           isOptionTabScreenshotEnabled {
+           isOptionTabScreenshotEnabled,
+           UInt16(truncatingIfNeeded: event.getIntegerValueField(.keyboardEventKeycode)) == 35,
+           Self.isControlOptionScreenshotChord(event.flags) {
             Task { @MainActor in
                 ScreenCaptureService.captureInteractiveToClipboard()
             }

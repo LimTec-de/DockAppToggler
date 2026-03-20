@@ -53,7 +53,7 @@ class StatusBarController {
         )
 
         optionTabScreenshotMenuItem = NSMenuItem(
-            title: "Option+P Screenshot",
+            title: "⌃⌥P Screenshot",
             action: #selector(toggleOptionTabScreenshot),
             keyEquivalent: ""
         )

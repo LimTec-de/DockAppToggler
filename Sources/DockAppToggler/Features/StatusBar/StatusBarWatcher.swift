@@ -297,7 +297,7 @@ class StatusBarWatcher {
                 var iterations = 0
                 let maxIterations = 5
                 
-                if role == "AXMenuExtra" || role == "AXMenuBarItem" {
+                if role == "AXMenuExtra" {
                     foundStatusItem = true
                     currentElement = element
                 } else {
@@ -311,7 +311,7 @@ class StatusBarWatcher {
                             AXUIElementCopyAttributeValue(parent, kAXRoleAttribute as CFString, &parentRoleValue)
                             let parentRole = (parentRoleValue as? String) ?? ""
                             
-                            if parentRole == "AXMenuExtra" || parentRole == "AXMenuBarItem" {
+                            if parentRole == "AXMenuExtra" {
                                 foundStatusItem = true
                                 currentElement = parent
                                 break

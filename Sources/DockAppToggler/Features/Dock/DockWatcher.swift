@@ -61,6 +61,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
     nonisolated(unsafe) private var _lastMouseEventTimeUnsafe: TimeInterval = 0
     nonisolated(unsafe) private var _lastEventTimeUnsafe: TimeInterval = 0
     nonisolated(unsafe) private var _isChooserVisibleUnsafe: Bool = false
+    nonisolated(unsafe) private var _isOverDockIconUnsafe: Bool = false
     
     // Other properties
     nonisolated(unsafe) private var eventTap: CFMachPort?
@@ -69,9 +70,9 @@ class DockWatcher: NSObject, NSMenuDelegate {
     private var lastWindowOrder: [AXUIElement]?
     private let menuShowDelay: TimeInterval = 0.01
     @MainActor var lastClickTime: TimeInterval = 0
-    private let clickDebounceInterval: TimeInterval = 0.3
+    private let clickDebounceInterval: TimeInterval = 0.1
     private var lastTouchpadClickTime: TimeInterval = 0
-    private let touchpadClickDebounceInterval: TimeInterval = 0.5
+    private let touchpadClickDebounceInterval: TimeInterval = 0.15
     private var clickedApp: NSRunningApplication?
     private let dismissalMargin: CGFloat = 20.0
     private var lastMouseMoveTime: TimeInterval = 0
@@ -247,6 +248,11 @@ class DockWatcher: NSObject, NSMenuDelegate {
         }
     }
     
+    // Double-click detection for hide action
+    private var lastDockClickProcessedApp: NSRunningApplication?
+    private var lastDockClickProcessedTime: TimeInterval = 0
+    private let doubleClickInterval: TimeInterval = 0.4
+
     // Add new property to track menu blocking
     private var menuBlocked: Bool = false
     private var lastClickedIconApp: NSRunningApplication?
@@ -734,6 +740,13 @@ class DockWatcher: NSObject, NSMenuDelegate {
                     }
                 }
                 
+                // Consume left clicks on dock icons so the dock doesn't
+                // activate the app (which would bring ALL windows forward).
+                // Our processDockIconClick handles activation instead.
+                if (type == .leftMouseDown || type == .leftMouseUp) && watcher._isOverDockIconUnsafe {
+                    return nil
+                }
+
                 return Unmanaged.passUnretained(event)
             }
         }
@@ -894,6 +907,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
 
         // Avoid expensive Dock hit-tests while the pointer is moving inside the chooser.
         if isOverChooserArea {
+            _isOverDockIconUnsafe = false
             updateHistoryTracking(mouseLocation: mouseLocation)
             return
         }
@@ -920,6 +934,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
             // Update state once
             lastDockAccessTime = ProcessInfo.processInfo.systemUptime
             isMouseOverDock = true
+            _isOverDockIconUnsafe = true
             cleanupTimer?.invalidate()
             
             // Check if windows need reloading using cached values
@@ -991,6 +1006,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
             // Mouse not over dock or chooser
             if !isOverChooserArea {
                 isMouseOverDock = false
+                _isOverDockIconUnsafe = false
                 lastHoveredApp = nil
                 lastProcessedApp = nil
                 lastProcessedWindows = nil
@@ -1026,6 +1042,12 @@ class DockWatcher: NSObject, NSMenuDelegate {
 
         Logger.debug("Processing click for app: \(app.localizedName ?? "Unknown")")
 
+        // Double-click detection: hide only on double-click, single click always activates
+        let now = ProcessInfo.processInfo.systemUptime
+        let isDoubleClick = app == lastDockClickProcessedApp && (now - lastDockClickProcessedTime) < doubleClickInterval
+        lastDockClickProcessedApp = app
+        lastDockClickProcessedTime = now
+
         // Get all windows
         let windows = AccessibilityService.shared.listApplicationWindows(for: app)
         
@@ -1034,23 +1056,21 @@ class DockWatcher: NSObject, NSMenuDelegate {
             windowInfo.cgWindowID != nil && windowInfo.isAppElement
         }
         if hasCGWindowsOnly {
-            if app.isActive {
-                Logger.debug("CGWindow-only app is active, hiding")
+            if isDoubleClick && app.isActive {
+                Logger.debug("CGWindow-only app: double-click while active, hiding")
                 app.hide()
                 return true
-            } else {
+            } else if !app.isActive {
                 Logger.debug("CGWindow-only app is not active, activating")
                 app.unhide()
                 Task { @MainActor in
                     AccessibilityService.shared.activateApp(app)
                 }
-                
-                // Force raise all windows
                 for windowInfo in windows {
                     AccessibilityService.shared.raiseWindow(windowInfo: windowInfo, for: app)
                 }
-                return true
             }
+            return true
         }
 
         // Special handling for Finder
@@ -1093,47 +1113,74 @@ class DockWatcher: NSObject, NSMenuDelegate {
             
             Logger.debug("Finder active: \(app.isActive), has visible windows: \(hasVisibleTopmostWindow)")
             
-            if hasVisibleTopmostWindow {
-                Logger.debug("Finder has visible topmost windows, hiding")
+            if hasVisibleTopmostWindow && isDoubleClick {
+                Logger.debug("Finder: double-click while active, hiding")
                 AccessibilityService.shared.hideAllWindows(for: app)
                 return app.hide()
-            } else {
-                Logger.debug("Finder has no visible topmost windows, showing")
-                app.unhide()
-                app.activate(options: [.activateIgnoringOtherApps])
-                
-                // Only restore non-minimized windows
-                let nonMinimizedWindows = windows.filter { windowInfo in
-                    guard !windowInfo.isAppElement else { return false }
-                    var minimizedValue: AnyObject?
-                    return !(AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success &&
-                            (minimizedValue as? Bool == true))
+            } else if hasVisibleTopmostWindow {
+                Logger.debug("Finder: single-click while active, raising frontmost window only")
+                let highlightedWindow = windowChooser?.chooserView?.topmostWindow
+                let targetWindow = windows.first(where: { $0.window == highlightedWindow }) ??
+                                   windows.first(where: { !$0.isAppElement && AccessibilityService.shared.checkWindowVisibility($0.window) })
+                if let targetWindow = targetWindow {
+                    AccessibilityService.shared.raiseWindowOnly(targetWindow.window, for: app)
                 }
-                
-                if nonMinimizedWindows.isEmpty {
-                    // Open home directory in a new Finder window if no non-minimized windows
-                    let homeURL = FileManager.default.homeDirectoryForCurrentUser
-                    NSWorkspace.shared.open(homeURL)
-                } else {
-                    // Find the highlighted window from the window chooser if it exists
-                    let highlightedWindow = windowChooser?.chooserView?.topmostWindow
-                    
-                    // Split windows into highlighted and others
-                    let (highlighted, otherWindows) = windows.partition { windowInfo in
-                        windowInfo.window == highlightedWindow
+                return true
+            } else {
+                let highlightedWindow = windowChooser?.chooserView?.topmostWindow
+                let finderHasVisibleWindows = windows.contains { windowInfo in
+                    guard !windowInfo.isAppElement else { return false }
+                    return AccessibilityService.shared.checkWindowVisibility(windowInfo.window)
+                }
+
+                if finderHasVisibleWindows && !app.isHidden {
+                    Logger.debug("Finder has visible windows but isn't active, raising frontmost only")
+                    let targetWindow = windows.first(where: { $0.window == highlightedWindow }) ??
+                                       windows.first(where: { !$0.isAppElement && AccessibilityService.shared.checkWindowVisibility($0.window) })
+                    if let targetWindow = targetWindow {
+                        AccessibilityService.shared.raiseWindowOnly(targetWindow.window, for: app)
+                    } else {
+                        app.activate(options: [.activateIgnoringOtherApps])
                     }
-                    
-                    // First restore all other windows
-                    for windowInfo in otherWindows {
-                        AccessibilityService.shared.raiseWindow(windowInfo: windowInfo, for: app)
+                } else if app.isHidden {
+                    Logger.debug("Finder is hidden, activating entire app")
+                    app.unhide()
+                    app.activate(options: [.activateIgnoringOtherApps])
+
+                    let nonMinimizedWindows = windows.filter { windowInfo in
+                        guard !windowInfo.isAppElement else { return false }
+                        var minimizedValue: AnyObject?
+                        return !(AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success &&
+                                (minimizedValue as? Bool == true))
                     }
-                    
-                    // Then restore the highlighted window last to make it frontmost
-                    if let lastWindow = highlighted.first {
-                        // Add a small delay to ensure other windows are restored
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                            AccessibilityService.shared.raiseWindow(windowInfo: lastWindow, for: app)
+
+                    if nonMinimizedWindows.isEmpty {
+                        let homeURL = FileManager.default.homeDirectoryForCurrentUser
+                        NSWorkspace.shared.open(homeURL)
+                    } else {
+                        let (highlighted, otherWindows) = windows.partition { windowInfo in
+                            windowInfo.window == highlightedWindow
                         }
+                        for windowInfo in otherWindows {
+                            AccessibilityService.shared.raiseWindow(windowInfo: windowInfo, for: app)
+                        }
+                        if let lastWindow = highlighted.first {
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                AccessibilityService.shared.raiseWindow(windowInfo: lastWindow, for: app)
+                            }
+                        }
+                    }
+                } else {
+                    Logger.debug("Finder not hidden, restoring only frontmost minimized window")
+                    let targetWindow = windows.first(where: { $0.window == highlightedWindow }) ?? windows.first
+
+                    if let targetWindow = targetWindow {
+                        AXUIElementSetAttributeValue(targetWindow.window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                            AccessibilityService.shared.raiseWindowOnly(targetWindow.window, for: app)
+                        }
+                    } else {
+                        app.activate(options: [.activateIgnoringOtherApps])
                     }
                 }
                 return true
@@ -1216,53 +1263,74 @@ class DockWatcher: NSObject, NSMenuDelegate {
         }
         
 
-        // Check if app is both active AND has visible windows or has only CGWindows and has visible windows
-        if app.isActive && hasVisibleWindows {
-            Logger.debug("App is active with visible windows or has only CGWindows with visible windows, hiding all windows")
+        if isDoubleClick && app.isActive && hasVisibleWindows {
+            Logger.debug("Double-click on active app, hiding all windows")
             AccessibilityService.shared.hideAllWindows(for: app)
             return app.hide()
-        } else if !hasVisibleWindows {
-            Logger.debug("App has no visible windows, restoring last active window")
-            app.unhide()
-            app.activate(options: [.activateIgnoringOtherApps])
-            
-            // Get the highlighted window from the window chooser if it exists
+        } else if app.isActive && hasVisibleWindows {
+            Logger.debug("Single-click on active app, raising frontmost window only")
             let highlightedWindow = windowChooser?.chooserView?.topmostWindow
-            
-            // Split windows into highlighted and others
-            let (highlighted, _) = windows.partition { windowInfo in
-                windowInfo.window == highlightedWindow
+            let targetWindow = windows.first(where: { $0.window == highlightedWindow }) ??
+                               windows.first(where: { AccessibilityService.shared.checkWindowVisibility($0.window) })
+            if let targetWindow = targetWindow {
+                AccessibilityService.shared.raiseWindowOnly(targetWindow.window, for: app)
             }
-            
-            Task { @MainActor in
-                // First unminimize all windows without raising them
-                for windowInfo in windows {
-                    var minimizedValue: AnyObject?
-                    if AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success,
-                       let isMinimized = minimizedValue as? Bool,
-                       isMinimized {
-                        AXUIElementSetAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
-                        try? await Task.sleep(nanoseconds: 50_000_000) // 50ms delay
+            return true
+        } else if !hasVisibleWindows {
+            let highlightedWindow = windowChooser?.chooserView?.topmostWindow
+
+            if app.isHidden {
+                Logger.debug("App is hidden, activating entire app")
+                app.unhide()
+                app.activate(options: [.activateIgnoringOtherApps])
+
+                let (highlighted, _) = windows.partition { windowInfo in
+                    windowInfo.window == highlightedWindow
+                }
+
+                Task { @MainActor in
+                    for windowInfo in windows {
+                        var minimizedValue: AnyObject?
+                        if AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success,
+                           let isMinimized = minimizedValue as? Bool,
+                           isMinimized {
+                            AXUIElementSetAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
+                            try? await Task.sleep(nanoseconds: 50_000_000)
+                        }
+                    }
+
+                    try? await Task.sleep(nanoseconds: 200_000_000)
+
+                    if let lastWindow = highlighted.first {
+                        AccessibilityService.shared.raiseWindow(windowInfo: lastWindow, for: app)
+                    } else if let firstWindow = windows.first {
+                        AccessibilityService.shared.raiseWindow(windowInfo: firstWindow, for: app)
                     }
                 }
-                
-                // Add delay before raising windows
-                try? await Task.sleep(nanoseconds: 200_000_000) // 200ms delay
-                
-                // Then raise only the highlighted window if it exists
-                if let lastWindow = highlighted.first {
-                    AccessibilityService.shared.raiseWindow(windowInfo: lastWindow, for: app)
-                } else if let firstWindow = windows.first {
-                    // If no highlighted window, just raise the first one
-                    AccessibilityService.shared.raiseWindow(windowInfo: firstWindow, for: app)
+            } else {
+                Logger.debug("App not hidden, restoring only frontmost minimized window")
+                let targetWindow = windows.first(where: { $0.window == highlightedWindow }) ?? windows.first
+
+                if let targetWindow = targetWindow {
+                    AXUIElementSetAttributeValue(targetWindow.window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        AccessibilityService.shared.raiseWindowOnly(targetWindow.window, for: app)
+                    }
+                } else {
+                    app.activate(options: [.activateIgnoringOtherApps])
                 }
             }
             return true
         } else {
-            // Just activate the app if it has visible windows but isn't active
-            Logger.debug("App has visible windows but isn't active, activating")
-            Task { @MainActor in
-                AccessibilityService.shared.activateApp(app)
+            Logger.debug("App has visible windows but isn't active, raising frontmost window only")
+            let highlightedWindow = windowChooser?.chooserView?.topmostWindow
+            let targetWindow = windows.first(where: { $0.window == highlightedWindow }) ??
+                               windows.first(where: { AccessibilityService.shared.checkWindowVisibility($0.window) })
+
+            if let targetWindow = targetWindow {
+                AccessibilityService.shared.raiseWindowOnly(targetWindow.window, for: app)
+            } else {
+                app.activate(options: [.activateIgnoringOtherApps])
             }
             return true
         }

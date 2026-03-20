@@ -47,8 +47,8 @@ class HelpViewController: NSViewController {
         - Falls keine Vorschau verfuegbar ist, wird stattdessen das App-Icon angezeigt.
 
         Screenshot
-        - "Take Screenshot (⌥P)" startet den Capture-Editor.
-        - Optionaler globaler Shortcut: "Option+P Screenshot" (im Tray-Menue aktivierbar).
+        - "Take Screenshot (⌃⌥P)" startet den Capture-Editor.
+        - Optionaler globaler Shortcut: "⌃⌥P Screenshot" (im Tray-Menue aktivierbar).
         - Im Editor: ESC beendet, Entf/Backspace loescht ausgewaehlte Elemente.
 
         Tastatur
