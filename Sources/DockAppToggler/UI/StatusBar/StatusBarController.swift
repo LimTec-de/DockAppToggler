@@ -23,6 +23,11 @@ class StatusBarController {
     // Add property to track screen observer
     private var screenObserver: Any?
     
+    /// Restores visibility when the system hides the item (menu bar overflow, sleep/wake edge cases).
+    private var visibilityObservation: NSKeyValueObservation?
+    
+    private nonisolated(unsafe) var workspaceWakeObserver: NSObjectProtocol?
+    
     init(updater: SPUStandardUpdaterController?) {
         statusBar = NSStatusBar.system
         statusItem = statusBar.statusItem(withLength: NSStatusItem.variableLength)
@@ -88,7 +93,43 @@ class StatusBarController {
         
         setupMenu()
         updateAutostartState()
+        setupStatusItemPersistence()
         setupScreenObserver()
+        setupWorkspaceWakeObserver()
+    }
+    
+    /// Disallow interactive removal and observe `isVisible` so the tray icon is not left hidden by the system.
+    private func setupStatusItemPersistence() {
+        statusItem.behavior = NSStatusItem.Behavior()
+        statusItem.isVisible = true
+        
+        visibilityObservation?.invalidate()
+        visibilityObservation = statusItem.observe(\.isVisible, options: [.new]) { item, _ in
+            if !item.isVisible {
+                Logger.debug("Status item became invisible; restoring visibility")
+                item.isVisible = true
+            }
+        }
+    }
+    
+    private func setupWorkspaceWakeObserver() {
+        workspaceWakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.ensureStatusItemVisibleAfterSystemEvent()
+            }
+        }
+    }
+    
+    private func ensureStatusItemVisibleAfterSystemEvent() {
+        statusItem.isVisible = true
+        if statusItem.button?.superview == nil {
+            Logger.debug("Status bar item missing after wake; recreating")
+            recreateStatusItem()
+        }
     }
     
     // Add method to observe screen changes
@@ -134,6 +175,7 @@ class StatusBarController {
     private func recreateStatusItem() {
         // Store current state
         let currentMenu = statusItem.menu
+        let oldItem = statusItem
         
         // Create new status item
         statusItem = statusBar.statusItem(withLength: NSStatusItem.variableLength)
@@ -169,6 +211,9 @@ class StatusBarController {
                 button.toolTip = Bundle.main.infoDictionary?[kCFBundleNameKey as String] as? String ?? "DockAppToggler"
             }
         }
+        
+        setupStatusItemPersistence()
+        statusBar.removeStatusItem(oldItem)
         
         Logger.debug("Status bar item recreated")
     }
@@ -362,6 +407,10 @@ class StatusBarController {
     
     
     deinit {
+        visibilityObservation?.invalidate()
+        if let workspaceWakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(workspaceWakeObserver)
+        }
         // Since we're using nonisolated(unsafe), we need to be careful about thread safety
         if let monitor = mouseEventMonitor {
             NSEvent.removeMonitor(monitor)
