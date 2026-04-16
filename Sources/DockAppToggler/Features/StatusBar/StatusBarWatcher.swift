@@ -110,10 +110,13 @@ class TooltipWindow {
 class StatusBarWatcher {
     private var lastMouseMoveTime: TimeInterval = 0
     private var eventMonitor: Any?
+    private var trackingTimer: Timer?
     private var lastHoveredPid: pid_t = 0
     private var lastHoveredElement: AXUIElement?
     private let tooltipWindow = TooltipWindow()
     private var isEnabled: Bool
+    private var isSuspendedForMenu: Bool = false
+    private var isTrackingMenuBarArea: Bool = false
     
     init() {
         // Initialize with saved preference, default to true
@@ -142,6 +145,12 @@ class StatusBarWatcher {
             name: .statusBarTooltipsStateChanged,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleStatusBarMenuStateChanged(_:)),
+            name: .statusBarMenuStateChanged,
+            object: nil
+        )
     }
     
     @objc private func handleTooltipsStateChanged() {
@@ -151,6 +160,18 @@ class StatusBarWatcher {
         } else {
             cleanup()
             tooltipWindow.hide()
+        }
+    }
+
+    @objc private func handleStatusBarMenuStateChanged(_ notification: Notification) {
+        let isOpen = notification.userInfo?["isOpen"] as? Bool ?? false
+        isSuspendedForMenu = isOpen
+
+        if isOpen {
+            tooltipWindow.hide()
+            cleanup()
+        } else if isEnabled {
+            startWatching()
         }
     }
     
@@ -163,30 +184,51 @@ class StatusBarWatcher {
     private var _lastStatusBarCheckTime: TimeInterval = 0
     
     private func startWatching() {
+        guard eventMonitor == nil else { return }
         eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved]) { [weak self] event in
-            guard let self = self, self.isEnabled else { return }
-            
-            let now = ProcessInfo.processInfo.systemUptime
-            guard now - self._lastStatusBarCheckTime >= 0.1 else { return }
-            self._lastStatusBarCheckTime = now
-            
-            let mouseY = NSEvent.mouseLocation.y
-            let screenMaxY = NSScreen.main?.frame.maxY ?? 0
-            guard mouseY > screenMaxY - 30 else {
-                Task { @MainActor in
-                    if self.lastHoveredPid != 0 {
-                        self.lastHoveredPid = 0
-                        self.lastHoveredElement = nil
-                        self.tooltipWindow.hide()
-                    }
-                }
-                return
-            }
-            
+            guard let self = self, self.isEnabled, !self.isSuspendedForMenu else { return }
+
+            let mouseLocation = NSEvent.mouseLocation
+            let isInMenuBarArea = self.isMouseInMenuBarArea(mouseLocation)
+
             Task { @MainActor in
-                self.handleMouseMove(event)
+                if isInMenuBarArea {
+                    self.beginDetailedTrackingIfNeeded()
+                } else {
+                    self.endDetailedTracking()
+                }
             }
         }
+    }
+
+    private func beginDetailedTrackingIfNeeded() {
+        guard !isTrackingMenuBarArea else { return }
+        isTrackingMenuBarArea = true
+
+        trackingTimer?.invalidate()
+        trackingTimer = Timer.scheduledTimer(withTimeInterval: 0.10, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self = self, self.isEnabled, !self.isSuspendedForMenu else { return }
+                let mouseLocation = NSEvent.mouseLocation
+                guard self.isMouseInMenuBarArea(mouseLocation) else {
+                    self.endDetailedTracking()
+                    return
+                }
+
+                self.handleMouseMove()
+            }
+        }
+
+        handleMouseMove()
+    }
+
+    private func endDetailedTracking() {
+        isTrackingMenuBarArea = false
+        trackingTimer?.invalidate()
+        trackingTimer = nil
+        lastHoveredPid = 0
+        lastHoveredElement = nil
+        tooltipWindow.hide()
     }
     
     nonisolated func cleanup() {
@@ -195,11 +237,15 @@ class StatusBarWatcher {
                 NSEvent.removeMonitor(monitor)
                 self.eventMonitor = nil
             }
+            self.trackingTimer?.invalidate()
+            self.trackingTimer = nil
+            self.isTrackingMenuBarArea = false
         }
     }
     
     deinit {
         cleanup()
+        NotificationCenter.default.removeObserver(self)
     }
     
     // Helper function to compare AXUIElements
@@ -250,7 +296,20 @@ class StatusBarWatcher {
         return false
     }
     
-    private func handleMouseMove(_ event: NSEvent) {
+    private func isMouseInMenuBarArea(_ mouseLocation: NSPoint) -> Bool {
+        guard let screen = NSScreen.main else { return false }
+        let menuBarHeight: CGFloat = 24.0
+        let maxY = screen.frame.maxY
+        let menuBarRect = NSRect(
+            x: screen.frame.minX,
+            y: maxY - menuBarHeight,
+            width: screen.frame.width,
+            height: menuBarHeight
+        )
+        return menuBarRect.contains(mouseLocation)
+    }
+
+    private func handleMouseMove() {
         guard isEnabled else { return }
 
         // Add throttling to prevent too frequent updates
@@ -261,19 +320,9 @@ class StatusBarWatcher {
         lastMouseMoveTime = currentTime
         
         let mouseLocation = NSEvent.mouseLocation
-        let menuBarHeight: CGFloat = 24.0
-        
         guard let screen = NSScreen.main else { return }
         
-        let maxY = screen.frame.maxY
-        let menuBarRect = NSRect(
-            x: screen.frame.minX,
-            y: maxY - menuBarHeight,
-            width: screen.frame.width,
-            height: menuBarHeight
-        )
-        
-        if menuBarRect.contains(mouseLocation) {
+        if isMouseInMenuBarArea(mouseLocation) {
             let sysWideElement = AXUIElementCreateSystemWide()
             var hoveredElement: AXUIElement?
             

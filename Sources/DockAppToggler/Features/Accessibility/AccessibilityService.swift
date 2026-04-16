@@ -393,6 +393,13 @@ class AccessibilityService {
         }
     }
 
+    func prepareWindowForBackground(_ window: AXUIElement) {
+        AXUIElementSetAttributeValue(window, kAXHiddenAttribute as CFString, false as CFTypeRef)
+        AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
+        AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, false as CFTypeRef)
+        AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, false as CFTypeRef)
+    }
+
     private func activateFrontWindowOnly(pid: pid_t) -> Bool {
         let path = "/System/Library/Frameworks/ApplicationServices.framework/Frameworks/HIServices.framework/HIServices"
         guard let handle = dlopen(path, RTLD_LAZY) else { return false }

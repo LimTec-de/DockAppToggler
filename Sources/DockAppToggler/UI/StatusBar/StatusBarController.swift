@@ -4,7 +4,7 @@ import Cocoa
 import CoreGraphics
 
 @MainActor
-class StatusBarController {
+class StatusBarController: NSObject, NSMenuDelegate {
     private var statusBar: NSStatusBar
     private var statusItem: NSStatusItem
     private var menu: NSMenu
@@ -62,6 +62,8 @@ class StatusBarController {
             action: #selector(toggleOptionTabScreenshot),
             keyEquivalent: ""
         )
+
+        super.init()
         
         if let button = statusItem.button {
             // Try multiple paths to find the icon
@@ -314,6 +316,23 @@ class StatusBarController {
         menu.addItem(quitItem)
         
         statusItem.menu = menu
+        menu.delegate = self
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        NotificationCenter.default.post(
+            name: .statusBarMenuStateChanged,
+            object: nil,
+            userInfo: ["isOpen": true]
+        )
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        NotificationCenter.default.post(
+            name: .statusBarMenuStateChanged,
+            object: nil,
+            userInfo: ["isOpen": false]
+        )
     }
     
     @objc private func toggleAutostart() {
@@ -428,6 +447,7 @@ class StatusBarController {
 // Add extension for the notification name
 extension Notification.Name {
     static let optionTabStateChanged = Notification.Name("optionTabStateChanged")
+    static let statusBarMenuStateChanged = Notification.Name("statusBarMenuStateChanged")
 }
 
 // Add extension for UserDefaults to handle default values

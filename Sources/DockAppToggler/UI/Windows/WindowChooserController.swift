@@ -83,8 +83,9 @@ class WindowChooserController: NSWindowController {
             window.collectionBehavior = [.transient, .ignoresCycle]
         }
         
-        // Disable mouse moved events by default
-        window.acceptsMouseMovedEvents = false
+        // Keep mouse-move delivery enabled so row highlighting can update
+        // continuously while the chooser is visible.
+        window.acceptsMouseMovedEvents = true
         
         self.window = window
         
@@ -166,8 +167,9 @@ class WindowChooserController: NSWindowController {
             window.collectionBehavior = [.transient, .ignoresCycle]
         }
         
-        // Disable mouse moved events by default
-        window.acceptsMouseMovedEvents = false
+        // Keep mouse-move delivery enabled so row highlighting can update
+        // continuously while the chooser is visible.
+        window.acceptsMouseMovedEvents = true
         
         // Create container view for shadow
         let containerView = NSView(frame: window.contentView!.bounds)
@@ -336,7 +338,18 @@ class WindowChooserController: NSWindowController {
         
         // Update existing chooser view if it exists
         if let existingView = chooserView {
-            existingView.updateWindows(windows, forceNormalMode: true)
+            let currentWindows = existingView.options
+            let sortedIncomingWindows = WindowChooserView.sortWindows(windows, app: app, isHistory: false)
+            let windowsChanged = currentWindows.count != sortedIncomingWindows.count ||
+                zip(currentWindows, sortedIncomingWindows).contains { current, updated in
+                    current.cgWindowID != updated.cgWindowID ||
+                    current.name != updated.name ||
+                    current.isAppElement != updated.isAppElement
+                }
+
+            if windowsChanged {
+                existingView.updateWindows(windows, forceNormalMode: true)
+            }
         } else {
             // Only create new view if one doesn't exist
             let newView = WindowChooserView(
