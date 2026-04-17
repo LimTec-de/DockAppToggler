@@ -128,11 +128,15 @@ class DockWatcher: NSObject, NSMenuDelegate {
         }
     }
     
-    // Add memory thresholds as static properties
+    // Memory thresholds. The previous values (80/120/150) caused the routine
+    // cleanup to fire on virtually every 60s tick because a healthy app that
+    // captures window thumbnails and holds Accessibility caches comfortably
+    // sits at ~90-120MB. Each cleanup tossed the windows cache, so the very
+    // next dock hover had to re-query Accessibility and felt sluggish.
     private static let memoryThresholds = (
-        warning: 80.0,     // MB - Start cleaning up
-        critical: 120.0,   // MB - Force cleanup
-        restart: 150.0     // MB - Restart app
+        warning: 250.0,    // MB - Start cleaning up (gentle)
+        critical: 400.0,   // MB - Force cleanup
+        restart: 700.0     // MB - Restart app
     )
     
     // Add memory reporting function
@@ -195,7 +199,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
     private func setupMemoryMonitoring() {
         memoryCleanupTimer = Timer.scheduledTimer(withTimeInterval: 60.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
-                guard let self = self, !ScreenCaptureState.isOverlayActive else { return }
+                guard let self = self else { return }
                 let usage = self.reportDetailedMemoryUsage()
                 
                 // Use static strings and format once
@@ -247,8 +251,8 @@ class DockWatcher: NSObject, NSMenuDelegate {
                     self.windowChooser = nil
                     self.lastHoveredApp = nil
                     self.isMouseOverDock = false
-                    await self.cleanupResources()
-                    
+                    await self.cleanupResources(aggressive: true)
+
                     self.menuWatchdogTimer?.invalidate()
                     self.menuWatchdogTimer = nil
                 }
@@ -320,8 +324,8 @@ class DockWatcher: NSObject, NSMenuDelegate {
         }
         
         // Perform main cleanup
-        await cleanupResources()
-        
+        await cleanupResources(aggressive: true)
+
         // Force a garbage collection cycle
         if #available(macOS 10.15, *) {
             await Task.yield()
@@ -336,36 +340,30 @@ class DockWatcher: NSObject, NSMenuDelegate {
         }
     }
 
-    @MainActor private func cleanupResources() async {
+    @MainActor private func cleanupResources(aggressive: Bool = false) async {
         let chooserVisible = windowChooser?.window?.isVisible == true
         let shouldPreserveChooser = chooserVisible || isMouseOverDock
         Logger.perf(
             "memory",
-            "cleanup start chooserVisible=\(chooserVisible) isMouseOverDock=\(isMouseOverDock) preserveChooser=\(shouldPreserveChooser) overlay=\(ScreenCaptureState.isOverlayActive)"
+            "cleanup start chooserVisible=\(chooserVisible) isMouseOverDock=\(isMouseOverDock) preserveChooser=\(shouldPreserveChooser) aggressive=\(aggressive)"
         )
 
-        guard !ScreenCaptureState.isOverlayActive else { return }
-        
         Logger.debug("Starting memory cleanup")
-        
-        // Clear cached windows
-        lastProcessedApp = nil
-        lastProcessedWindows = nil
-        lastProcessedTime = 0
-        
-        // Clean up thumbnail
-        //currentThumbnailView?.cleanup()
-        //currentThumbnailView = nil
-        
+
+        // Only blow away the windows cache when we really mean it. The cache is
+        // tiny but its loss forces the next dock hover to re-query Accessibility,
+        // which is the slow part the user notices.
+        if aggressive {
+            lastProcessedApp = nil
+            lastProcessedWindows = nil
+            lastProcessedTime = 0
+        }
+
         if !shouldPreserveChooser {
             Logger.perf("memory", "cleanup closing chooser before cache reset")
             windowChooser?.close()
             windowChooser = nil
         }
-        
-        // Clean up history controller
-        //historyController?.close()
-        //historyController = nil
         
         // Cancel pending operations
         menuShowTask?.cancel()
@@ -382,14 +380,18 @@ class DockWatcher: NSObject, NSMenuDelegate {
                 chooser.prepareForReuse()
                 windowChooser = nil
             }
-            
-            // Clear app references
-            currentApp = nil
-            lastHoveredApp = nil
-            clickedApp = nil
-            lastClickedDockIcon = nil
-            lastRightClickedDockIcon = nil
-            lastWindowOrder = nil
+
+            // App references that drive the dock-hover state machine should only
+            // be cleared on aggressive cleanups. Wiping them on every routine tick
+            // breaks "reuse the chooser when hovering a neighbouring icon".
+            if aggressive {
+                currentApp = nil
+                lastHoveredApp = nil
+                clickedApp = nil
+                lastClickedDockIcon = nil
+                lastRightClickedDockIcon = nil
+                lastWindowOrder = nil
+            }
             
             // Clear window controllers
             for controller in chooserControllers.values {
@@ -470,17 +472,32 @@ class DockWatcher: NSObject, NSMenuDelegate {
                 let currentTime = ProcessInfo.processInfo.systemUptime
                 // Use the nonisolated(unsafe) timestamp set directly in the event tap callback
                 let timeSinceLastEvent = currentTime - self._lastEventTimeUnsafe
-                
-                if timeSinceLastEvent > self.eventTimeoutInterval {
-                    self.consecutiveEventTapMisses += 1
-                    if self.consecutiveEventTapMisses >= self.heartbeatMissesBeforeReinit,
-                       currentTime - self.lastReinitTime >= self.minReinitInterval {
-                        Logger.warning("Event tap appears inactive (no events for \(Int(timeSinceLastEvent)) seconds). Reinitializing...")
-                        await self.reinitializeEventTap()
-                        self.lastReinitTime = currentTime
-                        self.consecutiveEventTapMisses = 0
-                    }
-                } else {
+
+                guard timeSinceLastEvent > self.eventTimeoutInterval else {
+                    self.consecutiveEventTapMisses = 0
+                    return
+                }
+
+                // Distinguish "user is idle" from "our event tap is dead". Ask
+                // the system how long ago the user actually moved the mouse;
+                // if they've been idle just as long, our tap is fine — don't
+                // burn the windows cache and chooser state on a needless
+                // reinit.
+                let systemIdle = CGEventSource.secondsSinceLastEventType(
+                    .combinedSessionState,
+                    eventType: .mouseMoved
+                )
+                if systemIdle > Double(self.eventTimeoutInterval) {
+                    self.consecutiveEventTapMisses = 0
+                    return
+                }
+
+                self.consecutiveEventTapMisses += 1
+                if self.consecutiveEventTapMisses >= self.heartbeatMissesBeforeReinit,
+                   currentTime - self.lastReinitTime >= self.minReinitInterval {
+                    Logger.warning("Event tap appears inactive (no events for \(Int(timeSinceLastEvent))s, system idle for \(Int(systemIdle))s). Reinitializing...")
+                    await self.reinitializeEventTap()
+                    self.lastReinitTime = currentTime
                     self.consecutiveEventTapMisses = 0
                 }
             }
@@ -488,7 +505,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
     }
 
     @MainActor private func reinitializeEventTap() async {
-        guard !isReinitializingEventTap, !ScreenCaptureState.isOverlayActive else { return }
+        guard !isReinitializingEventTap else { return }
         isReinitializingEventTap = true
         defer { isReinitializingEventTap = false }
 
@@ -518,8 +535,8 @@ class DockWatcher: NSObject, NSMenuDelegate {
         menuShowTask = nil
         
         // Perform thorough cleanup
-        await cleanupResources()
-        
+        await cleanupResources(aggressive: true)
+
         // Add small delay to ensure cleanup is complete
         try? await Task.sleep(nanoseconds: 100_000_000) // 100ms
         
@@ -862,14 +879,18 @@ class DockWatcher: NSObject, NSMenuDelegate {
             "display request app=\(app.localizedName ?? "Unknown") pid=\(app.processIdentifier) windows=\(windows.count) point=(\(Int(point.x)),\(Int(point.y)))"
         )
 
+        // Reuse the existing chooser window for ANY app — the controller will
+        // swap in a fresh inner view if the app changed. This avoids the
+        // close+reopen flicker when sliding from one dock icon to its neighbor.
         if let existingChooser = windowChooser,
-           existingChooser.window != nil,
-           currentApp?.processIdentifier == app.processIdentifier {
-            Logger.perf("chooser", "reusing existing chooser for same app")
+           existingChooser.window != nil {
+            let sameApp = currentApp?.processIdentifier == app.processIdentifier
+            Logger.perf("chooser", "reusing existing chooser sameApp=\(sameApp)")
             existingChooser.updateWindows(windows, for: app, at: point)
             existingChooser.updatePosition(point)
             existingChooser.window?.makeKeyAndOrderFront(nil)
             _chooserFrameUnsafe = existingChooser.window?.frame ?? .zero
+            currentApp = app
             lastMenuInteractionTime = ProcessInfo.processInfo.systemUptime
             return
         }
@@ -941,7 +962,16 @@ class DockWatcher: NSObject, NSMenuDelegate {
         lastMenuInteractionTime = currentTime
 
         let mouseLocation = NSEvent.mouseLocation
-        let chooserFrame: NSRect? = windowChooser?.window?.frame
+        let chooserFrame: NSRect? = {
+            if let frame = windowChooser?.window?.frame {
+                _chooserFrameUnsafe = frame
+                return frame
+            }
+            if windowChooser != nil, !_chooserFrameUnsafe.isEmpty {
+                return _chooserFrameUnsafe
+            }
+            return nil
+        }()
         let isOverChooserArea = chooserFrame.map { frame in
             frame.insetBy(dx: -Constants.UI.menuDismissalMargin,
                           dy: -Constants.UI.menuDismissalMargin).contains(mouseLocation)
@@ -1003,27 +1033,20 @@ class DockWatcher: NSObject, NSMenuDelegate {
                             return
                         }
 
-                        // Always create a new chooser for hidden apps to ensure thumbnail appears
-                        let shouldCreateNewChooser = app != self.lastHoveredApp || self.windowChooser == nil
-                        
-                        if shouldCreateNewChooser {
-                            // Close existing chooser if switching apps
-                            if self.lastHoveredApp != nil {
-                                self.windowChooser?.close()
-                                self.windowChooser = nil
-                            }
-                            
+                        // Let displayWindowSelector decide between reusing the
+                        // existing chooser window (sliding it to the new dock
+                        // icon, possibly with a fresh inner view for a new
+                        // app) or creating one from scratch when there is no
+                        // chooser yet.
+                        if self.windowChooser == nil {
                             if !windows.isEmpty {
                                 Logger.debug("Creating new window chooser for \(app.isActive ? "active" : "hidden") app")
                                 self.displayWindowSelector(for: app, at: iconCenter, windows: windows)
                             }
-                        } else if let existingChooser = self.windowChooser {
+                        } else if !windows.isEmpty {
                             autoreleasepool {
                                 Logger.debug("Updating existing chooser for \(app.isActive ? "active" : "hidden") app")
-                                existingChooser.updateWindows(windows, for: app, at: iconCenter)
-                                existingChooser.updatePosition(iconCenter)
-                                self._chooserFrameUnsafe = existingChooser.window?.frame ?? .zero
-                                existingChooser.window?.makeKeyAndOrderFront(nil)
+                                self.displayWindowSelector(for: app, at: iconCenter, windows: windows)
                             }
                         }
 
@@ -1082,7 +1105,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
         guard windowChooser != nil else { return }
         Logger.perf(
             "chooser",
-            "dismiss chooser mouse=(\(Int(NSEvent.mouseLocation.x)),\(Int(NSEvent.mouseLocation.y))) frame=\(windowChooser?.window.map { NSStringFromRect($0.frame) } ?? "nil")"
+            "dismiss chooser mouse=(\(Int(NSEvent.mouseLocation.x)),\(Int(NSEvent.mouseLocation.y))) frame=\(windowChooser?.window.map { NSStringFromRect($0.frame) } ?? NSStringFromRect(_chooserFrameUnsafe))"
         )
         
         cleanupTimer?.invalidate()
@@ -1561,7 +1584,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
         lastHoveredApp = nil
         isMouseOverDock = false
         Task {
-            await cleanupResources()
+            await cleanupResources(aggressive: true)
         }
     }
     

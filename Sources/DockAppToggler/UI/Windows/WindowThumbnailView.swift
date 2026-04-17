@@ -94,9 +94,9 @@ class WindowThumbnailView {
     @MainActor private static var thumbnailDebounceTimer: DispatchSourceTimer?
     @MainActor private static var pendingThumbnailRequest: PendingThumbnailRequest?
     @MainActor private static var lastThumbnailRequestTime: Date = Date.distantPast
-    private static let fastMovementThreshold: TimeInterval = 0.18
-    private static let stableHoverDelay: TimeInterval = 0.18
-    private static let fastHoverDelay: TimeInterval = 0.24
+    private static let fastMovementThreshold: TimeInterval = 0.10
+    private static let stableHoverDelay: TimeInterval = 0.06
+    private static let fastHoverDelay: TimeInterval = 0.09
 
     @MainActor private static var activeWindowSnapshot: [[String: Any]] = []
     @MainActor private static var lastWindowSnapshotTime: Date = .distantPast
@@ -152,7 +152,7 @@ class WindowThumbnailView {
     // Update static property to use UserDefaults
     @MainActor private static var previewsEnabled: Bool {
         get {
-            UserDefaults.standard.bool(forKey: "WindowPreviewsEnabled")
+            UserDefaults.standard.bool(forKey: "WindowPreviewsEnabled", defaultValue: true)
         }
         set {
             UserDefaults.standard.set(newValue, forKey: "WindowPreviewsEnabled")
@@ -179,67 +179,53 @@ class WindowThumbnailView {
         return !previewsEnabled
     }
     
-    // Update the WindowCacheKey struct
+    // Stable cache key: equal windows must produce equal keys so dictionary
+    // lookups succeed across calls. Previously this struct stored a per-instance
+    // UUID, which made every freshly-built key hash differently and caused
+    // hasUsableCachedThumbnail() to always miss.
     private struct WindowCacheKey: Hashable {
         let pid: pid_t
         let windowID: CGWindowID?
         let windowName: String
-        private let uniqueID: UUID  // Add a unique identifier
-        
-        init(pid: pid_t, windowID: CGWindowID?, windowName: String) {
-            self.pid = pid
-            self.windowID = windowID
-            self.windowName = windowName
-            self.uniqueID = UUID()  // Generate a unique ID for each key
-        }
-        
+
         func hash(into hasher: inout Hasher) {
-            if let windowID = windowID {
-                // If we have a window ID, use only that and pid
-                hasher.combine(pid)
+            hasher.combine(pid)
+            if let windowID {
                 hasher.combine(windowID)
             } else {
-                // Otherwise use pid, name, and unique ID
-                hasher.combine(pid)
                 hasher.combine(windowName)
-                hasher.combine(uniqueID)
             }
         }
-        
+
         static func == (lhs: WindowCacheKey, rhs: WindowCacheKey) -> Bool {
-            // If either has a window ID, compare by ID
+            guard lhs.pid == rhs.pid else { return false }
             if let lhsID = lhs.windowID, let rhsID = rhs.windowID {
-                return lhs.pid == rhs.pid && lhsID == rhsID
+                return lhsID == rhsID
             }
-            // Otherwise compare by all fields including unique ID
-            return lhs.pid == rhs.pid && 
-                   lhs.windowName == rhs.windowName && 
-                   lhs.uniqueID == rhs.uniqueID
+            if lhs.windowID == nil && rhs.windowID == nil {
+                return lhs.windowName == rhs.windowName
+            }
+            return false
         }
     }
-    
-    // Add a cache for window keys to maintain consistency
-    private static var windowKeyCache: [String: WindowCacheKey] = [:]
-    
-    // Add method to get or create a cache key
+
     private func getCacheKey(for windowInfo: WindowInfo) -> WindowCacheKey {
-        let identifier = thumbnailRequestIdentifier(for: windowInfo)
-        
-        if let existingKey = Self.windowKeyCache[identifier] {
-            return existingKey
-        }
-        
-        let newKey = WindowCacheKey(
+        WindowCacheKey(
             pid: targetApp.processIdentifier,
             windowID: windowInfo.cgWindowID,
             windowName: windowInfo.name
         )
-        Self.windowKeyCache[identifier] = newKey
-        return newKey
     }
 
     private func thumbnailRequestIdentifier(for windowInfo: WindowInfo) -> String {
         "\(targetApp.processIdentifier):\(windowInfo.name):\(windowInfo.cgWindowID ?? 0)"
+    }
+
+    @MainActor
+    func hasUsableCachedThumbnail(for windowInfo: WindowInfo) -> Bool {
+        let cacheKey = getCacheKey(for: windowInfo)
+        guard let cached = Self.cachedThumbnails[cacheKey] else { return false }
+        return cached.isValid(forHiddenApp: targetApp.isHidden)
     }
 
     @MainActor
@@ -329,17 +315,65 @@ class WindowThumbnailView {
         return !shared.isVisible
     }
 
+    // Applied the first time a preview container is configured. We key off a
+    // private identifier so that the shadow/background/corner-radius aren't
+    // re-assigned on every cache hit — CALayer otherwise rebuilds the soft
+    // shadow on each mutation, which shows up as rising hover latency over a
+    // long session.
+    private static let previewContainerStyledIdentifier = NSUserInterfaceItemIdentifier("DockAppToggler.PreviewContainerStyled")
+
     private func applyPreviewContainerStyle(_ view: NSView) {
         view.wantsLayer = true
+        if view.identifier == Self.previewContainerStyledIdentifier {
+            // Already styled; only keep background in sync in case dark-mode
+            // or theme tokens change. Shadow parameters are stable so we skip
+            // the expensive layer mutation.
+            view.layer?.backgroundColor = previewPanelBackgroundColor
+            return
+        }
         view.layer?.backgroundColor = previewPanelBackgroundColor
         view.layer?.cornerRadius = 12
         view.layer?.masksToBounds = false
+        // Symmetric "halo" shadow around the thumbnail container. Offset is
+        // zero so the rim reads on every side of the panel, opacity is bumped
+        // to compensate for the partly-transparent panel background that would
+        // otherwise wash the shadow out, and the radius is kept tight enough
+        // that it stays a recognizable rim instead of a soft glow.
         view.layer?.shadowColor = NSColor.black.cgColor
-        view.layer?.shadowOpacity = 0.62
-        view.layer?.shadowRadius = 34
+        view.layer?.shadowOpacity = 0.85
+        view.layer?.shadowRadius = 18
         view.layer?.shadowOffset = .zero
+        // Pre-compute the shadow path from the rounded rect. Without this,
+        // CoreAnimation has to derive the shadow from the layer's alpha mask
+        // every redraw, which is both slower AND noticeably softer because the
+        // 0.78-alpha background bleeds into the shadow contour. The path is
+        // refreshed below on bounds changes via the frame observer.
+        view.layer?.shadowPath = CGPath(
+            roundedRect: view.bounds,
+            cornerWidth: 12,
+            cornerHeight: 12,
+            transform: nil
+        )
         view.layer?.borderWidth = 0
         view.layer?.borderColor = nil
+        view.identifier = Self.previewContainerStyledIdentifier
+
+        // Keep the shadowPath in sync when the container resizes for a
+        // different thumbnail aspect ratio (see updateSharedWindowContent).
+        view.postsFrameChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            forName: NSView.frameDidChangeNotification,
+            object: view,
+            queue: .main
+        ) { [weak view] _ in
+            guard let view, let layer = view.layer else { return }
+            layer.shadowPath = CGPath(
+                roundedRect: view.bounds,
+                cornerWidth: 12,
+                cornerHeight: 12,
+                transform: nil
+            )
+        }
     }
     
     init(targetApp: NSRunningApplication, dockIconCenter: NSPoint, options: [WindowInfo], windowChooser: WindowChooserController?) {
@@ -352,6 +386,7 @@ class WindowThumbnailView {
         
         // Register this instance
         Self.activeThumbnailViews.insert(ObjectIdentifier(self))
+        Logger.perf("preview", "thumbnail view init active_views=\(Self.activeThumbnailViews.count)")
         
         // Cancel any pending cleanup - we want to reuse the window
         Self.cancelPendingCleanup()
@@ -918,6 +953,8 @@ class WindowThumbnailView {
                         width: thumbnailSize.width - (contentMargin * 2),
                         height: titleHeight
                     )
+                }, completionHandler: { [weak panel] in
+                    panel?.invalidateShadow()
                 })
             }
         } else {
@@ -985,123 +1022,138 @@ class WindowThumbnailView {
         positionAndShowWindow(panel)
     }
     
-    func showThumbnail(for windowInfo: WindowInfo, withTimer: Bool = true) {
-        Task { @MainActor in
-            // Check if previews are enabled
-            guard Self.previewsEnabled else {
-                Logger.debug("Window previews are disabled")
-                return
-            }
+    func showThumbnail(for windowInfo: WindowInfo, withTimer: Bool = true, skipDebounce: Bool = false) {
+        // Class is @MainActor isolated already; no need to bounce through Task.
+        // Check if previews are enabled
+        guard Self.previewsEnabled else {
+            Logger.debug("Window previews are disabled")
+            return
+        }
 
-            let requestIdentifier = thumbnailRequestIdentifier(for: windowInfo)
-            let requestStart = ProcessInfo.processInfo.systemUptime
-            Logger.perf("preview", "request start id=\(requestIdentifier) timer=\(withTimer)")
+        let requestIdentifier = thumbnailRequestIdentifier(for: windowInfo)
+        let requestStart = ProcessInfo.processInfo.systemUptime
+        Logger.perf("preview", "request start id=\(requestIdentifier) timer=\(withTimer) skipDebounce=\(skipDebounce)")
 
-            if Self.currentThumbnailTask != nil,
-               Self.currentThumbnailRequestIdentifier == requestIdentifier {
-                Logger.perf("preview", "request deduplicated active id=\(requestIdentifier)")
-                if withTimer {
-                    setupAutoCloseTimer(for: windowInfo)
-                }
-                return
-            }
-
-            if let pending = Self.pendingThumbnailRequest,
-               pending.instance == ObjectIdentifier(self),
-               pending.identifier == requestIdentifier {
-                Logger.perf("preview", "request deduplicated pending id=\(requestIdentifier)")
-                if withTimer {
-                    setupAutoCloseTimer(for: windowInfo)
-                }
-                return
-            }
-
-            // Cancel any existing thumbnail creation task
-            Self.currentThumbnailTask?.cancel()
-            Self.currentThumbnailTask = nil
-            Self.currentThumbnailRequestIdentifier = nil
-
-            // Cancel any pending cleanup - we want to reuse the window
-            Self.cancelPendingCleanup()
-            
-            // Cancel any existing timer for this instance
-            autoCloseTimer?.cancel()
-            autoCloseTimer = nil
-
-            // Detect if we're moving fast between icons
-            let now = Date()
-            Self.lastInteractiveHoverTime = now
-            Self.lastPreviewShowTime = now
-            let timeSinceLastRequest = now.timeIntervalSince(Self.lastThumbnailRequestTime)
-            let isMovingFast = timeSinceLastRequest < Self.fastMovementThreshold
-            Self.lastThumbnailRequestTime = now
-
-            // Fast path: if a valid thumbnail is already cached, show it immediately.
-            let cacheKey = getCacheKey(for: windowInfo)
-            if let cached = Self.cachedThumbnails[cacheKey],
-               cached.isValid(forHiddenApp: targetApp.isHidden) {
-                Logger.perf("preview", "cache hit id=\(requestIdentifier) age_ms=\(Int((ProcessInfo.processInfo.systemUptime - requestStart) * 1000))")
-                displayThumbnailInSharedWindow(cached.image, for: windowInfo, isLoading: false)
-                if withTimer {
-                    setupAutoCloseTimer(for: windowInfo)
-                }
-                return
-            }
-
-            // Cancel any existing debounce timer
-            Self.thumbnailDebounceTimer?.cancel()
-            Self.thumbnailDebounceTimer = nil
-
-            // Store the request
-            Self.pendingThumbnailRequest = PendingThumbnailRequest(
-                windowInfo: windowInfo,
-                targetApp: targetApp,
-                instance: ObjectIdentifier(self),
-                timestamp: now,
-                identifier: requestIdentifier
-            )
-
-            // Avoid flashing icons while moving quickly across Dock items.
-            if !isMovingFast, !shouldShowLoadingIconImmediately(), let appIcon = targetApp.icon {
-                displayThumbnailInSharedWindow(appIcon, for: windowInfo, isLoading: true)
-            }
-
-            // Set up auto-close timer immediately for fast response
+        if Self.currentThumbnailTask != nil,
+           Self.currentThumbnailRequestIdentifier == requestIdentifier {
+            Logger.perf("preview", "request deduplicated active id=\(requestIdentifier)")
             if withTimer {
                 setupAutoCloseTimer(for: windowInfo)
             }
+            return
+        }
 
-            // Delay expensive capture until hover is stable.
-            let delay = isMovingFast ? Self.fastHoverDelay : Self.stableHoverDelay
-            Logger.perf("preview", "debounce scheduled id=\(requestIdentifier) delay_ms=\(Int(delay * 1000)) fast=\(isMovingFast)")
-            let timer = DispatchSource.makeTimerSource(queue: .main)
-            timer.schedule(deadline: .now() + delay)
+        if let pending = Self.pendingThumbnailRequest,
+           pending.instance == ObjectIdentifier(self),
+           pending.identifier == requestIdentifier {
+            Logger.perf("preview", "request deduplicated pending id=\(requestIdentifier)")
+            if withTimer {
+                setupAutoCloseTimer(for: windowInfo)
+            }
+            return
+        }
 
-            timer.setEventHandler { [weak self] in
-                guard let self = self,
-                      let pending = Self.pendingThumbnailRequest,
-                      pending.instance == ObjectIdentifier(self) else {
-                    Self.thumbnailDebounceTimer?.cancel()
-                    Self.thumbnailDebounceTimer = nil
-                    Self.pendingThumbnailRequest = nil
-                    return
-                }
+        // Cancel any existing thumbnail creation task
+        Self.currentThumbnailTask?.cancel()
+        Self.currentThumbnailTask = nil
+        Self.currentThumbnailRequestIdentifier = nil
 
-                Logger.perf("preview", "debounce fired id=\(pending.identifier) wait_ms=\(Int((ProcessInfo.processInfo.systemUptime - requestStart) * 1000))")
+        // Cancel any pending cleanup - we want to reuse the window
+        Self.cancelPendingCleanup()
 
-                // Process the debounced request
-                Task { @MainActor in
-                    await self.processThumbnailRequest(pending.windowInfo, withTimer: false, isDebounced: isMovingFast)
-                }
+        // Cancel any existing timer for this instance
+        autoCloseTimer?.cancel()
+        autoCloseTimer = nil
 
+        // Detect if we're moving fast between icons
+        let now = Date()
+        Self.lastInteractiveHoverTime = now
+        Self.lastPreviewShowTime = now
+        let timeSinceLastRequest = now.timeIntervalSince(Self.lastThumbnailRequestTime)
+        let isMovingFast = timeSinceLastRequest < Self.fastMovementThreshold
+        Self.lastThumbnailRequestTime = now
+
+        // Fast path: if a valid thumbnail is already cached, show it immediately.
+        let cacheKey = getCacheKey(for: windowInfo)
+        if let cached = Self.cachedThumbnails[cacheKey],
+           cached.isValid(forHiddenApp: targetApp.isHidden) {
+            Logger.perf("preview", "cache hit id=\(requestIdentifier) age_ms=\(Int((ProcessInfo.processInfo.systemUptime - requestStart) * 1000))")
+            displayThumbnailInSharedWindow(cached.image, for: windowInfo, isLoading: false)
+            if withTimer {
+                setupAutoCloseTimer(for: windowInfo)
+            }
+            return
+        }
+
+        // Cancel any existing debounce timer
+        Self.thumbnailDebounceTimer?.cancel()
+        Self.thumbnailDebounceTimer = nil
+
+        // Store the request
+        Self.pendingThumbnailRequest = PendingThumbnailRequest(
+            windowInfo: windowInfo,
+            targetApp: targetApp,
+            instance: ObjectIdentifier(self),
+            timestamp: now,
+            identifier: requestIdentifier
+        )
+
+        // Avoid flashing icons while moving quickly across Dock items.
+        if !isMovingFast, !shouldShowLoadingIconImmediately(), let appIcon = targetApp.icon {
+            displayThumbnailInSharedWindow(appIcon, for: windowInfo, isLoading: true)
+        }
+
+        // Set up auto-close timer immediately for fast response
+        if withTimer {
+            setupAutoCloseTimer(for: windowInfo)
+        }
+
+        // When the caller already debounced (e.g. WindowChooserView's hover
+        // scheduler), there's no value in waiting another stableHoverDelay.
+        // Skipping that double-debounce can save up to ~90ms of perceived lag.
+        if skipDebounce {
+            Logger.perf("preview", "debounce skipped id=\(requestIdentifier) reason=hover-prewarmed")
+            let pending = Self.pendingThumbnailRequest
+            Self.pendingThumbnailRequest = nil
+            Task { @MainActor [weak self] in
+                guard let self,
+                      let pending,
+                      pending.instance == ObjectIdentifier(self) else { return }
+                await self.processThumbnailRequest(pending.windowInfo, withTimer: false, isDebounced: isMovingFast)
+            }
+            return
+        }
+
+        // Delay expensive capture until hover is stable.
+        let delay = isMovingFast ? Self.fastHoverDelay : Self.stableHoverDelay
+        Logger.perf("preview", "debounce scheduled id=\(requestIdentifier) delay_ms=\(Int(delay * 1000)) fast=\(isMovingFast)")
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + delay)
+
+        timer.setEventHandler { [weak self] in
+            guard let self = self,
+                  let pending = Self.pendingThumbnailRequest,
+                  pending.instance == ObjectIdentifier(self) else {
                 Self.thumbnailDebounceTimer?.cancel()
                 Self.thumbnailDebounceTimer = nil
                 Self.pendingThumbnailRequest = nil
+                return
             }
 
-            Self.thumbnailDebounceTimer = timer
-            timer.resume()
+            Logger.perf("preview", "debounce fired id=\(pending.identifier) wait_ms=\(Int((ProcessInfo.processInfo.systemUptime - requestStart) * 1000))")
+
+            // Process the debounced request
+            Task { @MainActor in
+                await self.processThumbnailRequest(pending.windowInfo, withTimer: false, isDebounced: isMovingFast)
+            }
+
+            Self.thumbnailDebounceTimer?.cancel()
+            Self.thumbnailDebounceTimer = nil
+            Self.pendingThumbnailRequest = nil
         }
+
+        Self.thumbnailDebounceTimer = timer
+        timer.resume()
     }
     
     // Extract thumbnail processing logic
@@ -1628,6 +1680,7 @@ class WindowThumbnailView {
         
         // Unregister this instance
         Self.activeThumbnailViews.remove(ObjectIdentifier(self))
+        Logger.perf("preview", "thumbnail view cleanup active_views=\(Self.activeThumbnailViews.count)")
         
         // Cancel any pending cleanup timer if this is the current instance
         if Self.currentSharedInstance == ObjectIdentifier(self) {
@@ -1713,7 +1766,14 @@ class WindowThumbnailView {
     private func configurePanel(_ panel: NSPanel) {
         panel.backgroundColor = .clear
         panel.isOpaque = false
-        panel.hasShadow = false
+        // Let AppKit render the system drop shadow around the visible (alpha)
+        // pixels of the window. With our semi-transparent contentContainer the
+        // CALayer-based shadow alone gets visually swallowed by the panel's own
+        // translucency, so we rely on the OS-level shadow to give the panel a
+        // clear separation from the desktop. The CALayer shadow on the
+        // contentContainer is still set (see applyPreviewContainerStyle) and
+        // adds extra depth on top of the system shadow.
+        panel.hasShadow = true
         panel.level = .popUpMenu + 9  // Changed from 15 to 9 as requested
         panel.isMovable = false
         panel.ignoresMouseEvents = true
@@ -2052,6 +2112,11 @@ class WindowThumbnailView {
             panel.setFrame(frame, display: true)
             panel.orderFront(nil)
             panel.makeKey()
+            // Force AppKit to recompute the system shadow for the current
+            // alpha mask. Without this, the shadow can lag a frame behind a
+            // content swap (e.g. switching between thumbnails of different
+            // aspect ratios) and looks like there is no shadow at all.
+            panel.invalidateShadow()
             WindowThumbnailView.activePreviewWindows.insert(panel)
         } else {
             let deltaX = abs(panel.frame.origin.x - frame.origin.x)

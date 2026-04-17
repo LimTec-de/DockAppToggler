@@ -2,6 +2,12 @@ import Foundation
 
 /// Centralized logging functionality with different log levels and emoji indicators
 enum Logger {
+    private static let debugLoggingEnabled: Bool = {
+        let environment = ProcessInfo.processInfo.environment
+        let value = environment["DOCKAPP_DEBUG_LOGS"]?.lowercased() ?? ""
+        return value == "1" || value == "true" || value == "yes" || value == "on"
+    }()
+
     private static let perfLoggingEnabled: Bool = {
         let environment = ProcessInfo.processInfo.environment
         let value = environment["DOCKAPP_HOVER_DEBUG"]?.lowercased() ?? ""
@@ -10,12 +16,14 @@ enum Logger {
 
     static func debug(_ message: String) {
         #if DEBUG
+        guard debugLoggingEnabled else { return }
         print("🔍 \(message)")
         #endif
     }
     
     static func info(_ message: String) {
         #if DEBUG
+        guard debugLoggingEnabled else { return }
         print("ℹ️ \(message)")
         #endif
     }
@@ -30,6 +38,7 @@ enum Logger {
     
     static func success(_ message: String) {
         #if DEBUG
+        guard debugLoggingEnabled else { return }
         print("✅ \(message)")
         #endif
     }

@@ -158,7 +158,7 @@ class StatusBarWatcher {
         if isEnabled {
             startWatching()
         } else {
-            cleanup()
+            cleanupOnMain()
             tooltipWindow.hide()
         }
     }
@@ -169,7 +169,13 @@ class StatusBarWatcher {
 
         if isOpen {
             tooltipWindow.hide()
-            cleanup()
+            // Must run synchronously: if we deferred this onto a Task, the
+            // `menuDidClose` handler that calls startWatching() could run
+            // before the cleanup, see a still-installed monitor, bail out via
+            // the `guard eventMonitor == nil` check, and then the queued
+            // cleanup would tear the monitor down. Result: tooltips stayed
+            // dead after the very first time the user opened the tray menu.
+            cleanupOnMain()
         } else if isEnabled {
             startWatching()
         }
@@ -231,18 +237,22 @@ class StatusBarWatcher {
         tooltipWindow.hide()
     }
     
+    @MainActor private func cleanupOnMain() {
+        if let monitor = eventMonitor {
+            NSEvent.removeMonitor(monitor)
+            eventMonitor = nil
+        }
+        trackingTimer?.invalidate()
+        trackingTimer = nil
+        isTrackingMenuBarArea = false
+    }
+
     nonisolated func cleanup() {
         Task { @MainActor in
-            if let monitor = self.eventMonitor {
-                NSEvent.removeMonitor(monitor)
-                self.eventMonitor = nil
-            }
-            self.trackingTimer?.invalidate()
-            self.trackingTimer = nil
-            self.isTrackingMenuBarArea = false
+            self.cleanupOnMain()
         }
     }
-    
+
     deinit {
         cleanup()
         NotificationCenter.default.removeObserver(self)

@@ -36,10 +36,6 @@ class KeyboardShortcutMonitor {
         UserDefaults.standard.bool(forKey: "OptionTabEnabled", defaultValue: true)
     }
 
-    private var isOptionTabScreenshotEnabled: Bool {
-        UserDefaults.standard.bool(forKey: "OptionTabScreenshotEnabled", defaultValue: true)
-    }
-    
     private init() {
         setupEventTap()
         setupMonitors()
@@ -333,18 +329,6 @@ class KeyboardShortcutMonitor {
             return Unmanaged.passRetained(event)
         }
         
-        // Global screenshot shortcut: Control+Option+P (physical ANSI P, keyCode 35).
-        // Changed to avoid conflicts with Command/Shift shortcuts.
-        if type == .keyDown,
-           isOptionTabScreenshotEnabled,
-           UInt16(truncatingIfNeeded: event.getIntegerValueField(.keyboardEventKeycode)) == 35,
-           Self.isControlOptionScreenshotChord(event.flags) {
-            Task { @MainActor in
-                ScreenCaptureService.captureInteractiveToClipboard()
-            }
-            return nil
-        }
-
         // Check if feature is enabled first
         guard isOptionTabEnabled else {
             return Unmanaged.passRetained(event)

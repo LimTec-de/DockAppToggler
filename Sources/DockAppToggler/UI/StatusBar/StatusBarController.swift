@@ -12,7 +12,6 @@ class StatusBarController: NSObject, NSMenuDelegate {
     private let autostartMenuItem: NSMenuItem
     private let tooltipsMenuItem: NSMenuItem
     private let optionTabMenuItem: NSMenuItem
-    private let optionTabScreenshotMenuItem: NSMenuItem
     
     // Use nonisolated(unsafe) for the monitor since we need to modify it
     private nonisolated(unsafe) var mouseEventMonitor: AnyObject?
@@ -54,12 +53,6 @@ class StatusBarController: NSObject, NSMenuDelegate {
         optionTabMenuItem = NSMenuItem(
             title: "Option+Tab Switching",
             action: #selector(toggleOptionTab),
-            keyEquivalent: ""
-        )
-
-        optionTabScreenshotMenuItem = NSMenuItem(
-            title: "⌃⌥P Screenshot",
-            action: #selector(toggleOptionTabScreenshot),
             keyEquivalent: ""
         )
 
@@ -239,11 +232,6 @@ class StatusBarController: NSObject, NSMenuDelegate {
         optionTabMenuItem.state = optionTabEnabled ? .on : .off
         menu.addItem(optionTabMenuItem)
 
-        optionTabScreenshotMenuItem.target = self
-        let optionTabScreenshotEnabled = UserDefaults.standard.bool(forKey: "OptionTabScreenshotEnabled", defaultValue: true)
-        optionTabScreenshotMenuItem.state = optionTabScreenshotEnabled ? .on : .off
-        menu.addItem(optionTabScreenshotMenuItem)
-        
         // Create menu item with checkmark for window previews
         previewsMenuItem = NSMenuItem(
             title: "Window Previews",
@@ -254,22 +242,6 @@ class StatusBarController: NSObject, NSMenuDelegate {
         previewsMenuItem?.state = previewsEnabled ? .on : .off
         menu.addItem(previewsMenuItem!)
 
-        let screenshotItem = NSMenuItem(
-            title: "Take Screenshot (⌥P)",
-            action: #selector(takeScreenshot),
-            keyEquivalent: ""
-        )
-        screenshotItem.target = self
-        menu.addItem(screenshotItem)
-
-        let pickWindowScreenshotItem = NSMenuItem(
-            title: "Take Screenshot (Pick Window)",
-            action: #selector(takeWindowPickScreenshot),
-            keyEquivalent: ""
-        )
-        pickWindowScreenshotItem.target = self
-        menu.addItem(pickWindowScreenshotItem)
-
         let screenPermissionItem = NSMenuItem(
             title: "Request Screen Recording Access",
             action: #selector(requestScreenRecordingAccess),
@@ -278,7 +250,6 @@ class StatusBarController: NSObject, NSMenuDelegate {
         screenPermissionItem.target = self
         menu.addItem(screenPermissionItem)
 
-        // Add separator
         menu.addItem(NSMenuItem.separator())
         
         // Add help menu item
@@ -365,14 +336,6 @@ class StatusBarController: NSObject, NSMenuDelegate {
         }
     }
 
-    @objc private func takeScreenshot() {
-        ScreenCaptureService.captureInteractiveToClipboard()
-    }
-
-    @objc private func takeWindowPickScreenshot() {
-        ScreenCaptureService.captureWindowPickToClipboard()
-    }
-
     @objc private func requestScreenRecordingAccess() {
         _ = CGRequestScreenCaptureAccess()
     }
@@ -395,12 +358,6 @@ class StatusBarController: NSObject, NSMenuDelegate {
         NotificationCenter.default.post(name: .optionTabStateChanged, object: nil, userInfo: ["enabled": newState])
     }
 
-    @objc private func toggleOptionTabScreenshot() {
-        let newState = optionTabScreenshotMenuItem.state == .off
-        UserDefaults.standard.set(newState, forKey: "OptionTabScreenshotEnabled")
-        optionTabScreenshotMenuItem.state = newState ? .on : .off
-    }
-    
     @objc private func statusBarButtonClicked(_ sender: NSStatusBarButton) {
         // Update menu item state before showing menu
         if let previewsItem = previewsMenuItem {

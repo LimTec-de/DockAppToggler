@@ -32,10 +32,16 @@ class WindowChooserView: NSView {
     private var minimizeButton: NSButton?
     private var maximizeButton: NSButton?
     private var hoverBackgroundView: NSView?
+    private weak var lastHoverRelativeButton: NSButton?
+    private var hoverBackgroundCGColorCache: CGColor?
+    private var cachedHoverBackgroundIsDark: Bool = false
     private var hoveredButtonTag: Int?
     private var lastScheduledThumbnailTag: Int?
     private var pendingThumbnailHoverWorkItem: DispatchWorkItem?
-    private let menuThumbnailHoverDelay: TimeInterval = 0.12
+    // Tiny dwell so we don't fire on stray motion frames, but small enough
+    // to feel instantaneous. The downstream WindowThumbnailView is told to
+    // skip its own debounce since this dwell already proves hover stability.
+    private let menuThumbnailHoverDelay: TimeInterval = 0.012
     private var minimizedStateByTag: [Int: Bool] = [:]
     private var mouseMoveTrackingArea: NSTrackingArea?
     private var hoverSequenceNumber: UInt64 = 0
@@ -234,19 +240,8 @@ class WindowChooserView: NSView {
                 options: self.options,
                 windowChooser: self.window?.windowController as? WindowChooserController
             )
-            
-            // Show initial preview of topmost window if available
-            if let topmostWindow = self.topmostWindow,
-               let windowInfo = self.options.first(where: { $0.window == topmostWindow }),
-               !windowInfo.isAppElement && windowInfo.cgWindowID == nil {
-                // Use DispatchQueue to ensure view is fully loaded
-                //DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-                    thumbnailView?.showThumbnail(for: windowInfo, withTimer: true)
-                //}
-            } else {
-                Logger.debug("No topmost window found or it's an app element")
-                thumbnailView?.hideThumbnail()
-            }
+            // Keep previews idle until the pointer actually hovers a row.
+            thumbnailView?.hideThumbnail()
         }
     }
     
@@ -570,24 +565,48 @@ class WindowChooserView: NSView {
             backgroundView = newView
         }
 
-        let isDark = self.effectiveAppearance.isDarkMode
-        let hoverColor = isDark ?
-            NSColor(white: 0.3, alpha: 0.8) :
-            NSColor(white: 0.8, alpha: 0.8)
+        // Resolve hover color via a cached CGColor. NSAppearance lookup +
+        // NSColor → CGColor conversion is otherwise repeated on every
+        // button-to-button hover and shows up as growing latency over time
+        // because each layer mutation queues a redraw.
+        let cachedColor = cachedHoverBackgroundCGColor()
+        if backgroundView.layer?.backgroundColor != cachedColor {
+            backgroundView.layer?.backgroundColor = cachedColor
+        }
 
-        backgroundView.layer?.backgroundColor = hoverColor.cgColor
-        backgroundView.frame = NSRect(
+        let newFrame = NSRect(
             x: 0,
             y: button.frame.minY,
             width: self.bounds.width,
             height: button.frame.height
         )
-
-        if backgroundView.superview == nil {
-            self.addSubview(backgroundView, positioned: .below, relativeTo: button)
-        } else {
-            self.addSubview(backgroundView, positioned: .below, relativeTo: button)
+        if backgroundView.frame != newFrame {
+            backgroundView.frame = newFrame
         }
+
+        // addSubview(positioned:relativeTo:) always re-orders the view, even
+        // when the resulting z-order is identical, so only call it when the
+        // hover actually moved to a different button. The previous code did
+        // it on every call (the if/else branches were identical) which forced
+        // AppKit to re-walk the subview list each time.
+        if backgroundView.superview !== self || lastHoverRelativeButton !== button {
+            self.addSubview(backgroundView, positioned: .below, relativeTo: button)
+            lastHoverRelativeButton = button
+        }
+    }
+
+    private func cachedHoverBackgroundCGColor() -> CGColor {
+        let isDark = self.effectiveAppearance.isDarkMode
+        if let cached = hoverBackgroundCGColorCache, cachedHoverBackgroundIsDark == isDark {
+            return cached
+        }
+        let color = isDark ?
+            NSColor(white: 0.3, alpha: 0.8) :
+            NSColor(white: 0.8, alpha: 0.8)
+        let cg = color.cgColor
+        hoverBackgroundCGColorCache = cg
+        cachedHoverBackgroundIsDark = isDark
+        return cg
     }
 
     private func applyHoverEffect(for button: NSButton) {
@@ -602,6 +621,7 @@ class WindowChooserView: NSView {
         thumbnailView?.cancelPendingThumbnailWork()
         hoverBackgroundView?.removeFromSuperview()
         hoverBackgroundView = nil
+        lastHoverRelativeButton = nil
         hoveredButtonTag = nil
         lastScheduledThumbnailTag = nil
     }
@@ -609,11 +629,50 @@ class WindowChooserView: NSView {
     private func scheduleThumbnailHover(for buttonTag: Int) {
         guard !WindowThumbnailView.arePreviewsDisabled() else { return }
         guard lastScheduledThumbnailTag != buttonTag else { return }
+        guard buttonTag < options.count else { return }
+
+        let windowInfo = options[buttonTag]
+        guard !windowInfo.isAppElement else { return }
 
         pendingThumbnailHoverWorkItem?.cancel()
         lastScheduledThumbnailTag = buttonTag
         let sequence = hoverSequenceNumber
-        Logger.perf("hover", "schedule thumbnail seq=\(sequence) tag=\(buttonTag) delay=\(String(format: "%.0f", menuThumbnailHoverDelay * 1000))ms")
+
+        if isHistoryMode {
+            Logger.perf("hover", "schedule thumbnail seq=\(sequence) tag=\(buttonTag) delay=\(String(format: "%.0f", menuThumbnailHoverDelay * 1000))ms history=true")
+        } else {
+            if thumbnailView == nil {
+                thumbnailView = WindowThumbnailView(
+                    targetApp: targetApp,
+                    dockIconCenter: dockIconCenter,
+                    options: [windowInfo],
+                    windowChooser: self.window?.windowController as? WindowChooserController
+                )
+            } else {
+                thumbnailView?.updateOptions([windowInfo])
+            }
+
+            if thumbnailView?.hasUsableCachedThumbnail(for: windowInfo) == true {
+                // Even on a cache hit, showing the thumbnail repositions an
+                // NSPanel and can call orderFront/makeKey, all of which run on
+                // the main thread. If we do that in the same tick as the
+                // highlight, the highlight repaint is delayed until after the
+                // panel work completes. Defer to the next runloop tick so the
+                // hover background paints first and the menu feels instant.
+                Logger.perf("hover", "schedule thumbnail seq=\(sequence) tag=\(buttonTag) delay=0ms cached=true async=true")
+                let work = DispatchWorkItem { [weak self] in
+                    guard let self = self,
+                          self.hoveredButtonTag == buttonTag,
+                          buttonTag < self.options.count else { return }
+                    let info = self.options[buttonTag]
+                    self.thumbnailView?.showThumbnail(for: info, withTimer: false)
+                }
+                pendingThumbnailHoverWorkItem = work
+                DispatchQueue.main.async(execute: work)
+                return
+            }
+            Logger.perf("hover", "schedule thumbnail seq=\(sequence) tag=\(buttonTag) delay=\(String(format: "%.0f", menuThumbnailHoverDelay * 1000))ms cached=false")
+        }
 
         let workItem = DispatchWorkItem { [weak self] in
             guard let self = self,
@@ -621,9 +680,7 @@ class WindowChooserView: NSView {
                   buttonTag < self.options.count else { return }
 
             Logger.perf("hover", "fire thumbnail seq=\(sequence) tag=\(buttonTag)")
-
             let windowInfo = self.options[buttonTag]
-            guard !windowInfo.isAppElement else { return }
 
             Logger.debug("""
                 Showing thumbnail for window:
@@ -646,10 +703,10 @@ class WindowChooserView: NSView {
                     self.thumbnailView?.updateOptions([windowInfo])
                 }
 
-                self.thumbnailView?.showThumbnail(for: windowInfo, withTimer: false)
+                self.thumbnailView?.showThumbnail(for: windowInfo, withTimer: false, skipDebounce: true)
             }
         }
-        
+
         pendingThumbnailHoverWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + menuThumbnailHoverDelay, execute: workItem)
     }
@@ -1840,6 +1897,10 @@ class WindowChooserView: NSView {
         } else if hoveredButtonTag != nil {
             clearHoverEffect()
         }
+    }
+
+    func syncHoverToCurrentMouseLocation() {
+        updateHoverForCurrentMouseLocation()
     }
 
     private func applyStoredTextState(to button: NSButton) {
