@@ -38,13 +38,14 @@ class WindowChooserView: NSView {
     private var hoveredButtonTag: Int?
     private var lastScheduledThumbnailTag: Int?
     private var pendingThumbnailHoverWorkItem: DispatchWorkItem?
-    // Tiny dwell so we don't fire on stray motion frames, but small enough
-    // to feel instantaneous. The downstream WindowThumbnailView is told to
-    // skip its own debounce since this dwell already proves hover stability.
-    private let menuThumbnailHoverDelay: TimeInterval = 0.012
     private var minimizedStateByTag: [Int: Bool] = [:]
     private var mouseMoveTrackingArea: NSTrackingArea?
     private var hoverSequenceNumber: UInt64 = 0
+    /// Last time `mouseMoved` arrived at this view. Used to detect when
+    /// AppKit / WindowServer stop delivering events for noticeably long
+    /// gaps, which is the only way we can tell if the perceived hover-lag
+    /// lives upstream of our processing (= 0–1 ms in the existing logs).
+    private var lastMouseMovedAt: TimeInterval = 0
     
     // Change from private to internal
     var selectedIndex: Int = 0
@@ -79,8 +80,32 @@ class WindowChooserView: NSView {
     }
 
     override func mouseMoved(with event: NSEvent) {
+        let now = ProcessInfo.processInfo.systemUptime
+        if lastMouseMovedAt > 0 {
+            let gapMs = (now - lastMouseMovedAt) * 1000
+            // Only log when the chooser was really starved of events. 250 ms
+            // is well above the natural mouse-move cadence (16 ms / frame),
+            // so anything we log here is a genuine event-delivery stall.
+            if gapMs > 250 {
+                Logger.perf("hover", "mouseMoved arrived after silence gap_ms=\(Int(gapMs))")
+            }
+        }
+        lastMouseMovedAt = now
         super.mouseMoved(with: event)
         updateHoverForCurrentMouseLocation()
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        Logger.perf("hover", "mouseEntered chooser-view")
+        lastMouseMovedAt = ProcessInfo.processInfo.systemUptime
+        super.mouseEntered(with: event)
+        updateHoverForCurrentMouseLocation()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        Logger.perf("hover", "mouseExited chooser-view")
+        lastMouseMovedAt = 0
+        super.mouseExited(with: event)
     }
     
     override func keyDown(with event: NSEvent) {
@@ -565,6 +590,19 @@ class WindowChooserView: NSView {
             backgroundView = newView
         }
 
+        // Wrap every layer mutation in a transaction with implicit animations
+        // disabled. Without this, CALayer applies its default 0.25 s implicit
+        // animation to backgroundColor / position changes, which makes the
+        // highlight visibly chase the cursor instead of snapping. The cost of
+        // the begin/commit pair is far below a single CGColor allocation.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+
+        if backgroundView.isHidden {
+            backgroundView.isHidden = false
+        }
+
         // Resolve hover color via a cached CGColor. NSAppearance lookup +
         // NSColor → CGColor conversion is otherwise repeated on every
         // button-to-button hover and shows up as growing latency over time
@@ -584,13 +622,18 @@ class WindowChooserView: NSView {
             backgroundView.frame = newFrame
         }
 
-        // addSubview(positioned:relativeTo:) always re-orders the view, even
-        // when the resulting z-order is identical, so only call it when the
-        // hover actually moved to a different button. The previous code did
-        // it on every call (the if/else branches were identical) which forced
-        // AppKit to re-walk the subview list each time.
-        if backgroundView.superview !== self || lastHoverRelativeButton !== button {
-            self.addSubview(backgroundView, positioned: .below, relativeTo: button)
+        // The hover background sits BELOW every button — we don't actually
+        // need to re-position it relative to a specific button. Adding it
+        // once at the bottom of the subview stack (and leaving it there)
+        // turns the per-hover work into a pure frame mutation, instead of a
+        // subview-list re-walk + relayout on every move. Big win on long
+        // chooser sessions because addSubview also invalidates parent layout.
+        if backgroundView.superview !== self {
+            if let firstSubview = self.subviews.first, firstSubview !== backgroundView {
+                self.addSubview(backgroundView, positioned: .below, relativeTo: firstSubview)
+            } else {
+                self.addSubview(backgroundView)
+            }
             lastHoverRelativeButton = button
         }
     }
@@ -619,9 +662,15 @@ class WindowChooserView: NSView {
         pendingThumbnailHoverWorkItem?.cancel()
         pendingThumbnailHoverWorkItem = nil
         thumbnailView?.cancelPendingThumbnailWork()
-        hoverBackgroundView?.removeFromSuperview()
-        hoverBackgroundView = nil
-        lastHoverRelativeButton = nil
+        // Hide instead of tear-down: removeFromSuperview + nil forces us to
+        // rebuild the layer on the next hover. Hiding lets us reuse the same
+        // CALayer (with its allocated backing store) and just snap it back
+        // into view on the next button hover. Wrapped in a no-action
+        // transaction so toggling isHidden doesn't trigger a fade animation.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        hoverBackgroundView?.isHidden = true
+        CATransaction.commit()
         hoveredButtonTag = nil
         lastScheduledThumbnailTag = nil
     }
@@ -639,7 +688,7 @@ class WindowChooserView: NSView {
         let sequence = hoverSequenceNumber
 
         if isHistoryMode {
-            Logger.perf("hover", "schedule thumbnail seq=\(sequence) tag=\(buttonTag) delay=\(String(format: "%.0f", menuThumbnailHoverDelay * 1000))ms history=true")
+            Logger.perf("hover", "schedule thumbnail seq=\(sequence) tag=\(buttonTag) delay=0ms history=true")
         } else {
             if thumbnailView == nil {
                 thumbnailView = WindowThumbnailView(
@@ -671,7 +720,7 @@ class WindowChooserView: NSView {
                 DispatchQueue.main.async(execute: work)
                 return
             }
-            Logger.perf("hover", "schedule thumbnail seq=\(sequence) tag=\(buttonTag) delay=\(String(format: "%.0f", menuThumbnailHoverDelay * 1000))ms cached=false")
+            Logger.perf("hover", "schedule thumbnail seq=\(sequence) tag=\(buttonTag) delay=0ms cached=false")
         }
 
         let workItem = DispatchWorkItem { [weak self] in
@@ -707,8 +756,12 @@ class WindowChooserView: NSView {
             }
         }
 
+        // No debounce: schedule on the next runloop tick so the hover
+        // highlight gets a chance to paint first, but don't burn the 12 ms
+        // delay. If the user keeps moving, the next scheduleThumbnailHover()
+        // cancels this work item before it fires.
         pendingThumbnailHoverWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + menuThumbnailHoverDelay, execute: workItem)
+        DispatchQueue.main.async(execute: workItem)
     }
 
     private func prepareHistoryThumbnail(windowInfo: WindowInfo) {

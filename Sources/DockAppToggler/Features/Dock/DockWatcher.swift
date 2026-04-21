@@ -65,8 +65,14 @@ class DockWatcher: NSObject, NSMenuDelegate {
     
     // Cross-thread state for event tap callback filtering (reduces MainActor dispatch overhead)
     nonisolated(unsafe) private var _lastMouseEventTimeUnsafe: TimeInterval = 0
+    nonisolated(unsafe) private var _lastChooserHoverTickUnsafe: TimeInterval = 0
     nonisolated(unsafe) private var _lastEventTimeUnsafe: TimeInterval = 0
     nonisolated(unsafe) private var _isChooserVisibleUnsafe: Bool = false
+    /// Height of the primary AppKit screen (the one whose origin is at the
+    /// AppKit-coords origin (0,0)). Used to flip CG-event Y coordinates to
+    /// AppKit Y coordinates in the event-tap callback. Refreshed on
+    /// `NSApplication.didChangeScreenParametersNotification`.
+    nonisolated(unsafe) private var _primaryScreenHeightUnsafe: CGFloat = 0
     nonisolated(unsafe) private var _chooserFrameUnsafe: NSRect = .zero
     nonisolated(unsafe) private var _isOverDockIconUnsafe: Bool = false
     
@@ -105,6 +111,11 @@ class DockWatcher: NSObject, NSMenuDelegate {
     // Add currentApp property
     @MainActor private var currentApp: NSRunningApplication?
     @MainActor private var chooserRequestSequence: UInt64 = 0
+    /// In-flight accessibility task issued for the most recent dock-hover.
+    /// Cancelling it as soon as the user moves to another icon prevents the
+    /// AX daemon from chewing through queries whose results we already
+    /// throw away (cascade across multiple icons during a swipe).
+    @MainActor private var inflightChooserTask: Task<Void, Never>?
 
     private var isMouseOverDock: Bool = false
     private var cleanupTimer: Timer?
@@ -656,23 +667,68 @@ class DockWatcher: NSObject, NSMenuDelegate {
                 if type == .mouseMoved {
                     let now = ProcessInfo.processInfo.systemUptime
                     watcher._lastEventTimeUnsafe = now
-                    
-                    if now - watcher._lastMouseEventTimeUnsafe < 0.05 {
-                        return Unmanaged.passUnretained(event)
-                    }
-                    watcher._lastMouseEventTimeUnsafe = now
 
+                    // Chooser-hover hot path: when chooser is visible and
+                    // the cursor is over it, drive the hover update directly
+                    // from the global tap on a tighter (~60 Hz) cadence.
+                    // Reason: AppKit's NSTrackingArea / mouseMoved delivery
+                    // to our chooser window goes through the WindowServer's
+                    // per-window event queue, which after a long idle (e.g.
+                    // 5 min) coalesces mouseMoved events for our LSUIElement
+                    // background process — diagnostics show gaps of
+                    // 300–800 ms between deliveries while the user is
+                    // actively moving the mouse. The CGEventTap sees every
+                    // event from the kernel with no such coalescing, so
+                    // this path keeps the highlight responsive even when
+                    // AppKit is starving the view.
                     if watcher._isChooserVisibleUnsafe {
+                        // event.location is in CG (Quartz) screen coords:
+                        // origin top-left, Y grows down. _chooserFrameUnsafe
+                        // is in AppKit screen coords: origin bottom-left, Y
+                        // grows up. We must convert before comparing or the
+                        // contains-check is always false at the bottom of
+                        // the screen (chooser AppKit-y ≈ 66 vs cursor CG-y
+                        // ≈ screenHeight - 200), which silently disables
+                        // this whole fast path.
+                        let appKitLocation = watcher.appKitPoint(fromCGEventPoint: location)
                         let chooserHotZone = watcher._chooserFrameUnsafe.insetBy(
                             dx: -Constants.UI.menuDismissalMargin,
                             dy: -Constants.UI.menuDismissalMargin
                         )
 
-                        if chooserHotZone.contains(location) {
+                        if chooserHotZone.contains(appKitLocation) {
+                            // The cursor moved off the dock onto the chooser.
+                            // We must clear the "over dock icon" flag here
+                            // because we are about to early-return and skip
+                            // processMouseMovement, which is normally where
+                            // this flag gets reset. If we leave it `true`,
+                            // the leftMouseDown/Up consume-guard further
+                            // down (`return nil` when over dock icon) will
+                            // silently drop clicks on chooser entries — the
+                            // entry hover works but clicks do nothing.
+                            watcher._isOverDockIconUnsafe = false
+
+                            // ~60 Hz throttle for the hover path — the work
+                            // itself is trivial (frame contains-check on a
+                            // handful of buttons + a CALayer mutation), so
+                            // a higher cadence than the dock-hit-test path
+                            // is safe and gives a smoother feel.
+                            if now - watcher._lastChooserHoverTickUnsafe >= 0.016 {
+                                watcher._lastChooserHoverTickUnsafe = now
+                                Task { @MainActor in
+                                    watcher.windowChooser?.chooserView?.syncHoverToCurrentMouseLocation()
+                                }
+                            }
                             return Unmanaged.passUnretained(event)
                         }
                     }
-                    
+
+                    // Dock-hit-test path: heavier work, throttle to 20 Hz.
+                    if now - watcher._lastMouseEventTimeUnsafe < 0.05 {
+                        return Unmanaged.passUnretained(event)
+                    }
+                    watcher._lastMouseEventTimeUnsafe = now
+
                     if !watcher._isChooserVisibleUnsafe,
                        !DockService.shared.isPointNearDockArea(location) {
                         return Unmanaged.passUnretained(event)
@@ -684,17 +740,27 @@ class DockWatcher: NSObject, NSMenuDelegate {
                     return Unmanaged.passUnretained(event)
                 }
                 
-                // For non-mouse-moved events (clicks, tap re-enable), always dispatch
+                // Re-enable the tap SYNCHRONOUSLY in the callback before
+                // anything else. macOS disables the tap on timeout / secure
+                // input — once disabled NO further mouse events flow through
+                // until we call tapEnable again. Doing this inside a
+                // dispatched Task means the runloop has to wake up first,
+                // which after a long idle can take hundreds of ms. During
+                // that window the user's mouse moves are dropped on the
+                // floor → highlight in the chooser appears to lag by ~1 s
+                // when returning to the icon after a screen-sleep / idle.
+                if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+                    if let tap = watcher.eventTap {
+                        CGEvent.tapEnable(tap: tap, enable: true)
+                    }
+                    watcher._lastEventTimeUnsafe = ProcessInfo.processInfo.systemUptime
+                    Logger.perf("eventtap", "re-enabled type=\(type == .tapDisabledByTimeout ? "timeout" : "userInput")")
+                    return Unmanaged.passUnretained(event)
+                }
+
+                // For non-mouse-moved events (clicks), always dispatch
                 Task { @MainActor in
                     watcher.updateLastEventTime()
-                    
-                    if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-                        if let tap = watcher.eventTap {
-                            CGEvent.tapEnable(tap: tap, enable: true)
-                        }
-                        watcher.updateLastEventTime()
-                        return
-                    }
                     
                     autoreleasepool {
                         switch type {
@@ -1018,13 +1084,25 @@ class DockWatcher: NSObject, NSMenuDelegate {
             if shouldReloadWindows {
                 chooserRequestSequence &+= 1
                 let requestSequence = chooserRequestSequence
-                Task {
-                    // Get windows in background
-                    let windows = await Task.detached(priority: .userInitiated) { 
+                // Cancel any in-flight accessibility query whose result we
+                // are about to discard anyway. During a fast swipe across
+                // several dock icons this stops the AX daemon from queueing
+                // up multiple full window enumerations in a row.
+                inflightChooserTask?.cancel()
+                inflightChooserTask = Task { [weak self] in
+                    let detached = Task.detached(priority: .userInitiated) {
                         await AccessibilityService.shared.listApplicationWindows(for: app)
-                    }.value
+                    }
+                    let windows: [WindowInfo]
+                    if Task.isCancelled {
+                        detached.cancel()
+                        return
+                    }
+                    windows = await detached.value
+                    if Task.isCancelled { return }
 
                     await MainActor.run {
+                        guard let self else { return }
                         guard self.chooserRequestSequence == requestSequence else {
                             Logger.perf(
                                 "chooser",
@@ -1055,6 +1133,9 @@ class DockWatcher: NSObject, NSMenuDelegate {
                         self.lastProcessedTime = currentTime
                         self.lastHoveredApp = app
                         self.currentApp = app
+                        if self.chooserRequestSequence == requestSequence {
+                            self.inflightChooserTask = nil
+                        }
                     }
                 }
             } /*else if app != lastHoveredApp {
@@ -1110,7 +1191,12 @@ class DockWatcher: NSObject, NSMenuDelegate {
         
         cleanupTimer?.invalidate()
         cleanupTimer = nil
-        
+
+        // Drop any in-flight chooser request so its eventual MainActor.run
+        // continuation cannot resurrect a chooser we just dismissed.
+        inflightChooserTask?.cancel()
+        inflightChooserTask = nil
+
         windowChooser?.chooserView?.thumbnailView?.hideThumbnail(removePanel: true)
         windowChooser?.chooserView?.thumbnailView?.cleanup()
         windowChooser?.close()
@@ -1589,6 +1675,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
     }
     
     private func startHistoryCheck() {
+        refreshPrimaryScreenHeight()
         NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
             object: nil,
@@ -1596,11 +1683,32 @@ class DockWatcher: NSObject, NSMenuDelegate {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self = self else { return }
+                self.refreshPrimaryScreenHeight()
                 if NSScreen.displaysHaveSeparateSpaces {
                     self.handleMultipleDisplays()
                 }
             }
         }
+    }
+
+    /// Recompute the cached primary-screen height. The "primary" display
+    /// in AppKit terms is the one whose frame origin is (0,0). That screen
+    /// determines the flip we need to translate CG-event coordinates
+    /// (top-left origin) to AppKit screen coordinates (bottom-left origin).
+    @MainActor private func refreshPrimaryScreenHeight() {
+        let primary = NSScreen.screens.first(where: { $0.frame.origin == .zero })
+            ?? NSScreen.main
+            ?? NSScreen.screens.first
+        _primaryScreenHeightUnsafe = primary?.frame.height ?? 0
+    }
+
+    /// Convert a CG (Quartz) screen point — as produced by `CGEvent.location`
+    /// — into AppKit screen coordinates so it can be compared against
+    /// `NSWindow.frame` rectangles. Safe to call from the event-tap thread:
+    /// only reads the cached primary-screen height.
+    nonisolated func appKitPoint(fromCGEventPoint cgPoint: CGPoint) -> CGPoint {
+        let primaryHeight = _primaryScreenHeightUnsafe
+        return CGPoint(x: cgPoint.x, y: primaryHeight - cgPoint.y)
     }
     
     /// Called from processMouseMovement to handle history menu triggering event-driven

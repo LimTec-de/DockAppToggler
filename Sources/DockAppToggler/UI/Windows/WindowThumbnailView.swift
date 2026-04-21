@@ -334,46 +334,24 @@ class WindowThumbnailView {
         view.layer?.backgroundColor = previewPanelBackgroundColor
         view.layer?.cornerRadius = 12
         view.layer?.masksToBounds = false
-        // Symmetric "halo" shadow around the thumbnail container. Offset is
-        // zero so the rim reads on every side of the panel, opacity is bumped
-        // to compensate for the partly-transparent panel background that would
-        // otherwise wash the shadow out, and the radius is kept tight enough
-        // that it stays a recognizable rim instead of a soft glow.
+        // Symmetric halo shadow drawn by CoreAnimation. We deliberately do
+        // NOT set a shadowPath nor a frameDidChange observer:
+        //   - shadowPath would go stale when the container resizes for a
+        //     different thumbnail aspect ratio.
+        //   - The matching observer would leak one closure into
+        //     NotificationCenter for every freshly-created fallback container,
+        //     which is exactly the kind of slow accumulator that made the
+        //     menu feel "slower over time".
+        // Letting CoreAnimation derive the shadow from the layer's alpha
+        // mask is slightly more expensive per redraw, but the panel only
+        // redraws on show / resize, so the steady-state cost is negligible.
         view.layer?.shadowColor = NSColor.black.cgColor
         view.layer?.shadowOpacity = 0.85
         view.layer?.shadowRadius = 18
         view.layer?.shadowOffset = .zero
-        // Pre-compute the shadow path from the rounded rect. Without this,
-        // CoreAnimation has to derive the shadow from the layer's alpha mask
-        // every redraw, which is both slower AND noticeably softer because the
-        // 0.78-alpha background bleeds into the shadow contour. The path is
-        // refreshed below on bounds changes via the frame observer.
-        view.layer?.shadowPath = CGPath(
-            roundedRect: view.bounds,
-            cornerWidth: 12,
-            cornerHeight: 12,
-            transform: nil
-        )
         view.layer?.borderWidth = 0
         view.layer?.borderColor = nil
         view.identifier = Self.previewContainerStyledIdentifier
-
-        // Keep the shadowPath in sync when the container resizes for a
-        // different thumbnail aspect ratio (see updateSharedWindowContent).
-        view.postsFrameChangedNotifications = true
-        NotificationCenter.default.addObserver(
-            forName: NSView.frameDidChangeNotification,
-            object: view,
-            queue: .main
-        ) { [weak view] _ in
-            guard let view, let layer = view.layer else { return }
-            layer.shadowPath = CGPath(
-                roundedRect: view.bounds,
-                cornerWidth: 12,
-                cornerHeight: 12,
-                transform: nil
-            )
-        }
     }
     
     init(targetApp: NSRunningApplication, dockIconCenter: NSPoint, options: [WindowInfo], windowChooser: WindowChooserController?) {
@@ -953,8 +931,6 @@ class WindowThumbnailView {
                         width: thumbnailSize.width - (contentMargin * 2),
                         height: titleHeight
                     )
-                }, completionHandler: { [weak panel] in
-                    panel?.invalidateShadow()
                 })
             }
         } else {
@@ -972,6 +948,10 @@ class WindowThumbnailView {
             // Create views
             containerView = NSView(frame: NSRect(origin: .zero, size: panelSize))
             containerView.wantsLayer = true
+            // Required: AppKit's window-content layer can come up with
+            // masksToBounds = true and would then clip the contentContainer's
+            // CALayer shadow back to the visible rect, leaving no halo.
+            containerView.layer?.masksToBounds = false
             
             contentContainer = NSView(frame: NSRect(
                 x: shadowPadding,
@@ -1286,6 +1266,7 @@ class WindowThumbnailView {
         // Create views
         let containerView = NSView(frame: NSRect(origin: .zero, size: panelSize))
         containerView.wantsLayer = true
+        containerView.layer?.masksToBounds = false  // see getOrCreateSharedWindow
         
         let contentContainer = NSView(frame: NSRect(
             x: shadowPadding,
@@ -1766,13 +1747,14 @@ class WindowThumbnailView {
     private func configurePanel(_ panel: NSPanel) {
         panel.backgroundColor = .clear
         panel.isOpaque = false
-        // Let AppKit render the system drop shadow around the visible (alpha)
-        // pixels of the window. With our semi-transparent contentContainer the
-        // CALayer-based shadow alone gets visually swallowed by the panel's own
-        // translucency, so we rely on the OS-level shadow to give the panel a
-        // clear separation from the desktop. The CALayer shadow on the
-        // contentContainer is still set (see applyPreviewContainerStyle) and
-        // adds extra depth on top of the system shadow.
+        // System shadow on: AppKit renders the macOS-standard drop shadow
+        // around the visible alpha mask of the panel content. The CALayer
+        // shadow on the contentContainer alone gets visually swallowed by
+        // the panel's own translucency, so we let the OS do the heavy
+        // lifting here. Without invalidateShadow() calls in the hot path
+        // the WindowServer recompute only fires when the window genuinely
+        // appears or resizes — not per move — so the long-session cost is
+        // bounded.
         panel.hasShadow = true
         panel.level = .popUpMenu + 9  // Changed from 15 to 9 as requested
         panel.isMovable = false
@@ -1974,6 +1956,10 @@ class WindowThumbnailView {
         // Create container view for shadow
         let containerView = NSView(frame: NSRect(origin: .zero, size: panelSize))
         containerView.wantsLayer = true
+        // The window-content layer must not clip — see comment in the
+        // non-shared (legacy) path. Without this the contentContainer's
+        // CALayer shadow is invisible.
+        containerView.layer?.masksToBounds = false
         
         let contentContainer = NSView(frame: NSRect(
             x: shadowPadding,
@@ -2112,11 +2098,6 @@ class WindowThumbnailView {
             panel.setFrame(frame, display: true)
             panel.orderFront(nil)
             panel.makeKey()
-            // Force AppKit to recompute the system shadow for the current
-            // alpha mask. Without this, the shadow can lag a frame behind a
-            // content swap (e.g. switching between thumbnails of different
-            // aspect ratios) and looks like there is no shadow at all.
-            panel.invalidateShadow()
             WindowThumbnailView.activePreviewWindows.insert(panel)
         } else {
             let deltaX = abs(panel.frame.origin.x - frame.origin.x)
