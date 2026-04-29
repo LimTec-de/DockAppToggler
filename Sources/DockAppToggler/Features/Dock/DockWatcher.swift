@@ -916,9 +916,30 @@ class DockWatcher: NSObject, NSMenuDelegate {
             forName: NSNotification.Name("WindowChooserDidClose"),
             object: nil,
             queue: .main
-        ) { [weak self] _ in
+        ) { [weak self] notification in
+            let closedController = notification.object as? WindowChooserController
             Task { @MainActor [weak self] in
-                self?.lastHoveredApp = nil
+                guard let self else { return }
+                self.lastHoveredApp = nil
+
+                // If the chooser we are tracking just closed (e.g. the user
+                // clicked a window entry), drop the stale reference and the
+                // per-app window cache. Otherwise the next hover back onto
+                // the same dock icon is short-circuited by the "same app,
+                // windows still cached" fast-path in processMouseMovement
+                // and the menu does not reappear until the mouse has left
+                // the dock and returned.
+                let isTrackedChooser = closedController != nil
+                    && closedController === self.windowChooser
+                let hasStaleReference = self.windowChooser != nil
+                    && self.windowChooser?.window == nil
+
+                if isTrackedChooser || hasStaleReference || self.windowChooser == nil {
+                    self.windowChooser = nil
+                    self.lastProcessedApp = nil
+                    self.lastProcessedWindows = nil
+                    self.lastProcessedTime = 0
+                }
             }
         }
         
