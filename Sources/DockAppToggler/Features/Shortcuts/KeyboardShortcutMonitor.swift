@@ -2,6 +2,121 @@ import AppKit
 import Carbon
 import ApplicationServices
 
+struct KeyboardShortcut: Equatable {
+    static let keyCodeDefaultsKey = "SwitchingShortcutKeyCode"
+    static let modifiersDefaultsKey = "SwitchingShortcutModifiers"
+    static let significantModifiers: NSEvent.ModifierFlags = [.command, .option, .control, .shift]
+    static let defaultSwitchingShortcut = KeyboardShortcut(
+        keyCode: UInt16(kVK_Tab),
+        modifiers: .option
+    )
+
+    let keyCode: UInt16
+    let modifiers: NSEvent.ModifierFlags
+
+    static var savedSwitchingShortcut: KeyboardShortcut {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: keyCodeDefaultsKey) != nil,
+              defaults.object(forKey: modifiersDefaultsKey) != nil else {
+            return defaultSwitchingShortcut
+        }
+
+        let keyCode = UInt16(defaults.integer(forKey: keyCodeDefaultsKey))
+        let rawModifiers = UInt(defaults.integer(forKey: modifiersDefaultsKey))
+        let modifiers = NSEvent.ModifierFlags(rawValue: rawModifiers).intersection(significantModifiers)
+
+        guard !modifiers.isEmpty else {
+            return defaultSwitchingShortcut
+        }
+
+        return KeyboardShortcut(keyCode: keyCode, modifiers: modifiers)
+    }
+
+    static func saveSwitchingShortcut(_ shortcut: KeyboardShortcut) {
+        UserDefaults.standard.set(Int(shortcut.keyCode), forKey: keyCodeDefaultsKey)
+        UserDefaults.standard.set(Int(shortcut.modifiers.rawValue), forKey: modifiersDefaultsKey)
+        NotificationCenter.default.post(name: .switchingShortcutChanged, object: nil)
+    }
+
+    static func from(event: NSEvent) -> KeyboardShortcut? {
+        let modifiers = event.modifierFlags.intersection(significantModifiers)
+        guard !modifiers.isEmpty else { return nil }
+        return KeyboardShortcut(keyCode: event.keyCode, modifiers: modifiers)
+    }
+
+    func matches(_ event: NSEvent) -> Bool {
+        guard event.keyCode == keyCode else { return false }
+        return modifiersPressed(in: event.modifierFlags)
+    }
+
+    func modifiersPressed(in flags: NSEvent.ModifierFlags) -> Bool {
+        let pressed = flags.intersection(Self.significantModifiers)
+        return (pressed.rawValue & modifiers.rawValue) == modifiers.rawValue
+    }
+
+    var displayString: String {
+        var parts: [String] = []
+        if modifiers.contains(.control) { parts.append("⌃") }
+        if modifiers.contains(.option) { parts.append("⌥") }
+        if modifiers.contains(.shift) { parts.append("⇧") }
+        if modifiers.contains(.command) { parts.append("⌘") }
+        parts.append(Self.keyName(for: keyCode))
+        return parts.joined()
+    }
+
+    private static func keyName(for keyCode: UInt16) -> String {
+        switch Int(keyCode) {
+        case kVK_Tab: return "Tab"
+        case kVK_Space: return "Space"
+        case kVK_Return: return "Return"
+        case kVK_Escape: return "Esc"
+        case kVK_Delete: return "Delete"
+        case kVK_ForwardDelete: return "Forward Delete"
+        case kVK_LeftArrow: return "Left"
+        case kVK_RightArrow: return "Right"
+        case kVK_UpArrow: return "Up"
+        case kVK_DownArrow: return "Down"
+        case kVK_ANSI_A: return "A"
+        case kVK_ANSI_B: return "B"
+        case kVK_ANSI_C: return "C"
+        case kVK_ANSI_D: return "D"
+        case kVK_ANSI_E: return "E"
+        case kVK_ANSI_F: return "F"
+        case kVK_ANSI_G: return "G"
+        case kVK_ANSI_H: return "H"
+        case kVK_ANSI_I: return "I"
+        case kVK_ANSI_J: return "J"
+        case kVK_ANSI_K: return "K"
+        case kVK_ANSI_L: return "L"
+        case kVK_ANSI_M: return "M"
+        case kVK_ANSI_N: return "N"
+        case kVK_ANSI_O: return "O"
+        case kVK_ANSI_P: return "P"
+        case kVK_ANSI_Q: return "Q"
+        case kVK_ANSI_R: return "R"
+        case kVK_ANSI_S: return "S"
+        case kVK_ANSI_T: return "T"
+        case kVK_ANSI_U: return "U"
+        case kVK_ANSI_V: return "V"
+        case kVK_ANSI_W: return "W"
+        case kVK_ANSI_X: return "X"
+        case kVK_ANSI_Y: return "Y"
+        case kVK_ANSI_Z: return "Z"
+        case kVK_ANSI_0: return "0"
+        case kVK_ANSI_1: return "1"
+        case kVK_ANSI_2: return "2"
+        case kVK_ANSI_3: return "3"
+        case kVK_ANSI_4: return "4"
+        case kVK_ANSI_5: return "5"
+        case kVK_ANSI_6: return "6"
+        case kVK_ANSI_7: return "7"
+        case kVK_ANSI_8: return "8"
+        case kVK_ANSI_9: return "9"
+        default: return "Key \(keyCode)"
+        }
+    }
+}
+
 @MainActor
 class KeyboardShortcutMonitor {
     static let shared = KeyboardShortcutMonitor()
@@ -18,6 +133,7 @@ class KeyboardShortcutMonitor {
     private var tabKeyUpMonitor: Any?  // Add monitor for key up events
     private var isOptionPressed = false
     private var isTabPressed = false   // Track tab key state
+    private var switchingShortcut = KeyboardShortcut.savedSwitchingShortcut
     private var windowChooserController: WindowChooserController?
     private var currentWindowIndex = 0
     private var backdropWindow: NSWindow?
@@ -33,7 +149,7 @@ class KeyboardShortcutMonitor {
     }
     
     private var isOptionTabEnabled: Bool {
-        UserDefaults.standard.bool(forKey: "OptionTabEnabled", defaultValue: true)
+        UserDefaults.standard.bool(forKey: "OptionTabEnabled", defaultValue: false)
     }
 
     private init() {
@@ -47,6 +163,18 @@ class KeyboardShortcutMonitor {
             name: .optionTabStateChanged,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleSwitchingShortcutChanged),
+            name: .switchingShortcutChanged,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handlePermissionsChanged),
+            name: .appPermissionsChanged,
+            object: nil
+        )
     }
     
     private func setupMonitors() {
@@ -55,19 +183,21 @@ class KeyboardShortcutMonitor {
         
         // Monitor tab key press globally
         tabKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
-            if event.keyCode == 48 && self?.isOptionPressed == true {
+            guard let self else { return }
+            if self.switchingShortcut.matches(event), self.isOptionPressed {
                 // print("🔍 Consuming global tab key event")
-                self?.handleTabKey(event)
+                self.handleTabKey(event)
             }
         }
         
         // Monitor tab key press locally to consume events
         localEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] event in
             // If option is pressed and it's a tab key, consume all tab events
-            if event.keyCode == 48 && self?.isOptionPressed == true {
+            guard let self else { return event }
+            if event.keyCode == self.switchingShortcut.keyCode && self.isOptionPressed {
                 // print("🔍 Consuming local tab key event")
                 if event.type == .keyDown {
-                    self?.handleTabKey(event)
+                    self.handleTabKey(event)
                 }
                 return nil  // Consume both keyDown and keyUp events
             }
@@ -76,9 +206,10 @@ class KeyboardShortcutMonitor {
         
         // Monitor tab key release
         tabKeyUpMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyUp]) { [weak self] event in
-            if event.keyCode == 48 && self?.isOptionPressed == true {
+            guard let self else { return }
+            if event.keyCode == self.switchingShortcut.keyCode && self.isOptionPressed {
                 // print("🔍 Consuming global tab key up event")
-                self?.handleTabKeyUp(event)
+                self.handleTabKeyUp(event)
             }
         }
     }
@@ -86,16 +217,20 @@ class KeyboardShortcutMonitor {
     private func setupOptionKeyMonitors() {
         // print("🔍 Setting up option key monitors")
         // Monitor option key press and release globally (when app is not active)
-        optionKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.flagsChanged]) { [weak self] event in
-            // print("🔍 Global flag changed event received")
-            self?.handleOptionKey(event)
+        if optionKeyMonitor == nil {
+            optionKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.flagsChanged]) { [weak self] event in
+                // print("🔍 Global flag changed event received")
+                self?.handleOptionKey(event)
+            }
         }
         
         // Monitor option key press and release locally (when app is active)
-        optionKeyLocalMonitor = NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged]) { [weak self] event in
-            // print("🔍 Local flag changed event received")
-            self?.handleOptionKey(event)
-            return event
+        if optionKeyLocalMonitor == nil {
+            optionKeyLocalMonitor = NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged]) { [weak self] event in
+                // print("🔍 Local flag changed event received")
+                self?.handleOptionKey(event)
+                return event
+            }
         }
     }
     
@@ -104,7 +239,7 @@ class KeyboardShortcutMonitor {
         guard isOptionTabEnabled else { return }
         
         let wasPressed = isOptionPressed
-        let isNowPressed = event.modifierFlags.contains(.option)
+        let isNowPressed = switchingShortcut.modifiersPressed(in: event.modifierFlags)
         
         isOptionPressed = isNowPressed
         
@@ -133,7 +268,7 @@ class KeyboardShortcutMonitor {
         // Check if feature is enabled before processing tab key
         guard isOptionTabEnabled,
               isOptionPressed,
-              event.keyCode == 48 // Tab key code
+              event.keyCode == switchingShortcut.keyCode
         else {
             return
         }
@@ -157,7 +292,7 @@ class KeyboardShortcutMonitor {
     }
     
     private func handleTabKeyUp(_ event: NSEvent) {
-        guard event.keyCode == 48 else { return } // Tab key code
+        guard event.keyCode == switchingShortcut.keyCode else { return }
         isTabPressed = false
     }
     
@@ -178,11 +313,12 @@ class KeyboardShortcutMonitor {
         // Configure backdrop window with minimal event handling
         let contentView = KeyCaptureView()
         contentView.keyDownHandler = { [weak self] event in
-            if event.keyCode == 48 { // Tab key
+            guard let self else { return }
+            if event.keyCode == self.switchingShortcut.keyCode {
                 if event.modifierFlags.contains(.shift) {
-                    self?.windowChooserController?.chooserView?.selectPreviousItem()
+                    self.windowChooserController?.chooserView?.selectPreviousItem()
                 } else {
-                    self?.windowChooserController?.chooserView?.selectNextItem()
+                    self.windowChooserController?.chooserView?.selectNextItem()
                 }
             }
         }
@@ -247,6 +383,10 @@ class KeyboardShortcutMonitor {
             NSEvent.removeMonitor(monitor)
             optionKeyLocalMonitor = nil
         }
+        if let monitor = optionKeyMonitor {
+            NSEvent.removeMonitor(monitor)
+            optionKeyMonitor = nil
+        }
         if let monitor = localEventMonitor {
             NSEvent.removeMonitor(monitor)
             localEventMonitor = nil
@@ -284,8 +424,13 @@ class KeyboardShortcutMonitor {
     }
     
     private func setupEventTap() {
+        // Don't raise the raw macOS input-monitoring prompt on launch. If the permission
+        // isn't granted yet, skip the tap; the permission wizard guides the user, and
+        // handlePermissionsChanged() re-runs this once it's granted.
+        guard CGPreflightListenEventAccess() else { return }
+
         // Create event tap to intercept key events
-        let eventMask = (1 << CGEventType.keyDown.rawValue) | 
+        let eventMask = (1 << CGEventType.keyDown.rawValue) |
                         (1 << CGEventType.keyUp.rawValue) |
                         (1 << CGEventType.flagsChanged.rawValue)  // Add flags changed to catch modifier keys
         
@@ -338,7 +483,7 @@ class KeyboardShortcutMonitor {
         if type == .flagsChanged {
             if let nsEvent = NSEvent(cgEvent: event) {
                 let wasPressed = isOptionPressed
-                isOptionPressed = nsEvent.modifierFlags.contains(.option)
+                isOptionPressed = switchingShortcut.modifiersPressed(in: nsEvent.modifierFlags)
                 
                 // Handle option key release
                 if wasPressed && !isOptionPressed {
@@ -357,7 +502,7 @@ class KeyboardShortcutMonitor {
         
         // Check if it's a tab key event
         if let nsEvent = NSEvent(cgEvent: event),
-           nsEvent.keyCode == 48 {  // Tab key
+           nsEvent.keyCode == switchingShortcut.keyCode {
             
             // If option is pressed, we need to handle tab key events
             if isOptionPressed {
@@ -435,14 +580,28 @@ class KeyboardShortcutMonitor {
     @objc private func handleOptionTabSettingChanged(_ notification: Notification) {
         if let enabled = notification.userInfo?["enabled"] as? Bool {
             if enabled {
-                // Restart the app when the feature is enabled
-                StatusBarController.performRestart()
+                if eventTap == nil {
+                    setupEventTap()
+                }
             } else {
                 // Clean up when disabled
                 hideWindowChooser()
                 isOptionPressed = false
                 isTabPressed = false
             }
+        }
+    }
+
+    @objc private func handleSwitchingShortcutChanged() {
+        switchingShortcut = KeyboardShortcut.savedSwitchingShortcut
+        hideWindowChooser()
+        isOptionPressed = false
+        isTabPressed = false
+    }
+
+    @objc private func handlePermissionsChanged() {
+        if eventTap == nil {
+            setupEventTap()
         }
     }
 }
@@ -456,3 +615,7 @@ private class KeyCaptureView: NSView {
         keyDownHandler?(event)
     }
 } 
+
+extension Notification.Name {
+    static let switchingShortcutChanged = Notification.Name("switchingShortcutChanged")
+}

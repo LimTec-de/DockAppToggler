@@ -9,58 +9,16 @@ extension Notification.Name {
 @MainActor
 class TooltipWindow {
     private var window: NSWindow?
-    
-    
+    private var containerView: NSView?
+    private var contentView: NSVisualEffectView?
+    private var label: NSTextField?
+
     func show(text: String, at location: NSPoint) {
-        // Hide existing tooltip if any
-        hide()
-        
-        // Create tooltip window
-        let tooltip = NSWindow(
-            contentRect: .zero,
-            styleMask: [.borderless],
-            backing: .buffered,
-            defer: false
-        )
-        
-        // Configure tooltip window
-        tooltip.level = .floating
-        tooltip.isOpaque = false
-        tooltip.hasShadow = true
-        tooltip.isMovableByWindowBackground = false
-        
-        // Create content view with rounded corners and proper system appearance
-        let contentView = NSVisualEffectView()
-        contentView.wantsLayer = true
-        contentView.material = .popover
-        contentView.blendingMode = .withinWindow
-        contentView.state = .active
-        
-        // Create a container view to handle the rounded corners
-        let containerView = NSView()
-        containerView.wantsLayer = true
-        containerView.layer?.cornerCurve = .continuous
-        containerView.layer?.cornerRadius = 4
-        containerView.layer?.masksToBounds = true
-        
-        // Set up view hierarchy
-        containerView.addSubview(contentView)
-        tooltip.contentView = containerView
-        tooltip.backgroundColor = .clear
-        
-        // Create label with system font
-        let label = NSTextField(frame: .zero)
+        let tooltip = window ?? makeWindow()
+        guard let containerView, let contentView, let label else { return }
+        tooltip.title = text
         label.stringValue = text
-        label.isBezeled = false
-        label.isEditable = false
-        label.drawsBackground = false
-        label.textColor = .labelColor // Use system label color for automatic dark mode support
-        label.font = .systemFont(ofSize: NSFont.smallSystemFontSize + 1.5) // Slightly larger than system small font
-        label.alignment = .center
-        label.cell?.truncatesLastVisibleLine = true
-        label.maximumNumberOfLines = 1
-        
-        // Calculate size and set frames
+
         let textSize = (text as NSString).size(withAttributes: [
             .font: label.font as Any
         ])
@@ -74,18 +32,22 @@ class TooltipWindow {
         let windowX = location.x - windowWidth / 2
         
         // Calculate Y position relative to menu bar
-        guard let screen = NSScreen.main else { return }
+        guard let screen = NSScreen.screen(containing: location) ?? NSScreen.main else { return }
         let menuBarY = screen.frame.maxY
         let tooltipGap: CGFloat = 4
-        let menuBarHeight: CGFloat = 24
+        let menuBarHeight = max(NSStatusBar.system.thickness, 30)
         let windowY = menuBarY - menuBarHeight - windowHeight - tooltipGap
+        let clampedWindowX = min(
+            max(windowX, screen.visibleFrame.minX + 4),
+            screen.visibleFrame.maxX - windowWidth - 4
+        )
         
         // Set frames
         containerView.frame = NSRect(x: 0, y: 0, width: windowWidth, height: windowHeight)
         contentView.frame = containerView.bounds
         
         // Then set window frame
-        tooltip.setFrame(NSRect(x: windowX, y: windowY,
+        tooltip.setFrame(NSRect(x: clampedWindowX, y: windowY,
                               width: windowWidth, height: windowHeight),
                         display: false)
         
@@ -94,15 +56,61 @@ class TooltipWindow {
                            y: verticalPadding,
                            width: textSize.width + textBuffer,
                            height: textSize.height)
-        
+
+        tooltip.orderFrontRegardless()
+    }
+
+    private func makeWindow() -> NSWindow {
+        let tooltip = NSWindow(
+            contentRect: .zero,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+
+        tooltip.level = .floating
+        tooltip.isOpaque = false
+        tooltip.hasShadow = true
+        tooltip.isMovableByWindowBackground = false
+        tooltip.ignoresMouseEvents = true
+
+        let contentView = NSVisualEffectView()
+        contentView.wantsLayer = true
+        contentView.material = .popover
+        contentView.blendingMode = .withinWindow
+        contentView.state = .active
+
+        let containerView = NSView()
+        containerView.wantsLayer = true
+        containerView.layer?.cornerCurve = .continuous
+        containerView.layer?.cornerRadius = 4
+        containerView.layer?.masksToBounds = true
+
+        let label = NSTextField(frame: .zero)
+        label.isBezeled = false
+        label.isEditable = false
+        label.drawsBackground = false
+        label.textColor = .labelColor
+        label.font = .systemFont(ofSize: NSFont.smallSystemFontSize + 1.5)
+        label.alignment = .center
+        label.cell?.truncatesLastVisibleLine = true
+        label.maximumNumberOfLines = 1
+
         contentView.addSubview(label)
-        tooltip.orderFront(nil)
+        containerView.addSubview(contentView)
+        tooltip.contentView = containerView
+        tooltip.backgroundColor = .clear
+
         window = tooltip
+        self.containerView = containerView
+        self.contentView = contentView
+        self.label = label
+        return tooltip
     }
     
     func hide() {
-        window?.orderOut(nil)
-        window = nil
+        guard let window, window.isVisible else { return }
+        window.orderOut(nil)
     }
 }
 
@@ -110,32 +118,47 @@ class TooltipWindow {
 class StatusBarWatcher {
     private var lastMouseMoveTime: TimeInterval = 0
     private var eventMonitor: Any?
-    private var trackingTimer: Timer?
+    private var localEventMonitor: Any?
     private var lastHoveredPid: pid_t = 0
-    private var lastHoveredElement: AXUIElement?
+    private var lastHoveredFrame: CGRect = .null
     private let tooltipWindow = TooltipWindow()
     private var isEnabled: Bool
     private var isSuspendedForMenu: Bool = false
     private var isTrackingMenuBarArea: Bool = false
+    private var isTooltipVisible = false
+    private var lastTooltipTitle = ""
+    private static let mouseMoveThrottleInterval: TimeInterval = 0.003
+    private static let missRetryInterval: TimeInterval = 0.04
+    private static let tooltipPermissionPromptKey = "DidPromptForTrayTooltipPermissionsV1"
+    private var lastIconMissTime: TimeInterval = 0
     
     init() {
-        // Initialize with saved preference, default to true
+        // Initialize with saved preference, default to OFF (opt-in).
         if UserDefaults.standard.object(forKey: "StatusBarTooltipsEnabled") == nil {
-            UserDefaults.standard.set(true, forKey: "StatusBarTooltipsEnabled")
-            self.isEnabled = true
+            UserDefaults.standard.set(false, forKey: "StatusBarTooltipsEnabled")
+            self.isEnabled = false
         } else {
             self.isEnabled = UserDefaults.standard.bool(forKey: "StatusBarTooltipsEnabled")
-        }
-        
-        if !checkAccessibilityPermissions() {
-            print("[StatusBarWatcher] Please grant accessibility permissions in System Settings > Privacy & Security > Accessibility")
-            return
         }
         
         setupNotificationObserver()
         if isEnabled {
             startWatching()
+            requestMissingTooltipPermissionsIfNeeded()
         }
+    }
+
+    private func startWatchingIfEnabled() {
+        guard isEnabled else {
+            cleanupOnMain()
+            tooltipWindow.hide()
+            isTooltipVisible = false
+            lastTooltipTitle = ""
+            return
+        }
+
+        startWatching()
+        requestMissingTooltipPermissionsIfNeeded()
     }
     
     private func setupNotificationObserver() {
@@ -151,16 +174,17 @@ class StatusBarWatcher {
             name: .statusBarMenuStateChanged,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handlePermissionsChanged),
+            name: .appPermissionsChanged,
+            object: nil
+        )
     }
     
     @objc private func handleTooltipsStateChanged() {
         isEnabled = UserDefaults.standard.bool(forKey: "StatusBarTooltipsEnabled")
-        if isEnabled {
-            startWatching()
-        } else {
-            cleanupOnMain()
-            tooltipWindow.hide()
-        }
+        startWatchingIfEnabled()
     }
 
     @objc private func handleStatusBarMenuStateChanged(_ notification: Notification) {
@@ -169,6 +193,8 @@ class StatusBarWatcher {
 
         if isOpen {
             tooltipWindow.hide()
+            isTooltipVisible = false
+            lastTooltipTitle = ""
             // Must run synchronously: if we deferred this onto a Task, the
             // `menuDidClose` handler that calls startWatching() could run
             // before the cleanup, see a still-installed monitor, bail out via
@@ -180,61 +206,84 @@ class StatusBarWatcher {
             startWatching()
         }
     }
+
+    @objc private func handlePermissionsChanged() {
+        startWatchingIfEnabled()
+    }
     
     private nonisolated func checkAccessibilityPermissions() -> Bool {
-        let promptKey = "AXTrustedCheckOptionPrompt"
-        let options = [promptKey: true] as CFDictionary
-        return AXIsProcessTrustedWithOptions(options)
+        AXIsProcessTrusted()
+    }
+
+    private func requestMissingTooltipPermissionsIfNeeded() {
+        let state = AppPermissionState.current
+        guard !state.accessibilityGranted || !state.screenRecordingGranted else { return }
+
+        if !state.accessibilityGranted {
+            Logger.warning("[StatusBarWatcher] Bedienungshilfen fehlen; Tray-Tooltips nutzen AX-Fallbacks nur eingeschränkt")
+        }
+        if !state.screenRecordingGranted {
+            Logger.warning("[StatusBarWatcher] Bildschirmaufnahme fehlt; App-Namen in Tray-Tooltips können generisch sein")
+        }
+
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: Self.tooltipPermissionPromptKey) else { return }
+        defaults.set(true, forKey: Self.tooltipPermissionPromptKey)
+        AppPermissionRequester.presentTrayPopupWizard()
     }
     
     private var _lastStatusBarCheckTime: TimeInterval = 0
     
     private func startWatching() {
-        guard eventMonitor == nil else { return }
+        guard eventMonitor == nil, localEventMonitor == nil else { return }
         eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved]) { [weak self] event in
             guard let self = self, self.isEnabled, !self.isSuspendedForMenu else { return }
 
-            let mouseLocation = NSEvent.mouseLocation
-            let isInMenuBarArea = self.isMouseInMenuBarArea(mouseLocation)
+            Task { @MainActor in
+                self.handleObservedMouseMove()
+            }
+        }
+        localEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved]) { [weak self] event in
+            guard let self else { return event }
 
             Task { @MainActor in
-                if isInMenuBarArea {
-                    self.beginDetailedTrackingIfNeeded()
-                } else {
-                    self.endDetailedTracking()
-                }
+                guard self.isEnabled, !self.isSuspendedForMenu else { return }
+                self.handleObservedMouseMove()
             }
+
+            return event
+        }
+
+        handleObservedMouseMove()
+    }
+
+    private func handleObservedMouseMove() {
+        let mouseLocation = NSEvent.mouseLocation
+        guard isMouseInMenuBarArea(mouseLocation) else {
+            endDetailedTracking()
+            return
+        }
+
+        if handleMouseMove(force: !isTrackingMenuBarArea) {
+            beginDetailedTrackingIfNeeded()
+        } else {
+            endDetailedTracking()
         }
     }
 
     private func beginDetailedTrackingIfNeeded() {
         guard !isTrackingMenuBarArea else { return }
         isTrackingMenuBarArea = true
-
-        trackingTimer?.invalidate()
-        trackingTimer = Timer.scheduledTimer(withTimeInterval: 0.10, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self = self, self.isEnabled, !self.isSuspendedForMenu else { return }
-                let mouseLocation = NSEvent.mouseLocation
-                guard self.isMouseInMenuBarArea(mouseLocation) else {
-                    self.endDetailedTracking()
-                    return
-                }
-
-                self.handleMouseMove()
-            }
-        }
-
-        handleMouseMove()
     }
 
     private func endDetailedTracking() {
+        guard isTrackingMenuBarArea || lastHoveredPid != 0 || isTooltipVisible else { return }
         isTrackingMenuBarArea = false
-        trackingTimer?.invalidate()
-        trackingTimer = nil
         lastHoveredPid = 0
-        lastHoveredElement = nil
+        lastHoveredFrame = .null
         tooltipWindow.hide()
+        isTooltipVisible = false
+        lastTooltipTitle = ""
     }
     
     @MainActor private func cleanupOnMain() {
@@ -242,8 +291,10 @@ class StatusBarWatcher {
             NSEvent.removeMonitor(monitor)
             eventMonitor = nil
         }
-        trackingTimer?.invalidate()
-        trackingTimer = nil
+        if let monitor = localEventMonitor {
+            NSEvent.removeMonitor(monitor)
+            localEventMonitor = nil
+        }
         isTrackingMenuBarArea = false
     }
 
@@ -258,57 +309,9 @@ class StatusBarWatcher {
         NotificationCenter.default.removeObserver(self)
     }
     
-    // Helper function to compare AXUIElements
-    private func areElementsEqual(_ element1: AXUIElement?, _ element2: AXUIElement?) -> Bool {
-        guard let e1 = element1, let e2 = element2 else {
-            return false
-        }
-        
-        // Get PIDs for both elements
-        var pid1: pid_t = 0
-        var pid2: pid_t = 0
-        guard AXUIElementGetPid(e1, &pid1) == .success,
-              AXUIElementGetPid(e2, &pid2) == .success else {
-            return false
-        }
-        
-        // Compare PIDs and roles
-        if pid1 != pid2 {
-            return false
-        }
-        
-        // Compare roles
-        var role1Value: CFTypeRef?
-        var role2Value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(e1, kAXRoleAttribute as CFString, &role1Value) == .success,
-              AXUIElementCopyAttributeValue(e2, kAXRoleAttribute as CFString, &role2Value) == .success else {
-            return false
-        }
-        
-        let role1 = (role1Value as? String) ?? ""
-        let role2 = (role2Value as? String) ?? ""
-        
-        if role1 != role2 {
-            return false
-        }
-        
-        // Compare positions if possible
-        var pos1Value: CFTypeRef?
-        var pos2Value: CFTypeRef?
-        if AXUIElementCopyAttributeValue(e1, kAXPositionAttribute as CFString, &pos1Value) == .success,
-           AXUIElementCopyAttributeValue(e2, kAXPositionAttribute as CFString, &pos2Value) == .success,
-           let pos1 = pos1Value as? NSValue,
-           let pos2 = pos2Value as? NSValue {
-            return pos1 == pos2
-        }
-        
-        // If we can't compare positions, consider them different
-        return false
-    }
-    
     private func isMouseInMenuBarArea(_ mouseLocation: NSPoint) -> Bool {
-        guard let screen = NSScreen.main else { return false }
-        let menuBarHeight: CGFloat = 24.0
+        guard let screen = NSScreen.screen(containing: mouseLocation) ?? NSScreen.main else { return false }
+        let menuBarHeight = max(NSStatusBar.system.thickness, 30)
         let maxY = screen.frame.maxY
         let menuBarRect = NSRect(
             x: screen.frame.minX,
@@ -319,97 +322,75 @@ class StatusBarWatcher {
         return menuBarRect.contains(mouseLocation)
     }
 
-    private func handleMouseMove() {
-        guard isEnabled else { return }
+    private func handleMouseMove(force: Bool = false) -> Bool {
+        guard isEnabled else { return false }
 
         // Add throttling to prevent too frequent updates
         let currentTime = ProcessInfo.processInfo.systemUptime
-        if currentTime - lastMouseMoveTime < 0.05 { // ~60fps throttle
-            return
+        if !force && currentTime - lastMouseMoveTime < Self.mouseMoveThrottleInterval {
+            return lastHoveredPid != 0
         }
         lastMouseMoveTime = currentTime
         
         let mouseLocation = NSEvent.mouseLocation
-        guard let screen = NSScreen.main else { return }
-        
-        if isMouseInMenuBarArea(mouseLocation) {
-            let sysWideElement = AXUIElementCreateSystemWide()
-            var hoveredElement: AXUIElement?
-            
-            let axX = Float(mouseLocation.x)
-            let axY = Float(screen.frame.maxY - mouseLocation.y)
-            
-            let result = AXUIElementCopyElementAtPosition(
-                sysWideElement,
-                axX,
-                axY,
-                &hoveredElement
-            )
-            
-            if result == .success, let element = hoveredElement {
-                var roleValue: CFTypeRef?
-                AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleValue)
-                let role = (roleValue as? String) ?? ""
-                
-                var currentElement = element
-                var foundStatusItem = false
-                var iterations = 0
-                let maxIterations = 5
-                
-                if role == "AXMenuExtra" {
-                    foundStatusItem = true
-                    currentElement = element
-                } else {
-                    while iterations < maxIterations {
-                        var parentValue: CFTypeRef?
-                        let parentResult = AXUIElementCopyAttributeValue(currentElement, kAXParentAttribute as CFString, &parentValue)
-                        
-                        if parentResult == .success, CFGetTypeID(parentValue!) == AXUIElementGetTypeID(),
-                           let parent = parentValue as! AXUIElement? {
-                            var parentRoleValue: CFTypeRef?
-                            AXUIElementCopyAttributeValue(parent, kAXRoleAttribute as CFString, &parentRoleValue)
-                            let parentRole = (parentRoleValue as? String) ?? ""
-                            
-                            if parentRole == "AXMenuExtra" {
-                                foundStatusItem = true
-                                currentElement = parent
-                                break
-                            }
-                            
-                            currentElement = parent
-                        } else {
-                            break
-                        }
-                        
-                        iterations += 1
-                    }
-                }
-                
-                if foundStatusItem {
-                    var pid: pid_t = 0
-                    let pidResult = AXUIElementGetPid(currentElement, &pid)
-                    
-                    let isDifferentElement = !areElementsEqual(currentElement, lastHoveredElement)
-                    if pidResult == .success && (isDifferentElement || pid != lastHoveredPid) {
-                        lastHoveredPid = pid
-                        lastHoveredElement = currentElement
-                        if let runningApp = NSRunningApplication(processIdentifier: pid) {
-                            let appName = runningApp.localizedName ?? "Unknown"
-                            tooltipWindow.show(text: appName, at: mouseLocation)
-                        }
-                    }
-                } else {
-                    lastHoveredElement = nil
-                    tooltipWindow.hide()
-                }
-            } else {
-                lastHoveredElement = nil
-                tooltipWindow.hide()
-            }
-        } else {
-            lastHoveredPid = 0
-            lastHoveredElement = nil
-            tooltipWindow.hide()
+
+        if lastHoveredPid != 0,
+           lastHoveredFrame.insetBy(dx: -2, dy: -4).contains(mouseLocation) {
+            return true
         }
+
+        if lastHoveredPid == 0,
+           !force,
+           currentTime - lastIconMissTime < Self.missRetryInterval {
+            return false
+        }
+        
+        NotificationCenter.default.post(name: .statusBarTooltipTargetsShouldRefresh, object: nil)
+
+        guard isMouseInMenuBarArea(mouseLocation),
+              let icon = TrayIconCollector.icon(at: mouseLocation) else {
+            lastHoveredPid = 0
+            lastHoveredFrame = .null
+            lastIconMissTime = currentTime
+            tooltipWindow.hide()
+            isTooltipVisible = false
+            lastTooltipTitle = ""
+            return false
+        }
+
+        if shouldKeepCurrentTooltip(over: icon) {
+            return true
+        }
+
+        if icon.pid != lastHoveredPid || !icon.frame.equalTo(lastHoveredFrame) {
+            lastHoveredPid = icon.pid
+            lastHoveredFrame = icon.frame
+            lastIconMissTime = 0
+            tooltipWindow.show(text: icon.title, at: mouseLocation)
+            isTooltipVisible = true
+            lastTooltipTitle = icon.title
+        }
+        return true
+    }
+
+    private func shouldKeepCurrentTooltip(over icon: TrayIconInfo) -> Bool {
+        guard isTooltipVisible,
+              !lastTooltipTitle.isEmpty,
+              !isFallbackTooltipTitle(lastTooltipTitle),
+              isFallbackTooltipTitle(icon.title),
+              lastHoveredFrame.insetBy(dx: -6, dy: -6).intersects(icon.frame) else {
+            return false
+        }
+
+        return true
+    }
+
+    private func isFallbackTooltipTitle(_ title: String) -> Bool {
+        let normalized = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.isEmpty ||
+            normalized == "Tray Icon" ||
+            normalized == "Kontrollzentrum" ||
+            normalized == "Control Center" ||
+            normalized.hasPrefix("App-Name erst nach Bildschirmaufnahme-Freigabe")
     }
 } 

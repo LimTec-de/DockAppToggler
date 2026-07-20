@@ -17,28 +17,20 @@ class AccessibilityService {
     private init() {}
     
     func requestAccessibilityPermissions() -> Bool {
+        AppPermissionMonitor.shared.start()
+
         // First check if we already have permissions
         if AXIsProcessTrusted() {
             return true
         }
-        
-        // If not, and we haven't shown the dialog yet, request permissions
-        if !hasShownPermissionDialog {
-            hasShownPermissionDialog = true
-            
-            // Request permissions with prompt using static string
-            let options = [Self.trustedCheckOptionPrompt: true] as CFDictionary
-            let result = AXIsProcessTrustedWithOptions(options)
-            
-            // Start checking for permission changes if we don't have them yet
-            if !result && !isCheckingPermissions {
-                isCheckingPermissions = true
-                startPermissionCheck()
-            }
-            
-            return result
+
+        // Do NOT raise the raw macOS prompt here — the in-app permission wizard (shown
+        // from the tray toggle / settings) is the single place that guides the user.
+        // We just keep polling so the app reacts once the permission is granted.
+        if !isCheckingPermissions {
+            isCheckingPermissions = true
+            startPermissionCheck()
         }
-        
         return false
     }
     
@@ -55,30 +47,12 @@ class AccessibilityService {
                     self.permissionCheckTimer?.invalidate()
                     self.permissionCheckTimer = nil
                     self.isCheckingPermissions = false
-                    await self.offerRestart()
+                    NotificationCenter.default.post(
+                        name: .appPermissionsChanged,
+                        object: nil,
+                        userInfo: ["state": AppPermissionState.current]
+                    )
                 }
-            }
-        }
-    }
-    
-    private func offerRestart() async {
-        let alert = NSAlert()
-        alert.messageText = "Accessibility Permissions Granted"
-        alert.informativeText = "DockAppToggler needs to restart to function properly. Would you like to restart now?"
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "Restart Now")
-        alert.addButton(withTitle: "Later")
-        
-        if alert.runModal() == .alertFirstButtonReturn {
-            // Get the path to the current executable
-            if let executablePath = Bundle.main.executablePath {
-                // Launch a new instance of the app
-                let process = Process()
-                process.executableURL = URL(fileURLWithPath: executablePath)
-                try? process.run()
-                
-                // Terminate the current instance
-                NSApp.terminate(nil)
             }
         }
     }

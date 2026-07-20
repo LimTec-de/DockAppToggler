@@ -152,7 +152,7 @@ class WindowThumbnailView {
     // Update static property to use UserDefaults
     @MainActor private static var previewsEnabled: Bool {
         get {
-            UserDefaults.standard.bool(forKey: "WindowPreviewsEnabled", defaultValue: true)
+            UserDefaults.standard.bool(forKey: "WindowPreviewsEnabled", defaultValue: false)
         }
         set {
             UserDefaults.standard.set(newValue, forKey: "WindowPreviewsEnabled")
