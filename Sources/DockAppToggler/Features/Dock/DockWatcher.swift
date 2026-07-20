@@ -18,6 +18,11 @@ import Darwin
 
 @MainActor
 class DockWatcher: NSObject, NSMenuDelegate {
+    private struct RememberedFrontmostWindow {
+        let cgWindowID: CGWindowID?
+        let name: String
+    }
+
     // Private backing storage
     private var _heartbeatTimer: Timer?
     private var _lastEventTime: TimeInterval = ProcessInfo.processInfo.systemUptime
@@ -49,6 +54,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
         set {
             _windowChooser = newValue
             _isChooserVisibleUnsafe = newValue != nil
+            _chooserFrameUnsafe = newValue?.window?.frame ?? .zero
         }
     }
     
@@ -59,8 +65,16 @@ class DockWatcher: NSObject, NSMenuDelegate {
     
     // Cross-thread state for event tap callback filtering (reduces MainActor dispatch overhead)
     nonisolated(unsafe) private var _lastMouseEventTimeUnsafe: TimeInterval = 0
+    nonisolated(unsafe) private var _lastChooserHoverTickUnsafe: TimeInterval = 0
     nonisolated(unsafe) private var _lastEventTimeUnsafe: TimeInterval = 0
     nonisolated(unsafe) private var _isChooserVisibleUnsafe: Bool = false
+    /// Height of the primary AppKit screen (the one whose origin is at the
+    /// AppKit-coords origin (0,0)). Used to flip CG-event Y coordinates to
+    /// AppKit Y coordinates in the event-tap callback. Refreshed on
+    /// `NSApplication.didChangeScreenParametersNotification`.
+    nonisolated(unsafe) private var _primaryScreenHeightUnsafe: CGFloat = 0
+    nonisolated(unsafe) private var _chooserFrameUnsafe: NSRect = .zero
+    nonisolated(unsafe) private var _isOverDockIconUnsafe: Bool = false
     
     // Other properties
     nonisolated(unsafe) private var eventTap: CFMachPort?
@@ -69,12 +83,15 @@ class DockWatcher: NSObject, NSMenuDelegate {
     private var lastWindowOrder: [AXUIElement]?
     private let menuShowDelay: TimeInterval = 0.01
     @MainActor var lastClickTime: TimeInterval = 0
-    private let clickDebounceInterval: TimeInterval = 0.3
+    private let clickDebounceInterval: TimeInterval = 0.1
     private var lastTouchpadClickTime: TimeInterval = 0
-    private let touchpadClickDebounceInterval: TimeInterval = 0.5
+    private let touchpadClickDebounceInterval: TimeInterval = 0.15
     private var clickedApp: NSRunningApplication?
     private let dismissalMargin: CGFloat = 20.0
     private var lastMouseMoveTime: TimeInterval = 0
+    private var lastDockHitTestTime: TimeInterval = 0
+    private var lastDockHitTestPoint: CGPoint = .zero
+    private var lastDockHitTestResult: (app: NSRunningApplication, url: URL, iconCenter: CGPoint)?
     private var contextMenuMonitor: Any?
     private var dockMenu: NSMenu?
     private var lastClickedDockIcon: NSRunningApplication?
@@ -82,6 +99,9 @@ class DockWatcher: NSObject, NSMenuDelegate {
     private var showingWindowChooserOnClick: Bool = false
     private var skipNextClickProcessing: Bool = false
     private let eventTimeoutInterval: TimeInterval = 15.0
+    private let mouseMoveThrottleInterval: TimeInterval = 0.08
+    private let dockHitTestCacheInterval: TimeInterval = 0.08
+    private let dockHitTestMinimumMovement: CGFloat = 6.0
     private let heartbeatMissesBeforeReinit: Int = 3
     private let minReinitInterval: TimeInterval = 60.0
     private var consecutiveEventTapMisses: Int = 0
@@ -90,6 +110,12 @@ class DockWatcher: NSObject, NSMenuDelegate {
     
     // Add currentApp property
     @MainActor private var currentApp: NSRunningApplication?
+    @MainActor private var chooserRequestSequence: UInt64 = 0
+    /// In-flight accessibility task issued for the most recent dock-hover.
+    /// Cancelling it as soon as the user moves to another icon prevents the
+    /// AX daemon from chewing through queries whose results we already
+    /// throw away (cascade across multiple icons during a swipe).
+    @MainActor private var inflightChooserTask: Task<Void, Never>?
 
     private var isMouseOverDock: Bool = false
     private var cleanupTimer: Timer?
@@ -113,11 +139,15 @@ class DockWatcher: NSObject, NSMenuDelegate {
         }
     }
     
-    // Add memory thresholds as static properties
+    // Memory thresholds. The previous values (80/120/150) caused the routine
+    // cleanup to fire on virtually every 60s tick because a healthy app that
+    // captures window thumbnails and holds Accessibility caches comfortably
+    // sits at ~90-120MB. Each cleanup tossed the windows cache, so the very
+    // next dock hover had to re-query Accessibility and felt sluggish.
     private static let memoryThresholds = (
-        warning: 80.0,     // MB - Start cleaning up
-        critical: 120.0,   // MB - Force cleanup
-        restart: 150.0     // MB - Restart app
+        warning: 250.0,    // MB - Start cleaning up (gentle)
+        critical: 400.0,   // MB - Force cleanup
+        restart: 700.0     // MB - Restart app
     )
     
     // Add memory reporting function
@@ -180,7 +210,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
     private func setupMemoryMonitoring() {
         memoryCleanupTimer = Timer.scheduledTimer(withTimeInterval: 60.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
-                guard let self = self, !ScreenCaptureState.isOverlayActive else { return }
+                guard let self = self else { return }
                 let usage = self.reportDetailedMemoryUsage()
                 
                 // Use static strings and format once
@@ -232,8 +262,8 @@ class DockWatcher: NSObject, NSMenuDelegate {
                     self.windowChooser = nil
                     self.lastHoveredApp = nil
                     self.isMouseOverDock = false
-                    await self.cleanupResources()
-                    
+                    await self.cleanupResources(aggressive: true)
+
                     self.menuWatchdogTimer?.invalidate()
                     self.menuWatchdogTimer = nil
                 }
@@ -244,6 +274,10 @@ class DockWatcher: NSObject, NSMenuDelegate {
     // Add new property to track menu blocking
     private var menuBlocked: Bool = false
     private var lastClickedIconApp: NSRunningApplication?
+    private var rememberedFrontmostWindows: [String: RememberedFrontmostWindow] = [:]
+    private var lastDockClickProcessedApp: NSRunningApplication?
+    private var lastDockClickProcessedTime: TimeInterval = 0
+    private let doubleClickInterval: TimeInterval = 0.4
     
     // Add new property to track thumbnails
     //private var currentThumbnailView: WindowThumbnailView?
@@ -275,9 +309,13 @@ class DockWatcher: NSObject, NSMenuDelegate {
     }
     
     @MainActor private func performAggressiveCleanup() async {
-        // Force close any open menus
-        windowChooser?.close()
-        windowChooser = nil
+        let chooserVisible = windowChooser?.window?.isVisible == true
+        Logger.perf("memory", "aggressive cleanup start chooserVisible=\(chooserVisible) isMouseOverDock=\(isMouseOverDock)")
+
+        if !chooserVisible && !isMouseOverDock {
+            windowChooser?.close()
+            windowChooser = nil
+        }
         
         // Clear all caches
         autoreleasepool {
@@ -297,8 +335,8 @@ class DockWatcher: NSObject, NSMenuDelegate {
         }
         
         // Perform main cleanup
-        await cleanupResources()
-        
+        await cleanupResources(aggressive: true)
+
         // Force a garbage collection cycle
         if #available(macOS 10.15, *) {
             await Task.yield()
@@ -313,27 +351,30 @@ class DockWatcher: NSObject, NSMenuDelegate {
         }
     }
 
-    @MainActor private func cleanupResources() async {
-        guard !isMouseOverDock, !ScreenCaptureState.isOverlayActive else { return }
-        
+    @MainActor private func cleanupResources(aggressive: Bool = false) async {
+        let chooserVisible = windowChooser?.window?.isVisible == true
+        let shouldPreserveChooser = chooserVisible || isMouseOverDock
+        Logger.perf(
+            "memory",
+            "cleanup start chooserVisible=\(chooserVisible) isMouseOverDock=\(isMouseOverDock) preserveChooser=\(shouldPreserveChooser) aggressive=\(aggressive)"
+        )
+
         Logger.debug("Starting memory cleanup")
-        
-        // Clear cached windows
-        lastProcessedApp = nil
-        lastProcessedWindows = nil
-        lastProcessedTime = 0
-        
-        // Clean up thumbnail
-        //currentThumbnailView?.cleanup()
-        //currentThumbnailView = nil
-        
-        // Clean up window chooser
-        windowChooser?.close()
-        windowChooser = nil
-        
-        // Clean up history controller
-        //historyController?.close()
-        //historyController = nil
+
+        // Only blow away the windows cache when we really mean it. The cache is
+        // tiny but its loss forces the next dock hover to re-query Accessibility,
+        // which is the slow part the user notices.
+        if aggressive {
+            lastProcessedApp = nil
+            lastProcessedWindows = nil
+            lastProcessedTime = 0
+        }
+
+        if !shouldPreserveChooser {
+            Logger.perf("memory", "cleanup closing chooser before cache reset")
+            windowChooser?.close()
+            windowChooser = nil
+        }
         
         // Cancel pending operations
         menuShowTask?.cancel()
@@ -343,21 +384,25 @@ class DockWatcher: NSObject, NSMenuDelegate {
         
         autoreleasepool {
             // Clear window chooser
-            if let chooser = windowChooser {
+            if let chooser = windowChooser, !shouldPreserveChooser {
                 // Ensure thumbnail is hidden and cleaned up
                 chooser.chooserView?.thumbnailView?.hideThumbnail(removePanel: true)
                 chooser.chooserView?.thumbnailView?.cleanup()
                 chooser.prepareForReuse()
                 windowChooser = nil
             }
-            
-            // Clear app references
-            currentApp = nil
-            lastHoveredApp = nil
-            clickedApp = nil
-            lastClickedDockIcon = nil
-            lastRightClickedDockIcon = nil
-            lastWindowOrder = nil
+
+            // App references that drive the dock-hover state machine should only
+            // be cleared on aggressive cleanups. Wiping them on every routine tick
+            // breaks "reuse the chooser when hovering a neighbouring icon".
+            if aggressive {
+                currentApp = nil
+                lastHoveredApp = nil
+                clickedApp = nil
+                lastClickedDockIcon = nil
+                lastRightClickedDockIcon = nil
+                lastWindowOrder = nil
+            }
             
             // Clear window controllers
             for controller in chooserControllers.values {
@@ -406,6 +451,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
         
         let memoryUsage = reportMemoryUsage()
         Logger.debug("Memory cleanup completed. Current usage: \(memoryUsage) MB")
+        Logger.perf("memory", "cleanup done usageMB=\(String(format: "%.1f", memoryUsage)) preservedChooser=\(shouldPreserveChooser)")
     }
     
     deinit {
@@ -437,17 +483,32 @@ class DockWatcher: NSObject, NSMenuDelegate {
                 let currentTime = ProcessInfo.processInfo.systemUptime
                 // Use the nonisolated(unsafe) timestamp set directly in the event tap callback
                 let timeSinceLastEvent = currentTime - self._lastEventTimeUnsafe
-                
-                if timeSinceLastEvent > self.eventTimeoutInterval {
-                    self.consecutiveEventTapMisses += 1
-                    if self.consecutiveEventTapMisses >= self.heartbeatMissesBeforeReinit,
-                       currentTime - self.lastReinitTime >= self.minReinitInterval {
-                        Logger.warning("Event tap appears inactive (no events for \(Int(timeSinceLastEvent)) seconds). Reinitializing...")
-                        await self.reinitializeEventTap()
-                        self.lastReinitTime = currentTime
-                        self.consecutiveEventTapMisses = 0
-                    }
-                } else {
+
+                guard timeSinceLastEvent > self.eventTimeoutInterval else {
+                    self.consecutiveEventTapMisses = 0
+                    return
+                }
+
+                // Distinguish "user is idle" from "our event tap is dead". Ask
+                // the system how long ago the user actually moved the mouse;
+                // if they've been idle just as long, our tap is fine — don't
+                // burn the windows cache and chooser state on a needless
+                // reinit.
+                let systemIdle = CGEventSource.secondsSinceLastEventType(
+                    .combinedSessionState,
+                    eventType: .mouseMoved
+                )
+                if systemIdle > Double(self.eventTimeoutInterval) {
+                    self.consecutiveEventTapMisses = 0
+                    return
+                }
+
+                self.consecutiveEventTapMisses += 1
+                if self.consecutiveEventTapMisses >= self.heartbeatMissesBeforeReinit,
+                   currentTime - self.lastReinitTime >= self.minReinitInterval {
+                    Logger.warning("Event tap appears inactive (no events for \(Int(timeSinceLastEvent))s, system idle for \(Int(systemIdle))s). Reinitializing...")
+                    await self.reinitializeEventTap()
+                    self.lastReinitTime = currentTime
                     self.consecutiveEventTapMisses = 0
                 }
             }
@@ -455,7 +516,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
     }
 
     @MainActor private func reinitializeEventTap() async {
-        guard !isReinitializingEventTap, !ScreenCaptureState.isOverlayActive else { return }
+        guard !isReinitializingEventTap else { return }
         isReinitializingEventTap = true
         defer { isReinitializingEventTap = false }
 
@@ -485,8 +546,8 @@ class DockWatcher: NSObject, NSMenuDelegate {
         menuShowTask = nil
         
         // Perform thorough cleanup
-        await cleanupResources()
-        
+        await cleanupResources(aggressive: true)
+
         // Add small delay to ensure cleanup is complete
         try? await Task.sleep(nanoseconds: 100_000_000) // 100ms
         
@@ -606,22 +667,71 @@ class DockWatcher: NSObject, NSMenuDelegate {
                 if type == .mouseMoved {
                     let now = ProcessInfo.processInfo.systemUptime
                     watcher._lastEventTimeUnsafe = now
-                    
+
+                    // Chooser-hover hot path: when chooser is visible and
+                    // the cursor is over it, drive the hover update directly
+                    // from the global tap on a tighter (~60 Hz) cadence.
+                    // Reason: AppKit's NSTrackingArea / mouseMoved delivery
+                    // to our chooser window goes through the WindowServer's
+                    // per-window event queue, which after a long idle (e.g.
+                    // 5 min) coalesces mouseMoved events for our LSUIElement
+                    // background process — diagnostics show gaps of
+                    // 300–800 ms between deliveries while the user is
+                    // actively moving the mouse. The CGEventTap sees every
+                    // event from the kernel with no such coalescing, so
+                    // this path keeps the highlight responsive even when
+                    // AppKit is starving the view.
+                    if watcher._isChooserVisibleUnsafe {
+                        // event.location is in CG (Quartz) screen coords:
+                        // origin top-left, Y grows down. _chooserFrameUnsafe
+                        // is in AppKit screen coords: origin bottom-left, Y
+                        // grows up. We must convert before comparing or the
+                        // contains-check is always false at the bottom of
+                        // the screen (chooser AppKit-y ≈ 66 vs cursor CG-y
+                        // ≈ screenHeight - 200), which silently disables
+                        // this whole fast path.
+                        let appKitLocation = watcher.appKitPoint(fromCGEventPoint: location)
+                        let chooserHotZone = watcher._chooserFrameUnsafe.insetBy(
+                            dx: -Constants.UI.menuDismissalMargin,
+                            dy: -Constants.UI.menuDismissalMargin
+                        )
+
+                        if chooserHotZone.contains(appKitLocation) {
+                            // The cursor moved off the dock onto the chooser.
+                            // We must clear the "over dock icon" flag here
+                            // because we are about to early-return and skip
+                            // processMouseMovement, which is normally where
+                            // this flag gets reset. If we leave it `true`,
+                            // the leftMouseDown/Up consume-guard further
+                            // down (`return nil` when over dock icon) will
+                            // silently drop clicks on chooser entries — the
+                            // entry hover works but clicks do nothing.
+                            watcher._isOverDockIconUnsafe = false
+
+                            // ~60 Hz throttle for the hover path — the work
+                            // itself is trivial (frame contains-check on a
+                            // handful of buttons + a CALayer mutation), so
+                            // a higher cadence than the dock-hit-test path
+                            // is safe and gives a smoother feel.
+                            if now - watcher._lastChooserHoverTickUnsafe >= 0.016 {
+                                watcher._lastChooserHoverTickUnsafe = now
+                                Task { @MainActor in
+                                    watcher.windowChooser?.chooserView?.syncHoverToCurrentMouseLocation()
+                                }
+                            }
+                            return Unmanaged.passUnretained(event)
+                        }
+                    }
+
+                    // Dock-hit-test path: heavier work, throttle to 20 Hz.
                     if now - watcher._lastMouseEventTimeUnsafe < 0.05 {
                         return Unmanaged.passUnretained(event)
                     }
                     watcher._lastMouseEventTimeUnsafe = now
-                    
-                    if !watcher._isChooserVisibleUnsafe {
-                        let screenHeight = CGFloat(CGDisplayPixelsHigh(CGMainDisplayID()))
-                        let screenWidth = CGFloat(CGDisplayPixelsWide(CGMainDisplayID()))
-                        let threshold: CGFloat = 200
-                        let isNearEdge = location.y > screenHeight - threshold ||
-                                         location.x < threshold ||
-                                         location.x > screenWidth - threshold
-                        if !isNearEdge {
-                            return Unmanaged.passUnretained(event)
-                        }
+
+                    if !watcher._isChooserVisibleUnsafe,
+                       !DockService.shared.isPointNearDockArea(location) {
+                        return Unmanaged.passUnretained(event)
                     }
                     
                     Task { @MainActor in
@@ -630,21 +740,37 @@ class DockWatcher: NSObject, NSMenuDelegate {
                     return Unmanaged.passUnretained(event)
                 }
                 
-                // For non-mouse-moved events (clicks, tap re-enable), always dispatch
+                // Re-enable the tap SYNCHRONOUSLY in the callback before
+                // anything else. macOS disables the tap on timeout / secure
+                // input — once disabled NO further mouse events flow through
+                // until we call tapEnable again. Doing this inside a
+                // dispatched Task means the runloop has to wake up first,
+                // which after a long idle can take hundreds of ms. During
+                // that window the user's mouse moves are dropped on the
+                // floor → highlight in the chooser appears to lag by ~1 s
+                // when returning to the icon after a screen-sleep / idle.
+                if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+                    if let tap = watcher.eventTap {
+                        CGEvent.tapEnable(tap: tap, enable: true)
+                    }
+                    watcher._lastEventTimeUnsafe = ProcessInfo.processInfo.systemUptime
+                    Logger.perf("eventtap", "re-enabled type=\(type == .tapDisabledByTimeout ? "timeout" : "userInput")")
+                    return Unmanaged.passUnretained(event)
+                }
+
+                // For non-mouse-moved events (clicks), always dispatch
                 Task { @MainActor in
                     watcher.updateLastEventTime()
-                    
-                    if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-                        if let tap = watcher.eventTap {
-                            CGEvent.tapEnable(tap: tap, enable: true)
-                        }
-                        watcher.updateLastEventTime()
-                        return
-                    }
                     
                     autoreleasepool {
                         switch type {
                         case .leftMouseDown, .rightMouseDown:
+                            if watcher.isMouseOverOpenChooser() {
+                                watcher.clickedApp = nil
+                                watcher.skipNextClickProcessing = false
+                                return
+                            }
+
                             if let (app, _, _) = DockService.shared.findAppUnderCursor(at: location) {
                                 let isTouchpadClick = event.flags.contains(.maskSecondaryFn) || 
                                                     event.flags.contains(.maskControl) ||
@@ -683,6 +809,14 @@ class DockWatcher: NSObject, NSMenuDelegate {
                                 }
                             }
                         case .leftMouseUp:
+                            if watcher.isMouseOverOpenChooser() {
+                                watcher.clickedApp = nil
+                                watcher.showingWindowChooserOnClick = false
+                                watcher.menuBlocked = false
+                                watcher.lastClickedIconApp = nil
+                                return
+                            }
+
                             if let app = watcher.clickedApp {
                                 if watcher.processDockIconClick(app: app) {
                                     if !watcher.showingWindowChooserOnClick {
@@ -693,6 +827,9 @@ class DockWatcher: NSObject, NSMenuDelegate {
                                 watcher.showingWindowChooserOnClick = false
                             }
                             watcher.clickedApp = nil
+                            watcher.menuBlocked = false
+                            watcher.lastClickedIconApp = nil
+                            watcher.processMouseMovement(at: location)
                         case .rightMouseUp:
                             let showWork = DispatchWorkItem { [weak watcher] in
                                 Task { @MainActor in
@@ -716,6 +853,13 @@ class DockWatcher: NSObject, NSMenuDelegate {
                     }
                 }
                 
+                // Consume left clicks on dock icons so the dock doesn't
+                // activate the app (which would bring ALL windows forward).
+                // Our processDockIconClick handles activation instead.
+                if (type == .leftMouseDown || type == .leftMouseUp) && watcher._isOverDockIconUnsafe {
+                    return nil
+                }
+
                 return Unmanaged.passUnretained(event)
             }
         }
@@ -772,9 +916,30 @@ class DockWatcher: NSObject, NSMenuDelegate {
             forName: NSNotification.Name("WindowChooserDidClose"),
             object: nil,
             queue: .main
-        ) { [weak self] _ in
+        ) { [weak self] notification in
+            let closedController = notification.object as? WindowChooserController
             Task { @MainActor [weak self] in
-                self?.lastHoveredApp = nil
+                guard let self else { return }
+                self.lastHoveredApp = nil
+
+                // If the chooser we are tracking just closed (e.g. the user
+                // clicked a window entry), drop the stale reference and the
+                // per-app window cache. Otherwise the next hover back onto
+                // the same dock icon is short-circuited by the "same app,
+                // windows still cached" fast-path in processMouseMovement
+                // and the menu does not reappear until the mouse has left
+                // the dock and returned.
+                let isTrackedChooser = closedController != nil
+                    && closedController === self.windowChooser
+                let hasStaleReference = self.windowChooser != nil
+                    && self.windowChooser?.window == nil
+
+                if isTrackedChooser || hasStaleReference || self.windowChooser == nil {
+                    self.windowChooser = nil
+                    self.lastProcessedApp = nil
+                    self.lastProcessedWindows = nil
+                    self.lastProcessedTime = 0
+                }
             }
         }
         
@@ -794,83 +959,121 @@ class DockWatcher: NSObject, NSMenuDelegate {
         }
     }
     
+    @MainActor
     private func displayWindowSelector(for app: NSRunningApplication, at point: CGPoint, windows: [WindowInfo]) {
-        Task { @MainActor in
-            // Force cleanup if current chooser is potentially hung
-            if let _ = windowChooser,
-               ProcessInfo.processInfo.systemUptime - lastMenuInteractionTime > menuTimeoutInterval {
-                Logger.warning("Forcing cleanup of potentially hung window chooser")
-                forceCleanupWindowChooser()
-            }
-            
-            // Clean up existing chooser properly
-            if let existingChooser = windowChooser,
-                existingChooser.window != nil {
-                existingChooser.prepareForReuse()
-                existingChooser.close()
-                windowChooser = nil
-            }
+        Logger.perf(
+            "chooser",
+            "display request app=\(app.localizedName ?? "Unknown") pid=\(app.processIdentifier) windows=\(windows.count) point=(\(Int(point.x)),\(Int(point.y)))"
+        )
 
-            let chooser = WindowChooserController(
-                at: point,
-                windows: windows,
-                app: app,
-                callback: { window, isHideAction in
-                    // Get the window info from our windows list to ensure we have the correct ID
-                    if let windowInfo = windows.first(where: { $0.window == window }) {
-                        if let windowID = windowInfo.cgWindowID {
-                            // Store the CGWindowID in the AXUIElement
-                            AXUIElementSetAttributeValue(window, Constants.Accessibility.windowIDKey, windowID as CFTypeRef)
-                            Logger.debug("Callback: Set window ID \(windowID) on AXUIElement")
-                        }
-                        
-                        if isHideAction {
-                            // Hide the selected window
-                            AccessibilityService.shared.hideWindow(window: window, for: app)
-                        } else {
-                            // Unminimize and raise only the selected window
-                            AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
-                            AXUIElementPerformAction(window, kAXRaiseAction as CFString)
-                            
-                            // Ensure window gets focus
-                            AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, true as CFTypeRef)
-                            AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, true as CFTypeRef)
-                        }
+        // Reuse the existing chooser window for ANY app — the controller will
+        // swap in a fresh inner view if the app changed. This avoids the
+        // close+reopen flicker when sliding from one dock icon to its neighbor.
+        if let existingChooser = windowChooser,
+           existingChooser.window != nil {
+            let sameApp = currentApp?.processIdentifier == app.processIdentifier
+            Logger.perf("chooser", "reusing existing chooser sameApp=\(sameApp)")
+            existingChooser.updateWindows(windows, for: app, at: point)
+            existingChooser.updatePosition(point)
+            existingChooser.window?.makeKeyAndOrderFront(nil)
+            _chooserFrameUnsafe = existingChooser.window?.frame ?? .zero
+            currentApp = app
+            lastMenuInteractionTime = ProcessInfo.processInfo.systemUptime
+            return
+        }
+
+        if let _ = windowChooser,
+           ProcessInfo.processInfo.systemUptime - lastMenuInteractionTime > menuTimeoutInterval {
+            Logger.warning("Forcing cleanup of potentially hung window chooser")
+            Logger.perf("chooser", "force cleanup due to watchdog timeout")
+            forceCleanupWindowChooser()
+        }
+        
+        if let existingChooser = windowChooser,
+            existingChooser.window != nil {
+            Logger.perf("chooser", "closing existing chooser before replacement")
+            existingChooser.prepareForReuse()
+            existingChooser.close()
+            windowChooser = nil
+        }
+
+        let chooser = WindowChooserController(
+            at: point,
+            windows: windows,
+            app: app,
+            callback: { window, isHideAction in
+                if let windowInfo = windows.first(where: { $0.window == window }) {
+                    if let windowID = windowInfo.cgWindowID {
+                        AXUIElementSetAttributeValue(window, Constants.Accessibility.windowIDKey, windowID as CFTypeRef)
+                        Logger.debug("Callback: Set window ID \(windowID) on AXUIElement")
+                    }
+                    
+                    if isHideAction {
+                        AccessibilityService.shared.hideWindow(window: window, for: app)
+                    } else {
+                        AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
+                        AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+                        AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, true as CFTypeRef)
+                        AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, true as CFTypeRef)
                     }
                 }
-            )
-            
-            // Verify window was created successfully
-            guard chooser.window != nil else {
-                Logger.error("Failed to create window chooser window")
-                return
             }
-            
-            windowChooser = chooser
-            currentApp = app
-            
-            DispatchQueue.main.async {
-                chooser.window?.makeKeyAndOrderFront(nil)
-            }
-
-            lastMenuInteractionTime = ProcessInfo.processInfo.systemUptime
-            startMenuWatchdog()
+        )
+        
+        guard chooser.window != nil else {
+            Logger.error("Failed to create window chooser window")
+            return
         }
+        
+        windowChooser = chooser
+        currentApp = app
+        Logger.perf(
+            "chooser",
+            "chooser created app=\(app.localizedName ?? "Unknown") frame=\(chooser.window.map { NSStringFromRect($0.frame) } ?? "nil")"
+        )
+        
+        chooser.window?.makeKeyAndOrderFront(nil)
+        _chooserFrameUnsafe = chooser.window?.frame ?? .zero
+
+        lastMenuInteractionTime = ProcessInfo.processInfo.systemUptime
+        startMenuWatchdog()
     }
     
     @MainActor private func processMouseMovement(at point: CGPoint) {
-        // Throttle updates (60fps)
+        // Throttle updates to reduce continuous accessibility hit-testing.
         let currentTime = ProcessInfo.processInfo.systemUptime
-        if currentTime - lastMouseMoveTime < 0.05 {
+        if currentTime - lastMouseMoveTime < mouseMoveThrottleInterval {
             return
         }
         lastMouseMoveTime = currentTime
         lastMenuInteractionTime = currentTime
 
+        let mouseLocation = NSEvent.mouseLocation
+        let chooserFrame: NSRect? = {
+            if let frame = windowChooser?.window?.frame {
+                _chooserFrameUnsafe = frame
+                return frame
+            }
+            if windowChooser != nil, !_chooserFrameUnsafe.isEmpty {
+                return _chooserFrameUnsafe
+            }
+            return nil
+        }()
+        let isOverChooserArea = chooserFrame.map { frame in
+            frame.insetBy(dx: -Constants.UI.menuDismissalMargin,
+                          dy: -Constants.UI.menuDismissalMargin).contains(mouseLocation)
+        } ?? false
+
+        // Avoid expensive Dock hit-tests while the pointer is moving inside the chooser.
+        if isOverChooserArea {
+            _isOverDockIconUnsafe = false
+            updateHistoryTracking(mouseLocation: mouseLocation)
+            return
+        }
+
         // Early exit if menu is blocked
         if menuBlocked {
-            // Cache dock check result
-            let dockResult = DockService.shared.findAppUnderCursor(at: point)
+            let dockResult = cachedDockHitTest(at: point, now: currentTime)
             if let (app, _, _) = dockResult {
                 if app == lastClickedIconApp { return }
                 menuBlocked = false
@@ -881,17 +1084,8 @@ class DockWatcher: NSObject, NSMenuDelegate {
             }
         }
 
-        // Cache mouse location and dock check once
-        let mouseLocation = NSEvent.mouseLocation
-        let dockCheckResult = DockService.shared.findAppUnderCursor(at: point)
+        let dockCheckResult = cachedDockHitTest(at: point, now: currentTime)
         let isOverDock = dockCheckResult != nil
-
-        // Optimize chooser area check with cached frame
-        let chooserFrame: NSRect? = windowChooser?.window?.frame
-        let isOverChooserArea = chooserFrame.map { frame in
-            frame.insetBy(dx: -Constants.UI.menuDismissalMargin, 
-                         dy: -Constants.UI.menuDismissalMargin).contains(mouseLocation)
-        } ?? false
         
         if isOverDock {
             guard let (app, _, iconCenter) = dockCheckResult else { return }
@@ -899,6 +1093,7 @@ class DockWatcher: NSObject, NSMenuDelegate {
             // Update state once
             lastDockAccessTime = ProcessInfo.processInfo.systemUptime
             isMouseOverDock = true
+            _isOverDockIconUnsafe = true
             cleanupTimer?.invalidate()
             
             // Check if windows need reloading using cached values
@@ -908,42 +1103,61 @@ class DockWatcher: NSObject, NSMenuDelegate {
                                     (lastProcessedApp?.bundleIdentifier != app.bundleIdentifier)
 
             if shouldReloadWindows {
-                Task {
-                    // Get windows in background
-                    let windows = await Task.detached(priority: .userInitiated) { 
+                chooserRequestSequence &+= 1
+                let requestSequence = chooserRequestSequence
+                // Cancel any in-flight accessibility query whose result we
+                // are about to discard anyway. During a fast swipe across
+                // several dock icons this stops the AX daemon from queueing
+                // up multiple full window enumerations in a row.
+                inflightChooserTask?.cancel()
+                inflightChooserTask = Task { [weak self] in
+                    let detached = Task.detached(priority: .userInitiated) {
                         await AccessibilityService.shared.listApplicationWindows(for: app)
-                    }.value
+                    }
+                    let windows: [WindowInfo]
+                    if Task.isCancelled {
+                        detached.cancel()
+                        return
+                    }
+                    windows = await detached.value
+                    if Task.isCancelled { return }
 
-                    // Always create a new chooser for hidden apps to ensure thumbnail appears
-                    let shouldCreateNewChooser = app != lastHoveredApp || windowChooser == nil
-                    
-                    if shouldCreateNewChooser {
-                        // Close existing chooser if switching apps
-                        if lastHoveredApp != nil {
-                            windowChooser?.close()
-                            windowChooser = nil
+                    await MainActor.run {
+                        guard let self else { return }
+                        guard self.chooserRequestSequence == requestSequence else {
+                            Logger.perf(
+                                "chooser",
+                                "discard stale chooser request seq=\(requestSequence) latest=\(self.chooserRequestSequence) app=\(app.localizedName ?? "Unknown")"
+                            )
+                            return
                         }
-                        
-                        if !windows.isEmpty {
-                            Logger.debug("Creating new window chooser for \(app.isActive ? "active" : "hidden") app")
-                            displayWindowSelector(for: app, at: iconCenter, windows: windows)
+
+                        // Let displayWindowSelector decide between reusing the
+                        // existing chooser window (sliding it to the new dock
+                        // icon, possibly with a fresh inner view for a new
+                        // app) or creating one from scratch when there is no
+                        // chooser yet.
+                        if self.windowChooser == nil {
+                            if !windows.isEmpty {
+                                Logger.debug("Creating new window chooser for \(app.isActive ? "active" : "hidden") app")
+                                self.displayWindowSelector(for: app, at: iconCenter, windows: windows)
+                            }
+                        } else if !windows.isEmpty {
+                            autoreleasepool {
+                                Logger.debug("Updating existing chooser for \(app.isActive ? "active" : "hidden") app")
+                                self.displayWindowSelector(for: app, at: iconCenter, windows: windows)
+                            }
                         }
-                    } else if let existingChooser = windowChooser {
-                        // Update existing chooser
-                        autoreleasepool {
-                            Logger.debug("Updating existing chooser for \(app.isActive ? "active" : "hidden") app")
-                            existingChooser.updateWindows(windows, for: app, at: iconCenter)
-                            existingChooser.updatePosition(iconCenter)
-                            existingChooser.window?.makeKeyAndOrderFront(nil)
+
+                        self.lastProcessedApp = app
+                        self.lastProcessedWindows = windows
+                        self.lastProcessedTime = currentTime
+                        self.lastHoveredApp = app
+                        self.currentApp = app
+                        if self.chooserRequestSequence == requestSequence {
+                            self.inflightChooserTask = nil
                         }
                     }
-
-                    // Update cache atomically
-                    lastProcessedApp = app
-                    lastProcessedWindows = windows
-                    lastProcessedTime = currentTime
-                    lastHoveredApp = app
-                    currentApp = app
                 }
             } /*else if app != lastHoveredApp {
                 // Only update position for different app
@@ -969,7 +1183,12 @@ class DockWatcher: NSObject, NSMenuDelegate {
         } else {
             // Mouse not over dock or chooser
             if !isOverChooserArea {
+                Logger.perf(
+                    "chooser",
+                    "mouse outside chooser+dock point=(\(Int(mouseLocation.x)),\(Int(mouseLocation.y))) chooserFrame=\(chooserFrame.map(NSStringFromRect) ?? "nil")"
+                )
                 isMouseOverDock = false
+                _isOverDockIconUnsafe = false
                 lastHoveredApp = nil
                 lastProcessedApp = nil
                 lastProcessedWindows = nil
@@ -986,14 +1205,179 @@ class DockWatcher: NSObject, NSMenuDelegate {
     
     @MainActor private func dismissChooserAndThumbnail() {
         guard windowChooser != nil else { return }
+        Logger.perf(
+            "chooser",
+            "dismiss chooser mouse=(\(Int(NSEvent.mouseLocation.x)),\(Int(NSEvent.mouseLocation.y))) frame=\(windowChooser?.window.map { NSStringFromRect($0.frame) } ?? NSStringFromRect(_chooserFrameUnsafe))"
+        )
         
         cleanupTimer?.invalidate()
         cleanupTimer = nil
-        
+
+        // Drop any in-flight chooser request so its eventual MainActor.run
+        // continuation cannot resurrect a chooser we just dismissed.
+        inflightChooserTask?.cancel()
+        inflightChooserTask = nil
+
         windowChooser?.chooserView?.thumbnailView?.hideThumbnail(removePanel: true)
         windowChooser?.chooserView?.thumbnailView?.cleanup()
         windowChooser?.close()
         windowChooser = nil
+    }
+
+    private func appStorageKey(for app: NSRunningApplication) -> String {
+        app.bundleIdentifier ?? "pid:\(app.processIdentifier)"
+    }
+
+    private func currentTopWindow(for app: NSRunningApplication, windows: [WindowInfo]) -> WindowInfo? {
+        let highlightedWindow = windowChooser?.chooserView?.topmostWindow
+
+        if let highlightedWindow,
+           let targetWindow = windows.first(where: { $0.window == highlightedWindow }) {
+            return targetWindow
+        }
+
+        if let mainWindow = windows.first(where: { windowInfo in
+            guard !windowInfo.isAppElement else { return false }
+            var mainValue: AnyObject?
+            return AXUIElementCopyAttributeValue(windowInfo.window, kAXMainAttribute as CFString, &mainValue) == .success &&
+                (mainValue as? Bool == true)
+        }) {
+            return mainWindow
+        }
+
+        if let visibleWindow = windows.first(where: { windowInfo in
+            !windowInfo.isAppElement && AccessibilityService.shared.checkWindowVisibility(windowInfo.window)
+        }) {
+            return visibleWindow
+        }
+
+        return windows.first(where: { !$0.isAppElement }) ?? windows.first
+    }
+
+    private func rememberTopWindow(for app: NSRunningApplication, windows: [WindowInfo]) {
+        guard let topWindow = currentTopWindow(for: app, windows: windows) else {
+            rememberedFrontmostWindows.removeValue(forKey: appStorageKey(for: app))
+            return
+        }
+
+        rememberedFrontmostWindows[appStorageKey(for: app)] = RememberedFrontmostWindow(
+            cgWindowID: topWindow.cgWindowID,
+            name: topWindow.name
+        )
+    }
+
+    private func rememberedTopWindow(for app: NSRunningApplication, windows: [WindowInfo]) -> WindowInfo? {
+        let key = appStorageKey(for: app)
+        guard let rememberedWindow = rememberedFrontmostWindows[key] else {
+            return currentTopWindow(for: app, windows: windows)
+        }
+
+        if let cgWindowID = rememberedWindow.cgWindowID,
+           let matchingWindow = windows.first(where: { $0.cgWindowID == cgWindowID }) {
+            return matchingWindow
+        }
+
+        if let matchingWindow = windows.first(where: { !$0.isAppElement && $0.name == rememberedWindow.name }) {
+            return matchingWindow
+        }
+
+        return currentTopWindow(for: app, windows: windows)
+    }
+
+    private func restoreWindows(
+        for app: NSRunningApplication,
+        windows: [WindowInfo],
+        bringAllToFront: Bool
+    ) -> Bool {
+        let targetWindow = rememberedTopWindow(for: app, windows: windows)
+
+        Task { @MainActor in
+            let regularWindows = windows.filter { !$0.isAppElement }
+
+            if bringAllToFront {
+                app.unhide()
+                app.activate(options: [.activateIgnoringOtherApps])
+
+                for windowInfo in regularWindows {
+                    AXUIElementSetAttributeValue(windowInfo.window, kAXHiddenAttribute as CFString, false as CFTypeRef)
+
+                    var minimizedValue: AnyObject?
+                    if AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success,
+                       let isMinimized = minimizedValue as? Bool,
+                       isMinimized {
+                        AXUIElementSetAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
+                        try? await Task.sleep(nanoseconds: 40_000_000)
+                    }
+                }
+
+                try? await Task.sleep(nanoseconds: 120_000_000)
+
+                let (highlightedWindows, otherWindows) = regularWindows.partition { windowInfo in
+                    windowInfo.window == targetWindow?.window
+                }
+                let orderedWindows = otherWindows + highlightedWindows
+
+                for windowInfo in orderedWindows {
+                    AccessibilityService.shared.raiseWindow(windowInfo: windowInfo, for: app)
+                    try? await Task.sleep(nanoseconds: 40_000_000)
+                }
+            } else if let targetWindow {
+                let backgroundWindows = regularWindows.filter { $0.window != targetWindow.window }
+
+                for windowInfo in backgroundWindows {
+                    AccessibilityService.shared.prepareWindowForBackground(windowInfo.window)
+                    try? await Task.sleep(nanoseconds: 20_000_000)
+                }
+
+                AccessibilityService.shared.prepareWindowForBackground(targetWindow.window)
+                try? await Task.sleep(nanoseconds: 60_000_000)
+                AccessibilityService.shared.raiseWindowOnly(targetWindow.window, for: app)
+            } else if let firstWindow = regularWindows.first {
+                let backgroundWindows = Array(regularWindows.dropFirst())
+
+                for windowInfo in backgroundWindows {
+                    AccessibilityService.shared.prepareWindowForBackground(windowInfo.window)
+                    try? await Task.sleep(nanoseconds: 20_000_000)
+                }
+
+                AccessibilityService.shared.prepareWindowForBackground(firstWindow.window)
+                try? await Task.sleep(nanoseconds: 60_000_000)
+                AccessibilityService.shared.raiseWindowOnly(firstWindow.window, for: app)
+            } else {
+                app.activate(options: [.activateIgnoringOtherApps])
+            }
+        }
+
+        return true
+    }
+
+    @MainActor
+    private func openNewFinderWindow(for app: NSRunningApplication) -> Bool {
+        Logger.debug("Opening a new Finder window")
+        app.activate(options: [.activateIgnoringOtherApps])
+        let homeURL = FileManager.default.homeDirectoryForCurrentUser
+        NSWorkspace.shared.open(homeURL)
+        return true
+    }
+
+    @MainActor
+    private func openPrimaryWindow(for app: NSRunningApplication) -> Bool {
+        if app.bundleIdentifier == "com.apple.finder" {
+            return openNewFinderWindow(for: app)
+        }
+
+        Logger.debug("Opening primary window for \(app.localizedName ?? "Unknown")")
+        app.activate(options: [.activateIgnoringOtherApps])
+        if let bundleURL = app.bundleURL {
+            let configuration = NSWorkspace.OpenConfiguration()
+            configuration.activates = true
+            NSWorkspace.shared.openApplication(
+                at: bundleURL,
+                configuration: configuration,
+                completionHandler: nil
+            )
+        }
+        return true
     }
     
     private func processDockIconClick(app: NSRunningApplication) -> Bool {
@@ -1005,8 +1389,15 @@ class DockWatcher: NSObject, NSMenuDelegate {
 
         Logger.debug("Processing click for app: \(app.localizedName ?? "Unknown")")
 
+        let now = ProcessInfo.processInfo.systemUptime
+        let isDoubleClick = app == lastDockClickProcessedApp &&
+            (now - lastDockClickProcessedTime) < doubleClickInterval
+        lastDockClickProcessedApp = app
+        lastDockClickProcessedTime = now
+
         // Get all windows
         let windows = AccessibilityService.shared.listApplicationWindows(for: app)
+        let nonAppWindows = windows.filter { !$0.isAppElement }
         
         // Special handling for CGWindow-only applications (like NoMachine)
         let hasCGWindowsOnly = windows.allSatisfy { windowInfo in 
@@ -1014,28 +1405,30 @@ class DockWatcher: NSObject, NSMenuDelegate {
         }
         if hasCGWindowsOnly {
             if app.isActive {
-                Logger.debug("CGWindow-only app is active, hiding")
+                Logger.debug("CGWindow-only app is active, hiding on click")
+                rememberTopWindow(for: app, windows: windows)
                 app.hide()
                 return true
-            } else {
+            } else if !app.isActive {
                 Logger.debug("CGWindow-only app is not active, activating")
                 app.unhide()
-                Task { @MainActor in
-                    AccessibilityService.shared.activateApp(app)
+                if isDoubleClick {
+                    app.activate(options: [.activateIgnoringOtherApps])
+                } else {
+                    Task { @MainActor in
+                        AccessibilityService.shared.activateApp(app)
+                    }
                 }
-                
-                // Force raise all windows
                 for windowInfo in windows {
                     AccessibilityService.shared.raiseWindow(windowInfo: windowInfo, for: app)
                 }
-                return true
             }
+            return true
         }
 
         // Special handling for Finder
         if app.bundleIdentifier == "com.apple.finder" {
             // Get all windows and check for visible, non-desktop windows
-            let windows = AccessibilityService.shared.listApplicationWindows(for: app)
             let hasVisibleTopmostWindow = app.isActive && windows.contains { windowInfo in
                 // Skip desktop window and app elements
                 guard !windowInfo.isAppElement else { return false }
@@ -1073,46 +1466,64 @@ class DockWatcher: NSObject, NSMenuDelegate {
             Logger.debug("Finder active: \(app.isActive), has visible windows: \(hasVisibleTopmostWindow)")
             
             if hasVisibleTopmostWindow {
-                Logger.debug("Finder has visible topmost windows, hiding")
+                Logger.debug("Finder is active with visible windows, hiding on click")
+                rememberTopWindow(for: app, windows: windows)
                 AccessibilityService.shared.hideAllWindows(for: app)
                 return app.hide()
             } else {
-                Logger.debug("Finder has no visible topmost windows, showing")
-                app.unhide()
-                app.activate(options: [.activateIgnoringOtherApps])
-                
-                // Only restore non-minimized windows
-                let nonMinimizedWindows = windows.filter { windowInfo in
+                let highlightedWindow = windowChooser?.chooserView?.topmostWindow
+                let finderHasVisibleWindows = windows.contains { windowInfo in
                     guard !windowInfo.isAppElement else { return false }
-                    var minimizedValue: AnyObject?
-                    return !(AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success &&
-                            (minimizedValue as? Bool == true))
+                    return AccessibilityService.shared.checkWindowVisibility(windowInfo.window)
                 }
-                
-                if nonMinimizedWindows.isEmpty {
-                    // Open home directory in a new Finder window if no non-minimized windows
-                    let homeURL = FileManager.default.homeDirectoryForCurrentUser
-                    NSWorkspace.shared.open(homeURL)
-                } else {
-                    // Find the highlighted window from the window chooser if it exists
-                    let highlightedWindow = windowChooser?.chooserView?.topmostWindow
-                    
-                    // Split windows into highlighted and others
-                    let (highlighted, otherWindows) = windows.partition { windowInfo in
-                        windowInfo.window == highlightedWindow
-                    }
-                    
-                    // First restore all other windows
-                    for windowInfo in otherWindows {
-                        AccessibilityService.shared.raiseWindow(windowInfo: windowInfo, for: app)
-                    }
-                    
-                    // Then restore the highlighted window last to make it frontmost
-                    if let lastWindow = highlighted.first {
-                        // Add a small delay to ensure other windows are restored
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                            AccessibilityService.shared.raiseWindow(windowInfo: lastWindow, for: app)
+
+                if finderHasVisibleWindows && !app.isHidden {
+                    Logger.debug("Finder has visible windows but isn't active, raising frontmost only")
+                    let targetWindow = isDoubleClick
+                        ? windows.first(where: { !$0.isAppElement && AccessibilityService.shared.checkWindowVisibility($0.window) })
+                        : (rememberedTopWindow(for: app, windows: windows) ??
+                           windows.first(where: { $0.window == highlightedWindow }) ??
+                           windows.first(where: { !$0.isAppElement && AccessibilityService.shared.checkWindowVisibility($0.window) }))
+                    if let targetWindow = targetWindow {
+                        if isDoubleClick {
+                            for windowInfo in windows where !windowInfo.isAppElement {
+                                AccessibilityService.shared.raiseWindow(windowInfo: windowInfo, for: app)
+                            }
+                        } else {
+                            AccessibilityService.shared.raiseWindowOnly(targetWindow.window, for: app)
                         }
+                    } else {
+                        app.activate(options: [.activateIgnoringOtherApps])
+                    }
+                } else if app.isHidden {
+                    Logger.debug("Finder is hidden, restoring windows")
+                    if nonAppWindows.isEmpty {
+                        return openNewFinderWindow(for: app)
+                    } else {
+                        return restoreWindows(for: app, windows: nonAppWindows, bringAllToFront: isDoubleClick)
+                    }
+                } else {
+                    Logger.debug("Finder not hidden, restoring only frontmost minimized window")
+                    guard !nonAppWindows.isEmpty else {
+                        Logger.debug("Finder has no real windows, opening a new Finder window")
+                        return openNewFinderWindow(for: app)
+                    }
+
+                    let targetWindow = rememberedTopWindow(for: app, windows: nonAppWindows) ??
+                        nonAppWindows.first(where: { $0.window == highlightedWindow }) ??
+                        nonAppWindows.first
+
+                    if let targetWindow = targetWindow {
+                        if isDoubleClick {
+                            return restoreWindows(for: app, windows: nonAppWindows, bringAllToFront: true)
+                        } else {
+                            AXUIElementSetAttributeValue(targetWindow.window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                AccessibilityService.shared.raiseWindowOnly(targetWindow.window, for: app)
+                            }
+                        }
+                    } else {
+                        return openNewFinderWindow(for: app)
                     }
                 }
                 return true
@@ -1120,24 +1531,14 @@ class DockWatcher: NSObject, NSMenuDelegate {
         }
 
         // If we only have the app entry (no real windows), handle launch
-        if windows.count == 0 || windows[0].isAppElement {
-            Logger.debug("App has no windows, launching")
-            app.activate(options: [.activateIgnoringOtherApps])
-            if let bundleURL = app.bundleURL {
-                let configuration = NSWorkspace.OpenConfiguration()
-                configuration.activates = true
-                NSWorkspace.shared.openApplication(
-                    at: bundleURL,
-                    configuration: configuration,
-                    completionHandler: nil
-                )
-            }
-            return true
+        if nonAppWindows.isEmpty {
+            Logger.debug("App has no real windows, opening primary window")
+            return openPrimaryWindow(for: app)
         }
 
         // Check if there's exactly one window and if it's minimized
-        if windows.count == 1 && !windows[0].isAppElement {
-            let window = windows[0].window
+        if nonAppWindows.count == 1 {
+            let window = nonAppWindows[0].window
             var minimizedValue: AnyObject?
             if AXUIElementCopyAttributeValue(window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success,
                let isMinimized = minimizedValue as? Bool,
@@ -1190,61 +1591,86 @@ class DockWatcher: NSObject, NSMenuDelegate {
         AccessibilityService.shared.initializeWindowStates(for: app)
         
         // Check if there are any visible windows
-        let hasVisibleWindows = windows.contains { windowInfo in
+        let hasVisibleWindows = nonAppWindows.contains { windowInfo in
             AccessibilityService.shared.checkWindowVisibility(windowInfo.window)
         }
         
 
-        // Check if app is both active AND has visible windows or has only CGWindows and has visible windows
         if app.isActive && hasVisibleWindows {
-            Logger.debug("App is active with visible windows or has only CGWindows with visible windows, hiding all windows")
+            Logger.debug("Active app click, hiding all windows")
+            rememberTopWindow(for: app, windows: nonAppWindows)
             AccessibilityService.shared.hideAllWindows(for: app)
             return app.hide()
         } else if !hasVisibleWindows {
-            Logger.debug("App has no visible windows, restoring last active window")
-            app.unhide()
-            app.activate(options: [.activateIgnoringOtherApps])
-            
-            // Get the highlighted window from the window chooser if it exists
-            let highlightedWindow = windowChooser?.chooserView?.topmostWindow
-            
-            // Split windows into highlighted and others
-            let (highlighted, _) = windows.partition { windowInfo in
-                windowInfo.window == highlightedWindow
-            }
-            
-            Task { @MainActor in
-                // First unminimize all windows without raising them
-                for windowInfo in windows {
-                    var minimizedValue: AnyObject?
-                    if AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success,
-                       let isMinimized = minimizedValue as? Bool,
-                       isMinimized {
-                        AXUIElementSetAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
-                        try? await Task.sleep(nanoseconds: 50_000_000) // 50ms delay
-                    }
+            if app.isHidden {
+                Logger.debug("App is hidden, restoring windows")
+                return restoreWindows(for: app, windows: nonAppWindows, bringAllToFront: isDoubleClick)
+            } else {
+                Logger.debug("App not hidden, restoring only frontmost minimized window")
+                if isDoubleClick {
+                    return restoreWindows(for: app, windows: nonAppWindows, bringAllToFront: true)
                 }
-                
-                // Add delay before raising windows
-                try? await Task.sleep(nanoseconds: 200_000_000) // 200ms delay
-                
-                // Then raise only the highlighted window if it exists
-                if let lastWindow = highlighted.first {
-                    AccessibilityService.shared.raiseWindow(windowInfo: lastWindow, for: app)
-                } else if let firstWindow = windows.first {
-                    // If no highlighted window, just raise the first one
-                    AccessibilityService.shared.raiseWindow(windowInfo: firstWindow, for: app)
+
+                let targetWindow = rememberedTopWindow(for: app, windows: nonAppWindows) ?? nonAppWindows.first
+
+                if let targetWindow = targetWindow {
+                    AXUIElementSetAttributeValue(targetWindow.window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        AccessibilityService.shared.raiseWindowOnly(targetWindow.window, for: app)
+                    }
+                } else {
+                    return openPrimaryWindow(for: app)
                 }
             }
             return true
         } else {
-            // Just activate the app if it has visible windows but isn't active
-            Logger.debug("App has visible windows but isn't active, activating")
-            Task { @MainActor in
-                AccessibilityService.shared.activateApp(app)
+            Logger.debug("App has visible windows but isn't active, raising frontmost window only")
+            let targetWindow = isDoubleClick
+                ? nonAppWindows.first(where: { AccessibilityService.shared.checkWindowVisibility($0.window) })
+                : (rememberedTopWindow(for: app, windows: nonAppWindows) ??
+                   nonAppWindows.first(where: { AccessibilityService.shared.checkWindowVisibility($0.window) })
+                )
+
+            if isDoubleClick {
+                return restoreWindows(for: app, windows: nonAppWindows, bringAllToFront: true)
+            } else if let targetWindow = targetWindow {
+                AccessibilityService.shared.raiseWindowOnly(targetWindow.window, for: app)
+            } else {
+                return openPrimaryWindow(for: app)
             }
             return true
         }
+    }
+
+    @MainActor private func isMouseOverOpenChooser() -> Bool {
+        guard let chooserFrame = windowChooser?.window?.frame else {
+            return false
+        }
+
+        return chooserFrame.insetBy(
+            dx: -Constants.UI.menuDismissalMargin,
+            dy: -Constants.UI.menuDismissalMargin
+        ).contains(NSEvent.mouseLocation)
+    }
+
+    @MainActor private func cachedDockHitTest(
+        at point: CGPoint,
+        now: TimeInterval
+    ) -> (app: NSRunningApplication, url: URL, iconCenter: CGPoint)? {
+        let deltaX = point.x - lastDockHitTestPoint.x
+        let deltaY = point.y - lastDockHitTestPoint.y
+        let movement = hypot(deltaX, deltaY)
+
+        if now - lastDockHitTestTime < dockHitTestCacheInterval,
+           movement < dockHitTestMinimumMovement {
+            return lastDockHitTestResult
+        }
+
+        let result = DockService.shared.findAppUnderCursor(at: point)
+        lastDockHitTestTime = now
+        lastDockHitTestPoint = point
+        lastDockHitTestResult = result
+        return result
     }
     
     private func setupDockMenuTracking() {
@@ -1265,11 +1691,12 @@ class DockWatcher: NSObject, NSMenuDelegate {
         lastHoveredApp = nil
         isMouseOverDock = false
         Task {
-            await cleanupResources()
+            await cleanupResources(aggressive: true)
         }
     }
     
     private func startHistoryCheck() {
+        refreshPrimaryScreenHeight()
         NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
             object: nil,
@@ -1277,11 +1704,32 @@ class DockWatcher: NSObject, NSMenuDelegate {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self = self else { return }
+                self.refreshPrimaryScreenHeight()
                 if NSScreen.displaysHaveSeparateSpaces {
                     self.handleMultipleDisplays()
                 }
             }
         }
+    }
+
+    /// Recompute the cached primary-screen height. The "primary" display
+    /// in AppKit terms is the one whose frame origin is (0,0). That screen
+    /// determines the flip we need to translate CG-event coordinates
+    /// (top-left origin) to AppKit screen coordinates (bottom-left origin).
+    @MainActor private func refreshPrimaryScreenHeight() {
+        let primary = NSScreen.screens.first(where: { $0.frame.origin == .zero })
+            ?? NSScreen.main
+            ?? NSScreen.screens.first
+        _primaryScreenHeightUnsafe = primary?.frame.height ?? 0
+    }
+
+    /// Convert a CG (Quartz) screen point — as produced by `CGEvent.location`
+    /// — into AppKit screen coordinates so it can be compared against
+    /// `NSWindow.frame` rectangles. Safe to call from the event-tap thread:
+    /// only reads the cached primary-screen height.
+    nonisolated func appKitPoint(fromCGEventPoint cgPoint: CGPoint) -> CGPoint {
+        let primaryHeight = _primaryScreenHeightUnsafe
+        return CGPoint(x: cgPoint.x, y: primaryHeight - cgPoint.y)
     }
     
     /// Called from processMouseMovement to handle history menu triggering event-driven

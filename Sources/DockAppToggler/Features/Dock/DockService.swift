@@ -51,20 +51,34 @@ class DockService {
     func findDockProcess() -> NSRunningApplication? {
         return workspace.runningApplications.first(where: { $0.bundleIdentifier == Constants.Identifiers.dockBundleID })
     }
+
+    func isPointNearDockArea(_ point: CGPoint) -> Bool {
+        guard let screen = getScreenContainingPoint(point) ?? NSScreen.main ?? NSScreen.screens.first else {
+            return false
+        }
+
+        let dockHeight = getDockHeight()
+        let magnificationHeight = getDockMagnificationSize()
+        let maxDockHeight = max(dockHeight, magnificationHeight) + 24
+        let orientation = getDockOrientation()
+
+        switch orientation {
+        case "left":
+            return point.x <= screen.frame.minX + maxDockHeight
+        case "right":
+            return point.x >= screen.frame.maxX - maxDockHeight
+        default:
+            return point.y >= screen.frame.maxY - maxDockHeight
+        }
+    }
     
     func findAppUnderCursor(at point: CGPoint) -> (app: NSRunningApplication, url: URL, iconCenter: CGPoint)? {
         // Early return if point is not near dock
-        let screen = NSScreen.main ?? NSScreen.screens[0]
-        let dockHeight = getDockHeight()
-        let magnificationHeight = getDockMagnificationSize()
-        let maxDockHeight = max(dockHeight, magnificationHeight)
-        
-        // Check if point is within dock area (adding some padding for magnification)
-        let dockAreaY = screen.frame.maxY - maxDockHeight - 20 // 20px padding
-        if point.y < dockAreaY {
+        guard isPointNearDockArea(point) else {
             return nil
         }
         
+        let screen = getScreenContainingPoint(point) ?? NSScreen.main ?? NSScreen.screens[0]
 
         let systemWide = AXUIElementCreateSystemWide()
         var elementUntyped: AXUIElement?

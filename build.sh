@@ -163,7 +163,6 @@ else
     ENTITLEMENTS_FILE="Sources/$APP_NAME/$APP_NAME.entitlements"
     
     codesign --force \
-        --options runtime \
         --entitlements "$ENTITLEMENTS_FILE" \
         --sign - \
         --deep \

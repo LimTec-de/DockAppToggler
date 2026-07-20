@@ -22,4 +22,8 @@ extension NSScreen {
             }
         }
     }
-} 
+
+    static func screen(containing point: NSPoint) -> NSScreen? {
+        NSScreen.screens.first { $0.frame.contains(point) }
+    }
+}

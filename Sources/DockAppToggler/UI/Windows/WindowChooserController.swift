@@ -83,8 +83,9 @@ class WindowChooserController: NSWindowController {
             window.collectionBehavior = [.transient, .ignoresCycle]
         }
         
-        // Disable mouse moved events by default
-        window.acceptsMouseMovedEvents = false
+        // Keep mouse-move delivery enabled so row highlighting can update
+        // continuously while the chooser is visible.
+        window.acceptsMouseMovedEvents = true
         
         self.window = window
         
@@ -166,8 +167,9 @@ class WindowChooserController: NSWindowController {
             window.collectionBehavior = [.transient, .ignoresCycle]
         }
         
-        // Disable mouse moved events by default
-        window.acceptsMouseMovedEvents = false
+        // Keep mouse-move delivery enabled so row highlighting can update
+        // continuously while the chooser is visible.
+        window.acceptsMouseMovedEvents = true
         
         // Create container view for shadow
         let containerView = NSView(frame: window.contentView!.bounds)
@@ -233,8 +235,8 @@ class WindowChooserController: NSWindowController {
     }
     
     @MainActor private func cleanup() {
-        // Add thumbnail cleanup logic
-        chooserView?.thumbnailView?.hideThumbnail()
+        chooserView?.cleanup()
+        chooserView = nil
         
         // Remove tracking area
         if let trackingArea = trackingArea,
@@ -327,39 +329,66 @@ class WindowChooserController: NSWindowController {
     }
 
     func updateWindows(_ windows: [WindowInfo], for app: NSRunningApplication, at point: CGPoint) {
-        // Update app reference
+        let appChanged = self.app.processIdentifier != app.processIdentifier
         self.app = app
-        
+
         // Ensure window level and ordering
         window?.level = NSWindow.Level.popUpMenu + 2
         window?.orderFront(nil)
-        
-        // Update existing chooser view if it exists
+
+        // The chooser view is bound to a single NSRunningApplication via a `let`,
+        // so reusing it across apps would leave it filtering/showing the wrong
+        // app's windows. When the app changes, swap in a fresh view but keep
+        // the surrounding NSWindow alive so it can simply slide to the new
+        // dock-icon position instead of close + reopen.
+        if appChanged, let existingView = chooserView {
+            existingView.cleanup()
+            existingView.removeFromSuperview()
+            chooserView = nil
+        }
+
+        // Resize the chooser to fit the new window count before layout.
+        let targetHeight = Constants.UI.windowHeight(for: windows.count)
+        if let currentHeight = window?.frame.height, abs(currentHeight - targetHeight) > 1 {
+            updateWindowSize(to: targetHeight)
+        }
+
         if let existingView = chooserView {
-            existingView.updateWindows(windows, forceNormalMode: true)
+            let currentWindows = existingView.options
+            let sortedIncomingWindows = WindowChooserView.sortWindows(windows, app: app, isHistory: false)
+            let windowsChanged = currentWindows.count != sortedIncomingWindows.count ||
+                zip(currentWindows, sortedIncomingWindows).contains { current, updated in
+                    current.cgWindowID != updated.cgWindowID ||
+                    current.name != updated.name ||
+                    current.isAppElement != updated.isAppElement
+                }
+
+            if windowsChanged {
+                existingView.updateWindows(windows, forceNormalMode: true)
+            }
         } else {
-            // Only create new view if one doesn't exist
             let newView = WindowChooserView(
                 windows: windows,
                 appName: app.localizedName ?? "Unknown",
                 app: app,
                 iconCenter: point,
-                isHistory: false,  // Explicitly set to false for normal mode
+                isHistory: false,
                 callback: callback
             )
-            
-            // Add and position new view immediately
+
             if let containerView = window?.contentView?.subviews.first {
                 containerView.addSubview(newView)
                 newView.frame = containerView.bounds
             }
-            
-            // Update reference
+
             chooserView = newView
         }
-        
-        // Update position
+
         updatePosition(point)
+
+        DispatchQueue.main.async { [weak self] in
+            self?.chooserView?.syncHoverToCurrentMouseLocation()
+        }
     }
 
     func updatePosition(_ iconCenter: CGPoint) {
@@ -384,29 +413,30 @@ class WindowChooserController: NSWindowController {
         
         let newFrame = NSRect(x: xPos, y: yPos, width: menuWidth, height: menuHeight)
         
-        // Check if this is a significant position change (different dock icon)
-        let currentCenterX = window.frame.origin.x + (window.frame.width / 2)
-        let isSignificantMove = abs(currentCenterX - iconCenter.x) > window.frame.width / 2
-        
-        /*if window.isVisible && isSignificantMove {
-            // Use fade transition only for significant position changes
-            NSAnimationContext.runAnimationGroup({ context in
-                context.duration = 0.15
-                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-                window.animator().alphaValue = 0.0
-            }) { [weak self] in
-                self?.window?.setFrame(newFrame, display: true)
-                NSAnimationContext.runAnimationGroup({ context in
-                    context.duration = 0.15
-                    context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-                    self?.window?.animator().alphaValue = 1.0
-                })
+        // Slide the window when it visibly moves to a neighboring dock icon
+        // (a small jitter still snaps so we don't pay an animation cost for
+        // every pixel update).
+        let currentOrigin = window.frame.origin
+        let dx = abs(currentOrigin.x - newFrame.origin.x)
+        let dy = abs(currentOrigin.y - newFrame.origin.y)
+        let isSignificantMove = dx > 4 || dy > 4
+
+        if window.isVisible && isSignificantMove {
+            window.alphaValue = 1.0
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.12
+                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                context.allowsImplicitAnimation = true
+                window.animator().setFrame(newFrame, display: true)
             }
-        } else {*/
-            // Direct update for initial display or small movements
+        } else {
             window.setFrame(newFrame, display: true)
             window.alphaValue = 1.0
-        //}
+        }
+
+        DispatchQueue.main.async { [weak self] in
+            self?.chooserView?.syncHoverToCurrentMouseLocation()
+        }
     }
 
     func refreshMenu(force: Bool = false) {

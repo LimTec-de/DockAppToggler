@@ -14,6 +14,7 @@ class WindowChooserView: NSView {
     private var buttons: [NSButton] = []
     private var hideButtons: [NSButton] = []
     private var closeButtons: [NSButton] = []
+    private var sideButtons: [NSButton] = []
     private var titleField: NSTextField!
     private let targetApp: NSRunningApplication
     private var lastMaximizeClickTime: TimeInterval = 0
@@ -30,6 +31,21 @@ class WindowChooserView: NSView {
     private var iconImageView: NSImageView?
     private var minimizeButton: NSButton?
     private var maximizeButton: NSButton?
+    private var hoverBackgroundView: NSView?
+    private weak var lastHoverRelativeButton: NSButton?
+    private var hoverBackgroundCGColorCache: CGColor?
+    private var cachedHoverBackgroundIsDark: Bool = false
+    private var hoveredButtonTag: Int?
+    private var lastScheduledThumbnailTag: Int?
+    private var pendingThumbnailHoverWorkItem: DispatchWorkItem?
+    private var minimizedStateByTag: [Int: Bool] = [:]
+    private var mouseMoveTrackingArea: NSTrackingArea?
+    private var hoverSequenceNumber: UInt64 = 0
+    /// Last time `mouseMoved` arrived at this view. Used to detect when
+    /// AppKit / WindowServer stop delivering events for noticeably long
+    /// gaps, which is the only way we can tell if the perceived hover-lag
+    /// lives upstream of our processing (= 0–1 ms in the existing logs).
+    private var lastMouseMovedAt: TimeInterval = 0
     
     // Change from private to internal
     var selectedIndex: Int = 0
@@ -38,6 +54,59 @@ class WindowChooserView: NSView {
     weak var delegate: WindowChooserViewDelegate?
     
     override var acceptsFirstResponder: Bool { true }
+
+    override func updateTrackingAreas() {
+        if let mouseMoveTrackingArea {
+            removeTrackingArea(mouseMoveTrackingArea)
+        }
+
+        let trackingArea = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(trackingArea)
+        mouseMoveTrackingArea = trackingArea
+
+        super.updateTrackingAreas()
+
+        if let hoveredButtonTag,
+           let button = buttons.first(where: { $0.tag == hoveredButtonTag }) {
+            updateHoverBackground(for: button)
+        } else if hoverBackgroundView != nil {
+            clearHoverEffect()
+        }
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        let now = ProcessInfo.processInfo.systemUptime
+        if lastMouseMovedAt > 0 {
+            let gapMs = (now - lastMouseMovedAt) * 1000
+            // Only log when the chooser was really starved of events. 250 ms
+            // is well above the natural mouse-move cadence (16 ms / frame),
+            // so anything we log here is a genuine event-delivery stall.
+            if gapMs > 250 {
+                Logger.perf("hover", "mouseMoved arrived after silence gap_ms=\(Int(gapMs))")
+            }
+        }
+        lastMouseMovedAt = now
+        super.mouseMoved(with: event)
+        updateHoverForCurrentMouseLocation()
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        Logger.perf("hover", "mouseEntered chooser-view")
+        lastMouseMovedAt = ProcessInfo.processInfo.systemUptime
+        super.mouseEntered(with: event)
+        updateHoverForCurrentMouseLocation()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        Logger.perf("hover", "mouseExited chooser-view")
+        lastMouseMovedAt = 0
+        super.mouseExited(with: event)
+    }
     
     override func keyDown(with event: NSEvent) {
         switch event.keyCode {
@@ -196,19 +265,8 @@ class WindowChooserView: NSView {
                 options: self.options,
                 windowChooser: self.window?.windowController as? WindowChooserController
             )
-            
-            // Show initial preview of topmost window if available
-            if let topmostWindow = self.topmostWindow,
-               let windowInfo = self.options.first(where: { $0.window == topmostWindow }),
-               !windowInfo.isAppElement && windowInfo.cgWindowID == nil {
-                // Use DispatchQueue to ensure view is fully loaded
-                //DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-                    thumbnailView?.showThumbnail(for: windowInfo, withTimer: true)
-                //}
-            } else {
-                Logger.debug("No topmost window found or it's an app element")
-                thumbnailView?.hideThumbnail()
-            }
+            // Keep previews idle until the pointer actually hovers a row.
+            thumbnailView?.hideThumbnail()
         }
     }
     
@@ -243,13 +301,9 @@ class WindowChooserView: NSView {
     }
     
     private func setupButtons() {
-        // Clear existing buttons first
-        buttons.forEach { $0.removeFromSuperview() }
-        hideButtons.forEach { $0.removeFromSuperview() }
-        closeButtons.forEach { $0.removeFromSuperview() }
-        buttons.removeAll()
-        hideButtons.removeAll()
-        closeButtons.removeAll()
+        clearHoverEffect()
+
+        clearButtonsForRefresh()
         
         // Remove any existing app icons
         subviews.forEach { view in
@@ -302,8 +356,54 @@ class WindowChooserView: NSView {
                 addSubview(leftButton)
                 addSubview(centerButton)
                 addSubview(rightButton)
+                sideButtons.append(leftButton)
+                sideButtons.append(centerButton)
+                sideButtons.append(rightButton)
             }
         }
+    }
+
+    private func clearButtonsForRefresh() {
+        buttons.forEach { button in
+            button.trackingAreas.forEach { button.removeTrackingArea($0) }
+            button.target = nil
+            button.action = nil
+            button.layer?.removeAllAnimations()
+            button.layer?.removeFromSuperlayer()
+            button.removeFromSuperview()
+        }
+
+        hideButtons.forEach { button in
+            button.trackingAreas.forEach { button.removeTrackingArea($0) }
+            button.target = nil
+            button.action = nil
+            button.layer?.removeAllAnimations()
+            button.layer?.removeFromSuperlayer()
+            button.removeFromSuperview()
+        }
+
+        closeButtons.forEach { button in
+            button.trackingAreas.forEach { button.removeTrackingArea($0) }
+            button.target = nil
+            button.action = nil
+            button.layer?.removeAllAnimations()
+            button.layer?.removeFromSuperlayer()
+            button.removeFromSuperview()
+        }
+
+        sideButtons.forEach { button in
+            button.trackingAreas.forEach { button.removeTrackingArea($0) }
+            button.target = nil
+            button.action = nil
+            button.layer?.removeAllAnimations()
+            button.layer?.removeFromSuperlayer()
+            button.removeFromSuperview()
+        }
+
+        buttons.removeAll(keepingCapacity: false)
+        hideButtons.removeAll(keepingCapacity: false)
+        closeButtons.removeAll(keepingCapacity: false)
+        sideButtons.removeAll(keepingCapacity: false)
     }
     
     // Add helper function to check if it's a CGWindow entry
@@ -377,15 +477,6 @@ class WindowChooserView: NSView {
         )
         
         configureButton(button, title: windowInfo.name, tag: index)
-        
-        // Add tracking area for hover effect
-        let trackingArea = NSTrackingArea(
-            rect: button.bounds,
-            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
-            owner: button,
-            userInfo: ["isMenuButton": true]
-        )
-        button.addTrackingArea(trackingArea)
         
         return button
     }
@@ -475,262 +566,249 @@ class WindowChooserView: NSView {
         var minimizedValue: AnyObject?
         let isMinimized = AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success &&
                           (minimizedValue as? Bool == true)
+        minimizedStateByTag[tag] = isMinimized
         
         // Set initial color based on window state
-        if isHistoryMode && button.tag == 0 {
-            // In history mode, always use primaryTextColor for the first entry
-            button.contentTintColor = Constants.UI.Theme.primaryTextColor
-        } else if isMinimized {
-            button.contentTintColor = Constants.UI.Theme.minimizedTextColor
-        } else if !isHistoryMode && windowInfo.window == topmostWindow {
-            button.contentTintColor = Constants.UI.Theme.primaryTextColor
-        } else {
-            button.contentTintColor = Constants.UI.Theme.secondaryTextColor
-        }
+        applyStoredTextState(to: button)
         
         // Add hover effect background
         button.layer?.cornerRadius = 4
         button.layer?.masksToBounds = true
     }
     
-    private func applyHoverEffect(for button: NSButton) {
-        // print("🔍 applyHoverEffect called for button with tag: \(button.tag)")
-        
-        // First clear any existing hover effects
-        self.subviews.forEach { view in
-            let identifier = view.accessibilityIdentifier()
-            if identifier.starts(with: "hover-background-") {
-                // print("  - Removing existing hover effect: \(identifier)")
-                view.removeFromSuperview()
-            }
+    private func updateHoverBackground(for button: NSButton) {
+        hoveredButtonTag = button.tag
+        let backgroundView: NSView
+        if let existingView = hoverBackgroundView {
+            backgroundView = existingView
+        } else {
+            let newView = NSView(frame: .zero)
+            newView.wantsLayer = true
+            newView.layer?.cornerRadius = 4
+            newView.layer?.masksToBounds = true
+            hoverBackgroundView = newView
+            backgroundView = newView
         }
-        
-        // Create hover effect
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.1
-            
-            let isDark = self.effectiveAppearance.isDarkMode
-            // print("  - Dark mode: \(isDark)")
-            
-            let hoverColor = isDark ? 
-                NSColor(white: 0.3, alpha: 0.8) :
-                NSColor(white: 0.8, alpha: 0.8)
-            
-            let backgroundView = NSView(frame: NSRect(
-                x: 0,
-                y: button.frame.minY,
-                width: self.bounds.width,
-                height: button.frame.height
-            ))
-            // print("  - Creating background view at y: \(button.frame.minY), height: \(button.frame.height)")
-            
-            backgroundView.wantsLayer = true
-            backgroundView.layer?.backgroundColor = hoverColor.cgColor
-            backgroundView.layer?.cornerRadius = 4
-            backgroundView.layer?.masksToBounds = true
-            backgroundView.setAccessibilityIdentifier("hover-background-\(button.tag)")
-            
-            self.addSubview(backgroundView, positioned: .below, relativeTo: button)
-            // print("  - Added background view to hierarchy")
-            
-            // Update button color based on window state
-            if let windowInfo = options[safe: button.tag] {
-                var minimizedValue: AnyObject?
-                let isMinimized = AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success &&
-                                 (minimizedValue as? Bool == true)
-                
-                if isHistoryMode && button.tag == 0 {
-                    // In history mode, always use primaryTextColor for the first entry
-                    button.contentTintColor = Constants.UI.Theme.primaryTextColor
-                } else if isMinimized {
-                    button.contentTintColor = Constants.UI.Theme.minimizedTextColor
-                } else if !isHistoryMode && windowInfo.window == topmostWindow {
-                    button.contentTintColor = Constants.UI.Theme.primaryTextColor
-                } else {
-                    button.contentTintColor = Constants.UI.Theme.secondaryTextColor
-                }
+
+        // Wrap every layer mutation in a transaction with implicit animations
+        // disabled. Without this, CALayer applies its default 0.25 s implicit
+        // animation to backgroundColor / position changes, which makes the
+        // highlight visibly chase the cursor instead of snapping. The cost of
+        // the begin/commit pair is far below a single CGColor allocation.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+
+        if backgroundView.isHidden {
+            backgroundView.isHidden = false
+        }
+
+        // Resolve hover color via a cached CGColor. NSAppearance lookup +
+        // NSColor → CGColor conversion is otherwise repeated on every
+        // button-to-button hover and shows up as growing latency over time
+        // because each layer mutation queues a redraw.
+        let cachedColor = cachedHoverBackgroundCGColor()
+        if backgroundView.layer?.backgroundColor != cachedColor {
+            backgroundView.layer?.backgroundColor = cachedColor
+        }
+
+        let newFrame = NSRect(
+            x: 0,
+            y: button.frame.minY,
+            width: self.bounds.width,
+            height: button.frame.height
+        )
+        if backgroundView.frame != newFrame {
+            backgroundView.frame = newFrame
+        }
+
+        // The hover background sits BELOW every button — we don't actually
+        // need to re-position it relative to a specific button. Adding it
+        // once at the bottom of the subview stack (and leaving it there)
+        // turns the per-hover work into a pure frame mutation, instead of a
+        // subview-list re-walk + relayout on every move. Big win on long
+        // chooser sessions because addSubview also invalidates parent layout.
+        if backgroundView.superview !== self {
+            if let firstSubview = self.subviews.first, firstSubview !== backgroundView {
+                self.addSubview(backgroundView, positioned: .below, relativeTo: firstSubview)
+            } else {
+                self.addSubview(backgroundView)
             }
-            
-            // Show thumbnail
-            if button.tag < options.count {
-                let windowInfo = options[button.tag]
-                
-                
-                    // Normal mode - use existing thumbnail logic
-                    if !windowInfo.isAppElement {
-                        Logger.debug("""
-                            Showing thumbnail for window:
-                            - Name: \(windowInfo.name)
-                            - CGWindowID: \(windowInfo.cgWindowID ?? 0)
-                            - Is App Element: \(windowInfo.isAppElement)
-                            """)
-                        
-                        if let cgWindowID = windowInfo.cgWindowID {
-                            Logger.debug("History mode - Using window ID: \(cgWindowID)")
-                            
-                            // Create thumbnail view if needed
-                            if thumbnailView == nil {
-                                thumbnailView = WindowThumbnailView(
-                                    targetApp: targetApp,  // Use the current app, not looking up by PID
-                                    dockIconCenter: dockIconCenter,
-                                    options: [windowInfo],
-                                    windowChooser: self.window?.windowController as? WindowChooserController
-                                )
-                            }
-                            
-                            // Show thumbnail directly using the existing CGWindowID
-                            thumbnailView?.showThumbnail(for: windowInfo, withTimer: false)
-                        } else {
-                            // If no CGWindowID, try to find it like in normal mode
-                            Logger.debug("History mode - No CGWindowID, attempting to find window")
-                            var pid: pid_t = 0
-                            if AXUIElementGetPid(windowInfo.window, &pid) == .success {
-                                // Use .optionAll to get all windows including minimized ones
-                                let windowList = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[CFString: Any]] ?? []
-                                //print("🔍 History mode - Window list: \(windowList)")
-                                let appWindows = windowList.filter { dict in
-                                    guard let windowPID = dict[kCGWindowOwnerPID] as? pid_t,
-                                          windowPID == pid,
-                                          let layer = dict[kCGWindowLayer] as? Int32,
-                                          layer == 0 else {
-                                        return false
-                                    }
-                                    return true
-                                }
-                                
-                                // Try to find matching window
-                                if let matchingWindow = appWindows.first(where: { dict in
-                                    guard let windowTitle = dict[kCGWindowName] as? String else {
-                                        return false
-                                    }
-                                    
-                                    // Use the same normalization function as before
-                                    func normalizeTitle(_ title: String) -> String {
-                                        let baseTitle = title
-                                            .replacingOccurrences(of: " - \(targetApp.localizedName ?? "")", with: "")
-                                            .trimmingCharacters(in: .whitespaces)
-                                        
-                                        if baseTitle.contains(" - ") {
-                                            return baseTitle.components(separatedBy: " - ")[0]
-                                                .trimmingCharacters(in: .whitespaces)
-                                        }
-                                        return baseTitle
-                                    }
-                                    
-                                    let normalizedTarget = normalizeTitle(windowInfo.name)
-                                    let normalizedCurrent = normalizeTitle(windowTitle)
-                                    
-                                    return normalizedTarget == normalizedCurrent
-                                }),
-                                let windowID = matchingWindow[kCGWindowNumber] as? CGWindowID {
-                                    // Create updated window info with the found ID
-                                    let updatedWindowInfo = WindowInfo(
-                                        window: windowInfo.window,
-                                        name: windowInfo.name,
-                                        cgWindowID: windowID,
-                                        isAppElement: windowInfo.isAppElement
-                                    )
-                                    
-                                    if thumbnailView == nil {
-                                        thumbnailView = WindowThumbnailView(
-                                            targetApp: targetApp,
-                                            dockIconCenter: dockIconCenter,
-                                            options: [updatedWindowInfo],
-                                            windowChooser: self.window?.windowController as? WindowChooserController
-                                        )
-                                    }
-                                    
-                                    thumbnailView?.showThumbnail(for: updatedWindowInfo, withTimer: false)
-                                }
-                            }
-                        }
-                    }
-                
-            }
+            lastHoverRelativeButton = button
         }
     }
-    
-    override func mouseEntered(with event: NSEvent) {
-        super.mouseEntered(with: event)
-        if let button = event.trackingArea?.owner as? NSButton,
-           event.trackingArea?.userInfo?["isMenuButton"] as? Bool == true {
-            
-            // Get the window info for this button
-            let windowInfo = options[button.tag]
-            
-            // In history mode, we need to find the correct app for each window
-            if isHistoryMode {
-                if let cgWindowID = windowInfo.cgWindowID,
-                   let windowList = CGWindowListCopyWindowInfo([.optionIncludingWindow], cgWindowID) as? [[CFString: Any]],
-                   let cgWindowInfo = windowList.first,
-                   let ownerPID = cgWindowInfo[kCGWindowOwnerPID] as? pid_t,
-                   let runningApp = NSRunningApplication(processIdentifier: ownerPID) {
-                    
-                    // Create a proper WindowInfo object from the CGWindow info
-                    let updatedWindowInfo = WindowInfo(
-                        window: windowInfo.window,
-                        name: windowInfo.name,
-                        cgWindowID: cgWindowID,
-                        isAppElement: windowInfo.isAppElement
-                    )
-                    
-                    // Create thumbnail view with the correct app and window info
-                    thumbnailView = WindowThumbnailView(
-                        targetApp: runningApp,
-                        dockIconCenter: dockIconCenter,
-                        options: [updatedWindowInfo],
+
+    private func cachedHoverBackgroundCGColor() -> CGColor {
+        let isDark = self.effectiveAppearance.isDarkMode
+        if let cached = hoverBackgroundCGColorCache, cachedHoverBackgroundIsDark == isDark {
+            return cached
+        }
+        let color = isDark ?
+            NSColor(white: 0.3, alpha: 0.8) :
+            NSColor(white: 0.8, alpha: 0.8)
+        let cg = color.cgColor
+        hoverBackgroundCGColorCache = cg
+        cachedHoverBackgroundIsDark = isDark
+        return cg
+    }
+
+    private func applyHoverEffect(for button: NSButton) {
+        updateHoverBackground(for: button)
+        applyStoredTextState(to: button)
+    }
+
+    private func clearHoverEffect() {
+        Logger.perf("hover", "clear hover tag=\(hoveredButtonTag.map(String.init) ?? "nil")")
+        pendingThumbnailHoverWorkItem?.cancel()
+        pendingThumbnailHoverWorkItem = nil
+        thumbnailView?.cancelPendingThumbnailWork()
+        // Hide instead of tear-down: removeFromSuperview + nil forces us to
+        // rebuild the layer on the next hover. Hiding lets us reuse the same
+        // CALayer (with its allocated backing store) and just snap it back
+        // into view on the next button hover. Wrapped in a no-action
+        // transaction so toggling isHidden doesn't trigger a fade animation.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        hoverBackgroundView?.isHidden = true
+        CATransaction.commit()
+        hoveredButtonTag = nil
+        lastScheduledThumbnailTag = nil
+    }
+
+    private func scheduleThumbnailHover(for buttonTag: Int) {
+        guard !WindowThumbnailView.arePreviewsDisabled() else { return }
+        guard lastScheduledThumbnailTag != buttonTag else { return }
+        guard buttonTag < options.count else { return }
+
+        let windowInfo = options[buttonTag]
+        guard !windowInfo.isAppElement else { return }
+
+        pendingThumbnailHoverWorkItem?.cancel()
+        lastScheduledThumbnailTag = buttonTag
+        let sequence = hoverSequenceNumber
+
+        if isHistoryMode {
+            Logger.perf("hover", "schedule thumbnail seq=\(sequence) tag=\(buttonTag) delay=0ms history=true")
+        } else {
+            if thumbnailView == nil {
+                thumbnailView = WindowThumbnailView(
+                    targetApp: targetApp,
+                    dockIconCenter: dockIconCenter,
+                    options: [windowInfo],
+                    windowChooser: self.window?.windowController as? WindowChooserController
+                )
+            } else {
+                thumbnailView?.updateOptions([windowInfo])
+            }
+
+            if thumbnailView?.hasUsableCachedThumbnail(for: windowInfo) == true {
+                // Even on a cache hit, showing the thumbnail repositions an
+                // NSPanel and can call orderFront/makeKey, all of which run on
+                // the main thread. If we do that in the same tick as the
+                // highlight, the highlight repaint is delayed until after the
+                // panel work completes. Defer to the next runloop tick so the
+                // hover background paints first and the menu feels instant.
+                Logger.perf("hover", "schedule thumbnail seq=\(sequence) tag=\(buttonTag) delay=0ms cached=true async=true")
+                let work = DispatchWorkItem { [weak self] in
+                    guard let self = self,
+                          self.hoveredButtonTag == buttonTag,
+                          buttonTag < self.options.count else { return }
+                    let info = self.options[buttonTag]
+                    self.thumbnailView?.showThumbnail(for: info, withTimer: false)
+                }
+                pendingThumbnailHoverWorkItem = work
+                DispatchQueue.main.async(execute: work)
+                return
+            }
+            Logger.perf("hover", "schedule thumbnail seq=\(sequence) tag=\(buttonTag) delay=0ms cached=false")
+        }
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self = self,
+                  self.hoveredButtonTag == buttonTag,
+                  buttonTag < self.options.count else { return }
+
+            Logger.perf("hover", "fire thumbnail seq=\(sequence) tag=\(buttonTag)")
+            let windowInfo = self.options[buttonTag]
+
+            Logger.debug("""
+                Showing thumbnail for window:
+                - Name: \(windowInfo.name)
+                - CGWindowID: \(windowInfo.cgWindowID ?? 0)
+                - Is App Element: \(windowInfo.isAppElement)
+                """)
+
+            if self.isHistoryMode {
+                self.prepareHistoryThumbnail(windowInfo: windowInfo)
+            } else {
+                if self.thumbnailView == nil {
+                    self.thumbnailView = WindowThumbnailView(
+                        targetApp: self.targetApp,
+                        dockIconCenter: self.dockIconCenter,
+                        options: [windowInfo],
                         windowChooser: self.window?.windowController as? WindowChooserController
                     )
                 } else {
-                    // Fallback for AX windows
-                    var pid: pid_t = 0
-                    if AXUIElementGetPid(windowInfo.window, &pid) == .success,
-                       let runningApp = NSRunningApplication(processIdentifier: pid) {
-                        thumbnailView = WindowThumbnailView(
-                            targetApp: runningApp,
-                            dockIconCenter: dockIconCenter,
-                            options: [windowInfo], // Use original windowInfo since it's already correct type
-                            windowChooser: self.window?.windowController as? WindowChooserController
-                        )
-                    }
+                    self.thumbnailView?.updateOptions([windowInfo])
                 }
+
+                self.thumbnailView?.showThumbnail(for: windowInfo, withTimer: false, skipDebounce: true)
             }
-            
-            applyHoverEffect(for: button)
         }
+
+        // No debounce: schedule on the next runloop tick so the hover
+        // highlight gets a chance to paint first, but don't burn the 12 ms
+        // delay. If the user keeps moving, the next scheduleThumbnailHover()
+        // cancels this work item before it fires.
+        pendingThumbnailHoverWorkItem = workItem
+        DispatchQueue.main.async(execute: workItem)
     }
-    
-    override func mouseExited(with event: NSEvent) {
-        if let button = event.trackingArea?.owner as? NSButton {
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.1  // Quick fade out
-                
-                if event.trackingArea?.userInfo?["isMenuButton"] as? Bool == true {
-                    // Remove the line highlight
-                    self.subviews.forEach { view in
-                        if view.accessibilityIdentifier() == "hover-background-\(button.tag)" {
-                            view.removeFromSuperview()
-                        }
-                    }
-                    
-                    // Only hide thumbnail if mouse is not over any menu entry
-                    let mouseLocation = NSEvent.mouseLocation
-                    let isOverAnyButton = buttons.contains { button in
-                        guard let window = self.window else { return false }
-                        let buttonFrameInWindow = button.convert(button.bounds, to: nil)
-                        let buttonFrameInScreen = window.convertPoint(toScreen: buttonFrameInWindow.origin)
-                        let buttonScreenFrame = NSRect(
-                            origin: buttonFrameInScreen,
-                            size: buttonFrameInWindow.size
-                        )
-                        return buttonScreenFrame.contains(mouseLocation)
-                    }
-                    
-                    //if !isOverAnyButton {
-                        //thumbnailView?.hideThumbnail()
-                    //}
-                }
+
+    private func prepareHistoryThumbnail(windowInfo: WindowInfo) {
+        if let cgWindowID = windowInfo.cgWindowID,
+           let windowList = CGWindowListCopyWindowInfo([.optionIncludingWindow], cgWindowID) as? [[CFString: Any]],
+           let cgWindowInfo = windowList.first,
+           let ownerPID = cgWindowInfo[kCGWindowOwnerPID] as? pid_t,
+           let runningApp = NSRunningApplication(processIdentifier: ownerPID) {
+            let updatedWindowInfo = WindowInfo(
+                window: windowInfo.window,
+                name: windowInfo.name,
+                cgWindowID: cgWindowID,
+                isAppElement: windowInfo.isAppElement
+            )
+
+            if thumbnailView == nil {
+                thumbnailView = WindowThumbnailView(
+                    targetApp: runningApp,
+                    dockIconCenter: dockIconCenter,
+                    options: [updatedWindowInfo],
+                    windowChooser: self.window?.windowController as? WindowChooserController
+                )
+            } else {
+                thumbnailView?.updateTargetApp(runningApp)
+                thumbnailView?.updateOptions([updatedWindowInfo])
             }
+
+            thumbnailView?.showThumbnail(for: updatedWindowInfo, withTimer: false)
+            return
+        }
+
+        var pid: pid_t = 0
+        if AXUIElementGetPid(windowInfo.window, &pid) == .success,
+           let runningApp = NSRunningApplication(processIdentifier: pid) {
+            if thumbnailView == nil {
+                thumbnailView = WindowThumbnailView(
+                    targetApp: runningApp,
+                    dockIconCenter: dockIconCenter,
+                    options: [windowInfo],
+                    windowChooser: self.window?.windowController as? WindowChooserController
+                )
+            } else {
+                thumbnailView?.updateTargetApp(runningApp)
+                thumbnailView?.updateOptions([windowInfo])
+            }
+
+            thumbnailView?.showThumbnail(for: windowInfo, withTimer: false)
         }
     }
     
@@ -1675,6 +1753,22 @@ class WindowChooserView: NSView {
             action: #selector(closeButtonClicked(_:))
         )
     }
+
+    private func hasSameWindowOrdering(as windows: [WindowInfo]) -> Bool {
+        guard options.count == windows.count else { return false }
+
+        for (current, updated) in zip(options, windows) {
+            if current.cgWindowID != updated.cgWindowID {
+                return false
+            }
+
+            if current.name != updated.name || current.isAppElement != updated.isAppElement {
+                return false
+            }
+        }
+
+        return true
+    }
     
     func updateWindows(_ windows: [WindowInfo], forceNormalMode: Bool = false) {
         // Reset history mode if needed
@@ -1686,7 +1780,9 @@ class WindowChooserView: NSView {
         }
         
         // Use static method to filter and sort
-        self.options = WindowChooserView.sortWindows(windows, app: targetApp, isHistory: isHistoryMode)
+        let sortedWindows = WindowChooserView.sortWindows(windows, app: targetApp, isHistory: isHistoryMode)
+        let windowsChanged = !hasSameWindowOrdering(as: sortedWindows)
+        self.options = sortedWindows
         
         // Find the topmost window from sorted list
         if let frontmost = self.options.first(where: { window in
@@ -1706,8 +1802,12 @@ class WindowChooserView: NSView {
             windowController.updateWindowSize(to: newHeight)
         }
         
-        // Recreate all buttons with updated windows
-        setupButtons()
+        if windowsChanged {
+            // Recreate all buttons only when the actual window list changed.
+            setupButtons()
+        } else {
+            updateButtonStates()
+        }
         
         // Force layout update
         needsLayout = true
@@ -1745,8 +1845,10 @@ class WindowChooserView: NSView {
     }*/
 
     func cleanup() {
-        // Cleanup thumbnail view without destroying it
-        //thumbnailView?.hideThumbnail()
+        clearHoverEffect()
+        thumbnailView?.hideThumbnail(removePanel: true)
+        thumbnailView?.cleanup()
+        thumbnailView = nil
         
         // Remove tracking areas and clear event monitors
         buttons.forEach { button in
@@ -1760,6 +1862,11 @@ class WindowChooserView: NSView {
             button.action = nil
         }
         closeButtons.forEach { button in
+            button.trackingAreas.forEach { button.removeTrackingArea($0) }
+            button.target = nil
+            button.action = nil
+        }
+        sideButtons.forEach { button in
             button.trackingAreas.forEach { button.removeTrackingArea($0) }
             button.target = nil
             button.action = nil
@@ -1778,6 +1885,10 @@ class WindowChooserView: NSView {
             button.layer?.removeFromSuperlayer()
             button.removeFromSuperview()
         }
+        sideButtons.forEach { button in
+            button.layer?.removeFromSuperlayer()
+            button.removeFromSuperview()
+        }
         
         // Clear title field
         titleField?.stringValue = ""
@@ -1788,7 +1899,9 @@ class WindowChooserView: NSView {
         buttons.removeAll(keepingCapacity: false)
         hideButtons.removeAll(keepingCapacity: false)
         closeButtons.removeAll(keepingCapacity: false)
+        sideButtons.removeAll(keepingCapacity: false)
         options.removeAll(keepingCapacity: false)
+        minimizedStateByTag.removeAll(keepingCapacity: false)
         
         // Clear other references
         callback = nil
@@ -1807,15 +1920,55 @@ class WindowChooserView: NSView {
                 var minimizedValue: AnyObject?
                 let isMinimized = AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success &&
                                  (minimizedValue as? Bool == true)
-                
-                if isMinimized {
-                    button.contentTintColor = Constants.UI.Theme.minimizedTextColor
-                } else if windowInfo.window == topmostWindow {
-                    button.contentTintColor = Constants.UI.Theme.primaryTextColor
-                } else {
-                    button.contentTintColor = Constants.UI.Theme.secondaryTextColor
-                }
+                minimizedStateByTag[index] = isMinimized
+                applyStoredTextState(to: button)
             }
+        }
+    }
+
+    private func updateHoverForCurrentMouseLocation() {
+        guard let window else { return }
+
+        let locationInView = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        guard bounds.contains(locationInView) else {
+            if hoveredButtonTag != nil {
+                clearHoverEffect()
+            }
+            return
+        }
+
+        if let hoveredButton = buttons.first(where: { $0.frame.contains(locationInView) }) {
+            if hoveredButtonTag != hoveredButton.tag {
+                hoverSequenceNumber &+= 1
+                let sequence = hoverSequenceNumber
+                Logger.perf("hover", "move seq=\(sequence) from=\(hoveredButtonTag.map(String.init) ?? "nil") to=\(hoveredButton.tag)")
+                thumbnailView?.cancelPendingThumbnailWork()
+                applyHoverEffect(for: hoveredButton)
+                Logger.perf("hover", "highlight applied seq=\(sequence) tag=\(hoveredButton.tag)")
+                scheduleThumbnailHover(for: hoveredButton.tag)
+            }
+        } else if hoveredButtonTag != nil {
+            clearHoverEffect()
+        }
+    }
+
+    func syncHoverToCurrentMouseLocation() {
+        updateHoverForCurrentMouseLocation()
+    }
+
+    private func applyStoredTextState(to button: NSButton) {
+        let isMinimized = minimizedStateByTag[button.tag] ?? false
+
+        if isHistoryMode && button.tag == 0 {
+            button.contentTintColor = Constants.UI.Theme.primaryTextColor
+        } else if isMinimized {
+            button.contentTintColor = Constants.UI.Theme.minimizedTextColor
+        } else if !isHistoryMode,
+                  let windowInfo = options[safe: button.tag],
+                  windowInfo.window == topmostWindow {
+            button.contentTintColor = Constants.UI.Theme.primaryTextColor
+        } else {
+            button.contentTintColor = Constants.UI.Theme.secondaryTextColor
         }
     }
 

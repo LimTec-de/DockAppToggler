@@ -28,8 +28,12 @@ let shouldSkipUpdateCheck = CommandLine.arguments.contains("--s")
 // Initialize app components
 let app = NSApplication.shared
 
+// Configure the app as an accessory before creating status-bar items.
+app.setActivationPolicy(.accessory)
+
 // Run the accessibility check once at startup
 _ = AccessibilityService.shared.requestAccessibilityPermissions()
+AppPermissionMonitor.shared.start()
 
 // Check if displays have separate spaces and log the status
 Logger.info("Displays have separate spaces: \(NSScreen.displaysHaveSeparateSpaces)")
@@ -64,12 +68,8 @@ let appController = (
     multiDisplay: multiDisplayManager  // Add the multi-display manager to the tuple
 )
 
-// Configure the app to be a background application
-app.setActivationPolicy(.accessory)
-
 // Initialize keyboard shortcut monitor
 _ = KeyboardShortcutMonitor.shared
 
 // Start the application
 app.run()
-

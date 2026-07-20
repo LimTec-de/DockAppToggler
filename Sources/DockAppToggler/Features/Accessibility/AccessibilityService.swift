@@ -17,28 +17,20 @@ class AccessibilityService {
     private init() {}
     
     func requestAccessibilityPermissions() -> Bool {
+        AppPermissionMonitor.shared.start()
+
         // First check if we already have permissions
         if AXIsProcessTrusted() {
             return true
         }
-        
-        // If not, and we haven't shown the dialog yet, request permissions
-        if !hasShownPermissionDialog {
-            hasShownPermissionDialog = true
-            
-            // Request permissions with prompt using static string
-            let options = [Self.trustedCheckOptionPrompt: true] as CFDictionary
-            let result = AXIsProcessTrustedWithOptions(options)
-            
-            // Start checking for permission changes if we don't have them yet
-            if !result && !isCheckingPermissions {
-                isCheckingPermissions = true
-                startPermissionCheck()
-            }
-            
-            return result
+
+        // Do NOT raise the raw macOS prompt here — the in-app permission wizard (shown
+        // from the tray toggle / settings) is the single place that guides the user.
+        // We just keep polling so the app reacts once the permission is granted.
+        if !isCheckingPermissions {
+            isCheckingPermissions = true
+            startPermissionCheck()
         }
-        
         return false
     }
     
@@ -55,30 +47,12 @@ class AccessibilityService {
                     self.permissionCheckTimer?.invalidate()
                     self.permissionCheckTimer = nil
                     self.isCheckingPermissions = false
-                    await self.offerRestart()
+                    NotificationCenter.default.post(
+                        name: .appPermissionsChanged,
+                        object: nil,
+                        userInfo: ["state": AppPermissionState.current]
+                    )
                 }
-            }
-        }
-    }
-    
-    private func offerRestart() async {
-        let alert = NSAlert()
-        alert.messageText = "Accessibility Permissions Granted"
-        alert.informativeText = "DockAppToggler needs to restart to function properly. Would you like to restart now?"
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "Restart Now")
-        alert.addButton(withTitle: "Later")
-        
-        if alert.runModal() == .alertFirstButtonReturn {
-            // Get the path to the current executable
-            if let executablePath = Bundle.main.executablePath {
-                // Launch a new instance of the app
-                let process = Process()
-                process.executableURL = URL(fileURLWithPath: executablePath)
-                try? process.run()
-                
-                // Terminate the current instance
-                NSApp.terminate(nil)
             }
         }
     }
@@ -371,6 +345,57 @@ class AccessibilityService {
         }
     }
     
+    func raiseWindowOnly(_ window: AXUIElement, for app: NSRunningApplication) {
+        AXUIElementSetAttributeValue(window, kAXHiddenAttribute as CFString, false as CFTypeRef)
+        AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
+        AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+        AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, true as CFTypeRef)
+        AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, true as CFTypeRef)
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [self] in
+            guard NSWorkspace.shared.frontmostApplication?.processIdentifier != app.processIdentifier else { return }
+            if !self.activateFrontWindowOnly(pid: app.processIdentifier) {
+                AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+                AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, true as CFTypeRef)
+                AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, true as CFTypeRef)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    if NSWorkspace.shared.frontmostApplication?.processIdentifier != app.processIdentifier {
+                        app.activate(options: [.activateIgnoringOtherApps])
+                    }
+                }
+            }
+        }
+    }
+
+    func prepareWindowForBackground(_ window: AXUIElement) {
+        AXUIElementSetAttributeValue(window, kAXHiddenAttribute as CFString, false as CFTypeRef)
+        AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
+        AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, false as CFTypeRef)
+        AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, false as CFTypeRef)
+    }
+
+    private func activateFrontWindowOnly(pid: pid_t) -> Bool {
+        let path = "/System/Library/Frameworks/ApplicationServices.framework/Frameworks/HIServices.framework/HIServices"
+        guard let handle = dlopen(path, RTLD_LAZY) else { return false }
+        defer { dlclose(handle) }
+
+        guard let getSym = dlsym(handle, "GetProcessForPID"),
+              let setSym = dlsym(handle, "SetFrontProcessWithOptions") else { return false }
+
+        typealias GetProcFn = @convention(c) (pid_t, UnsafeMutableRawPointer) -> Int32
+        typealias SetFrontFn = @convention(c) (UnsafeRawPointer, UInt32) -> Int32
+
+        let psn = UnsafeMutableRawPointer.allocate(byteCount: 8, alignment: 4)
+        defer { psn.deallocate() }
+        psn.initializeMemory(as: UInt8.self, repeating: 0, count: 8)
+
+        let getProc = unsafeBitCast(getSym, to: GetProcFn.self)
+        let setFront = unsafeBitCast(setSym, to: SetFrontFn.self)
+
+        guard getProc(pid, psn) == 0 else { return false }
+        return setFront(psn, 1) == 0
+    }
+
     func raiseWindow(windowInfo: WindowInfo, for app: NSRunningApplication) {
         Logger.debug("=== RAISING WINDOW/APP ===")
         Logger.debug("Raising - Name: \(windowInfo.name), IsAppElement: \(windowInfo.isAppElement)")

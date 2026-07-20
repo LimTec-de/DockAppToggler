@@ -88,22 +88,24 @@ class WindowThumbnailView {
     
     // Add cancellation support for thumbnail creation
     @MainActor private static var currentThumbnailTask: Task<Void, Never>?
+    @MainActor private static var currentThumbnailRequestIdentifier: String?
     
     // Add debouncing support for better performance
     @MainActor private static var thumbnailDebounceTimer: DispatchSourceTimer?
     @MainActor private static var pendingThumbnailRequest: PendingThumbnailRequest?
     @MainActor private static var lastThumbnailRequestTime: Date = Date.distantPast
-    private static let fastMovementThreshold: TimeInterval = 0.1 // If requests come faster than 100ms, we're moving fast
+    private static let fastMovementThreshold: TimeInterval = 0.10
     private static let stableHoverDelay: TimeInterval = 0.06
+    private static let fastHoverDelay: TimeInterval = 0.09
 
     @MainActor private static var activeWindowSnapshot: [[String: Any]] = []
     @MainActor private static var lastWindowSnapshotTime: Date = .distantPast
-    private static let windowSnapshotTTL: TimeInterval = 0.2
+    private static let windowSnapshotTTL: TimeInterval = 0.35
     @MainActor private static var lastWindowSharingCheckTime: Date = .distantPast
     @MainActor private static var lastWindowSharingDetected = false
     private static let windowSharingCheckInterval: TimeInterval = 1.5
-    private static let smoothMoveDuration: TimeInterval = 0.12
-    private static let minMoveDelta: CGFloat = 2.0
+    private static let smoothMoveDuration: TimeInterval = 0.08
+    private static let minMoveDelta: CGFloat = 10.0
     
     // Add struct for pending requests
     private struct PendingThumbnailRequest {
@@ -111,6 +113,12 @@ class WindowThumbnailView {
         let targetApp: NSRunningApplication
         let instance: ObjectIdentifier
         let timestamp: Date
+        let identifier: String
+    }
+
+    private struct PreviewAvailabilityResult: Sendable {
+        let hasPermission: Bool
+        let sharingDetected: Bool
     }
     
     private let dockIconCenter: NSPoint
@@ -144,7 +152,7 @@ class WindowThumbnailView {
     // Update static property to use UserDefaults
     @MainActor private static var previewsEnabled: Bool {
         get {
-            UserDefaults.standard.bool(forKey: "WindowPreviewsEnabled")
+            UserDefaults.standard.bool(forKey: "WindowPreviewsEnabled", defaultValue: false)
         }
         set {
             UserDefaults.standard.set(newValue, forKey: "WindowPreviewsEnabled")
@@ -171,71 +179,92 @@ class WindowThumbnailView {
         return !previewsEnabled
     }
     
-    // Update the WindowCacheKey struct
+    // Stable cache key: equal windows must produce equal keys so dictionary
+    // lookups succeed across calls. Previously this struct stored a per-instance
+    // UUID, which made every freshly-built key hash differently and caused
+    // hasUsableCachedThumbnail() to always miss.
     private struct WindowCacheKey: Hashable {
         let pid: pid_t
         let windowID: CGWindowID?
         let windowName: String
-        private let uniqueID: UUID  // Add a unique identifier
-        
-        init(pid: pid_t, windowID: CGWindowID?, windowName: String) {
-            self.pid = pid
-            self.windowID = windowID
-            self.windowName = windowName
-            self.uniqueID = UUID()  // Generate a unique ID for each key
-        }
-        
+
         func hash(into hasher: inout Hasher) {
-            if let windowID = windowID {
-                // If we have a window ID, use only that and pid
-                hasher.combine(pid)
+            hasher.combine(pid)
+            if let windowID {
                 hasher.combine(windowID)
             } else {
-                // Otherwise use pid, name, and unique ID
-                hasher.combine(pid)
                 hasher.combine(windowName)
-                hasher.combine(uniqueID)
             }
         }
-        
+
         static func == (lhs: WindowCacheKey, rhs: WindowCacheKey) -> Bool {
-            // If either has a window ID, compare by ID
+            guard lhs.pid == rhs.pid else { return false }
             if let lhsID = lhs.windowID, let rhsID = rhs.windowID {
-                return lhs.pid == rhs.pid && lhsID == rhsID
+                return lhsID == rhsID
             }
-            // Otherwise compare by all fields including unique ID
-            return lhs.pid == rhs.pid && 
-                   lhs.windowName == rhs.windowName && 
-                   lhs.uniqueID == rhs.uniqueID
+            if lhs.windowID == nil && rhs.windowID == nil {
+                return lhs.windowName == rhs.windowName
+            }
+            return false
         }
     }
-    
-    // Add a cache for window keys to maintain consistency
-    private static var windowKeyCache: [String: WindowCacheKey] = [:]
-    
-    // Add method to get or create a cache key
+
     private func getCacheKey(for windowInfo: WindowInfo) -> WindowCacheKey {
-        let identifier = "\(targetApp.processIdentifier):\(windowInfo.name):\(windowInfo.cgWindowID ?? 0)"
-        
-        if let existingKey = Self.windowKeyCache[identifier] {
-            return existingKey
-        }
-        
-        let newKey = WindowCacheKey(
+        WindowCacheKey(
             pid: targetApp.processIdentifier,
             windowID: windowInfo.cgWindowID,
             windowName: windowInfo.name
         )
-        Self.windowKeyCache[identifier] = newKey
-        return newKey
+    }
+
+    private func thumbnailRequestIdentifier(for windowInfo: WindowInfo) -> String {
+        "\(targetApp.processIdentifier):\(windowInfo.name):\(windowInfo.cgWindowID ?? 0)"
+    }
+
+    @MainActor
+    func hasUsableCachedThumbnail(for windowInfo: WindowInfo) -> Bool {
+        let cacheKey = getCacheKey(for: windowInfo)
+        guard let cached = Self.cachedThumbnails[cacheKey] else { return false }
+        return cached.isValid(forHiddenApp: targetApp.isHidden)
+    }
+
+    @MainActor
+    private func makeScaledThumbnail(from cgImage: CGImage, maxPixel: CGFloat) -> NSImage {
+        let originalWidth = CGFloat(cgImage.width)
+        let originalHeight = CGFloat(cgImage.height)
+        let longestEdge = max(originalWidth, originalHeight)
+
+        guard longestEdge > maxPixel else {
+            return NSImage(cgImage: cgImage, size: NSSize(width: originalWidth, height: originalHeight))
+        }
+
+        let scale = maxPixel / longestEdge
+        let targetSize = NSSize(
+            width: max(1, floor(originalWidth * scale)),
+            height: max(1, floor(originalHeight * scale))
+        )
+
+        let image = NSImage(size: targetSize)
+        image.lockFocus()
+        NSGraphicsContext.current?.imageInterpolation = .medium
+        NSImage(cgImage: cgImage, size: NSSize(width: originalWidth, height: originalHeight)).draw(
+            in: NSRect(origin: .zero, size: targetSize),
+            from: NSRect(origin: .zero, size: NSSize(width: originalWidth, height: originalHeight)),
+            operation: .copy,
+            fraction: 1.0
+        )
+        image.unlockFocus()
+        return image
     }
     
     // Add at top of class
     private static var lastThumbnailCreationTime: [CGWindowID: Date] = [:]
-    private static let minimumThumbnailInterval: TimeInterval = 0.5  // Half second minimum between captures
+    private static let minimumThumbnailInterval: TimeInterval = 1.2
     
     // Add near top of class
     private static let maxCacheSize = 50  // Maximum number of cached thumbnails
+    private static let regularThumbnailMaxPixel: CGFloat = 720
+    private static let optimizedThumbnailMaxPixel: CGFloat = 480
     
     // Add near the top of the class after other static properties
     @MainActor private static var hasCheckedPermissions = false
@@ -243,6 +272,21 @@ class WindowThumbnailView {
     // Add near the top of the class
     @MainActor private static var hasCheckedScreenRecordingPermission = false
     @MainActor private static var hasLoggedMissingScreenRecordingPermission = false
+    @MainActor private static var cachedScreenRecordingPermission: Bool?
+    @MainActor private static var lastScreenRecordingPermissionCheckTime: Date = .distantPast
+    private static let screenRecordingPermissionCacheTTL: TimeInterval = 2.0
+    nonisolated private static let sharingIndicators = [
+        "is being shared",
+        "sharing a window",
+        "wird geteilt",
+        "esta compartiendo",
+        "est partage",
+        "esta sendo compartilhada",
+        "viene condiviso",
+        "wordt gedeeld",
+        "共有中",
+        "正在共享"
+    ]
     
     // Add property to track if thumbnail creation is in progress
     private var isThumbnailLoading = false
@@ -271,17 +315,43 @@ class WindowThumbnailView {
         return !shared.isVisible
     }
 
+    // Applied the first time a preview container is configured. We key off a
+    // private identifier so that the shadow/background/corner-radius aren't
+    // re-assigned on every cache hit — CALayer otherwise rebuilds the soft
+    // shadow on each mutation, which shows up as rising hover latency over a
+    // long session.
+    private static let previewContainerStyledIdentifier = NSUserInterfaceItemIdentifier("DockAppToggler.PreviewContainerStyled")
+
     private func applyPreviewContainerStyle(_ view: NSView) {
         view.wantsLayer = true
+        if view.identifier == Self.previewContainerStyledIdentifier {
+            // Already styled; only keep background in sync in case dark-mode
+            // or theme tokens change. Shadow parameters are stable so we skip
+            // the expensive layer mutation.
+            view.layer?.backgroundColor = previewPanelBackgroundColor
+            return
+        }
         view.layer?.backgroundColor = previewPanelBackgroundColor
         view.layer?.cornerRadius = 12
         view.layer?.masksToBounds = false
+        // Symmetric halo shadow drawn by CoreAnimation. We deliberately do
+        // NOT set a shadowPath nor a frameDidChange observer:
+        //   - shadowPath would go stale when the container resizes for a
+        //     different thumbnail aspect ratio.
+        //   - The matching observer would leak one closure into
+        //     NotificationCenter for every freshly-created fallback container,
+        //     which is exactly the kind of slow accumulator that made the
+        //     menu feel "slower over time".
+        // Letting CoreAnimation derive the shadow from the layer's alpha
+        // mask is slightly more expensive per redraw, but the panel only
+        // redraws on show / resize, so the steady-state cost is negligible.
         view.layer?.shadowColor = NSColor.black.cgColor
-        view.layer?.shadowOpacity = 0.62
-        view.layer?.shadowRadius = 34
+        view.layer?.shadowOpacity = 0.85
+        view.layer?.shadowRadius = 18
         view.layer?.shadowOffset = .zero
         view.layer?.borderWidth = 0
         view.layer?.borderColor = nil
+        view.identifier = Self.previewContainerStyledIdentifier
     }
     
     init(targetApp: NSRunningApplication, dockIconCenter: NSPoint, options: [WindowInfo], windowChooser: WindowChooserController?) {
@@ -294,17 +364,15 @@ class WindowThumbnailView {
         
         // Register this instance
         Self.activeThumbnailViews.insert(ObjectIdentifier(self))
+        Logger.perf("preview", "thumbnail view init active_views=\(Self.activeThumbnailViews.count)")
         
         // Cancel any pending cleanup - we want to reuse the window
         Self.cancelPendingCleanup()
         
-        // Cache thumbnails for all visible windows only once after startup
-        if !Self.hasPerformedInitialCache {
-            Task { @MainActor in
-                await cacheVisibleWindows()
-                Self.hasPerformedInitialCache = true
-            }
-        }
+        // Avoid eager thumbnail generation on first hover; build/app-bundle runs were
+        // noticeably less responsive when initialization immediately started caching
+        // every visible window for the app.
+        Self.hasPerformedInitialCache = true
     }
     
     // Add new method to cancel pending cleanup
@@ -399,18 +467,21 @@ class WindowThumbnailView {
                 return nil
             }
 
-            let captureOptions: CGWindowImageOption = [
-                .boundsIgnoreFraming,
-                .nominalResolution,
-                .bestResolution
-            ]
-
-            imageData = CGWindowListCreateImage(
-                .null,
-                .optionIncludingWindow,
-                windowID,
-                captureOptions
-            )
+            // Capture off main thread to avoid blocking UI (CGWindowListCreateImage
+            // involves TCC permission checks that are slower with hardened runtime)
+            imageData = await Task.detached {
+                guard !Task.isCancelled else { return nil as CGImage? }
+                let captureOptions: CGWindowImageOption = [
+                    .boundsIgnoreFraming,
+                    .nominalResolution
+                ]
+                return CGWindowListCreateImage(
+                    .null,
+                    .optionIncludingWindow,
+                    windowID,
+                    captureOptions
+                )
+            }.value
         } else {
             // Create a data task to handle the window capture
             imageData = await Task.detached { [targetApp = targetApp, windowInfo = windowInfo] () -> CGImage? in
@@ -485,10 +556,9 @@ class WindowThumbnailView {
                     
                     let captureOptions: CGWindowImageOption = [
                         .boundsIgnoreFraming,
-                        .nominalResolution,
-                        .bestResolution
+                        .nominalResolution
                     ]
-                    
+
                     return CGWindowListCreateImage(
                         .null,
                         .optionIncludingWindow,
@@ -527,10 +597,9 @@ class WindowThumbnailView {
                 
                 let captureOptions: CGWindowImageOption = [
                     .boundsIgnoreFraming,
-                    .nominalResolution,
-                    .bestResolution
+                    .nominalResolution
                 ]
-                
+
                 return CGWindowListCreateImage(
                     .null,
                     .optionIncludingWindow,
@@ -549,24 +618,13 @@ class WindowThumbnailView {
             return nil 
         }
         
-        // Convert CGImage to NSImage on the main actor
-        guard let cgImage = imageData else { 
+        // Convert CGImage to NSImage
+        guard let cgImage = imageData else {
             previewWindowBlocked = false
-            return nil 
+            return nil
         }
-        
-        let scaleFactor: CGFloat = 0.5
-        let scaledSize = NSSize(
-            width: CGFloat(cgImage.width) * scaleFactor,
-            height: CGFloat(cgImage.height) * scaleFactor
-        )
-        
-        let image = NSImage(size: scaledSize)
-        image.lockFocus()
-        NSGraphicsContext.current?.imageInterpolation = .medium
-        let rect = NSRect(origin: .zero, size: scaledSize)
-        NSImage(cgImage: cgImage, size: .zero).draw(in: rect)
-        image.unlockFocus()
+
+        let image = makeScaledThumbnail(from: cgImage, maxPixel: Self.regularThumbnailMaxPixel)
 
         // Check for cancellation before final caching operations
         guard !Task.isCancelled else { 
@@ -621,16 +679,20 @@ class WindowThumbnailView {
         // Fast path: when we already have the CGWindowID, avoid scanning the whole window list.
         let imageData: CGImage?
         if let windowID = windowInfo.cgWindowID {
-            let captureOptions: CGWindowImageOption = [
-                .boundsIgnoreFraming,
-                .nominalResolution
-            ]
-            imageData = CGWindowListCreateImage(
-                .null,
-                .optionIncludingWindow,
-                windowID,
-                captureOptions
-            )
+            // Capture off main thread to avoid blocking UI
+            imageData = await Task.detached {
+                guard !Task.isCancelled else { return nil as CGImage? }
+                let captureOptions: CGWindowImageOption = [
+                    .boundsIgnoreFraming,
+                    .nominalResolution
+                ]
+                return CGWindowListCreateImage(
+                    .null,
+                    .optionIncludingWindow,
+                    windowID,
+                    captureOptions
+                )
+            }.value
         } else {
             // Use faster, lower quality capture for optimized thumbnails
             imageData = await Task.detached { [targetApp = targetApp, windowInfo = windowInfo] () -> CGImage? in
@@ -678,25 +740,13 @@ class WindowThumbnailView {
             return nil 
         }
         
-        // Convert CGImage to NSImage with more aggressive scaling for speed
-        guard let cgImage = imageData else { 
+        // Convert CGImage to NSImage directly (nominalResolution already provides reasonable size)
+        guard let cgImage = imageData else {
             previewWindowBlocked = false
-            return nil 
+            return nil
         }
-        
-        // Use more aggressive scaling for optimized thumbnails
-        let scaleFactor: CGFloat = 0.3  // Reduced from 0.5 for speed
-        let scaledSize = NSSize(
-            width: CGFloat(cgImage.width) * scaleFactor,
-            height: CGFloat(cgImage.height) * scaleFactor
-        )
-        
-        let image = NSImage(size: scaledSize)
-        image.lockFocus()
-        NSGraphicsContext.current?.imageInterpolation = .low  // Use low quality for speed
-        let rect = NSRect(origin: .zero, size: scaledSize)
-        NSImage(cgImage: cgImage, size: .zero).draw(in: rect)
-        image.unlockFocus()
+
+        let image = makeScaledThumbnail(from: cgImage, maxPixel: Self.optimizedThumbnailMaxPixel)
 
         // Check for cancellation before final caching operations
         guard !Task.isCancelled else { 
@@ -898,6 +948,10 @@ class WindowThumbnailView {
             // Create views
             containerView = NSView(frame: NSRect(origin: .zero, size: panelSize))
             containerView.wantsLayer = true
+            // Required: AppKit's window-content layer can come up with
+            // masksToBounds = true and would then clip the contentContainer's
+            // CALayer shadow back to the visible rect, leaving no halo.
+            containerView.layer?.masksToBounds = false
             
             contentContainer = NSView(frame: NSRect(
                 x: shadowPadding,
@@ -948,103 +1002,166 @@ class WindowThumbnailView {
         positionAndShowWindow(panel)
     }
     
-    func showThumbnail(for windowInfo: WindowInfo, withTimer: Bool = true) {
-        Task { @MainActor in
-            // Check if previews are enabled
-            guard Self.previewsEnabled else {
-                Logger.debug("Window previews are disabled")
-                return
-            }
+    func showThumbnail(for windowInfo: WindowInfo, withTimer: Bool = true, skipDebounce: Bool = false) {
+        // Class is @MainActor isolated already; no need to bounce through Task.
+        // Check if previews are enabled
+        guard Self.previewsEnabled else {
+            Logger.debug("Window previews are disabled")
+            return
+        }
 
-            // Cancel any existing thumbnail creation task
-            Self.currentThumbnailTask?.cancel()
-            Self.currentThumbnailTask = nil
+        let requestIdentifier = thumbnailRequestIdentifier(for: windowInfo)
+        let requestStart = ProcessInfo.processInfo.systemUptime
+        Logger.perf("preview", "request start id=\(requestIdentifier) timer=\(withTimer) skipDebounce=\(skipDebounce)")
 
-            // Cancel any pending cleanup - we want to reuse the window
-            Self.cancelPendingCleanup()
-            
-            // Cancel any existing timer for this instance
-            autoCloseTimer?.cancel()
-            autoCloseTimer = nil
-
-            // Detect if we're moving fast between icons
-            let now = Date()
-            Self.lastInteractiveHoverTime = now
-            Self.lastPreviewShowTime = now
-            let timeSinceLastRequest = now.timeIntervalSince(Self.lastThumbnailRequestTime)
-            let isMovingFast = timeSinceLastRequest < Self.fastMovementThreshold
-            Self.lastThumbnailRequestTime = now
-
-            // Fast path: if a valid thumbnail is already cached, show it immediately.
-            let cacheKey = getCacheKey(for: windowInfo)
-            if let cached = Self.cachedThumbnails[cacheKey],
-               cached.isValid(forHiddenApp: targetApp.isHidden) {
-                displayThumbnailInSharedWindow(cached.image, for: windowInfo, isLoading: false)
-                if withTimer {
-                    setupAutoCloseTimer(for: windowInfo)
-                }
-                return
-            }
-
-            // Cancel any existing debounce timer
-            Self.thumbnailDebounceTimer?.cancel()
-            Self.thumbnailDebounceTimer = nil
-
-            // Store the request
-            Self.pendingThumbnailRequest = PendingThumbnailRequest(
-                windowInfo: windowInfo,
-                targetApp: targetApp,
-                instance: ObjectIdentifier(self),
-                timestamp: now
-            )
-
-            // Avoid flashing icons between previews if a preview is already visible.
-            if shouldShowLoadingIconImmediately(), let appIcon = targetApp.icon {
-                displayThumbnailInSharedWindow(appIcon, for: windowInfo, isLoading: true)
-            }
-
-            // Set up auto-close timer immediately for fast response
+        if Self.currentThumbnailTask != nil,
+           Self.currentThumbnailRequestIdentifier == requestIdentifier {
+            Logger.perf("preview", "request deduplicated active id=\(requestIdentifier)")
             if withTimer {
                 setupAutoCloseTimer(for: windowInfo)
             }
+            return
+        }
 
-            // Delay expensive capture until hover is stable.
-            let delay = isMovingFast ? 0.03 : Self.stableHoverDelay
-            let timer = DispatchSource.makeTimerSource(queue: .main)
-            timer.schedule(deadline: .now() + delay)
+        if let pending = Self.pendingThumbnailRequest,
+           pending.instance == ObjectIdentifier(self),
+           pending.identifier == requestIdentifier {
+            Logger.perf("preview", "request deduplicated pending id=\(requestIdentifier)")
+            if withTimer {
+                setupAutoCloseTimer(for: windowInfo)
+            }
+            return
+        }
 
-            timer.setEventHandler { [weak self] in
-                guard let self = self,
-                      let pending = Self.pendingThumbnailRequest,
-                      pending.instance == ObjectIdentifier(self) else {
-                    Self.thumbnailDebounceTimer?.cancel()
-                    Self.thumbnailDebounceTimer = nil
-                    Self.pendingThumbnailRequest = nil
-                    return
-                }
+        // Cancel any existing thumbnail creation task
+        Self.currentThumbnailTask?.cancel()
+        Self.currentThumbnailTask = nil
+        Self.currentThumbnailRequestIdentifier = nil
 
-                // Process the debounced request
-                Task { @MainActor in
-                    await self.processThumbnailRequest(pending.windowInfo, withTimer: false, isDebounced: isMovingFast)
-                }
+        // Cancel any pending cleanup - we want to reuse the window
+        Self.cancelPendingCleanup()
 
+        // Cancel any existing timer for this instance
+        autoCloseTimer?.cancel()
+        autoCloseTimer = nil
+
+        // Detect if we're moving fast between icons
+        let now = Date()
+        Self.lastInteractiveHoverTime = now
+        Self.lastPreviewShowTime = now
+        let timeSinceLastRequest = now.timeIntervalSince(Self.lastThumbnailRequestTime)
+        let isMovingFast = timeSinceLastRequest < Self.fastMovementThreshold
+        Self.lastThumbnailRequestTime = now
+
+        // Fast path: if a valid thumbnail is already cached, show it immediately.
+        let cacheKey = getCacheKey(for: windowInfo)
+        if let cached = Self.cachedThumbnails[cacheKey],
+           cached.isValid(forHiddenApp: targetApp.isHidden) {
+            Logger.perf("preview", "cache hit id=\(requestIdentifier) age_ms=\(Int((ProcessInfo.processInfo.systemUptime - requestStart) * 1000))")
+            displayThumbnailInSharedWindow(cached.image, for: windowInfo, isLoading: false)
+            if withTimer {
+                setupAutoCloseTimer(for: windowInfo)
+            }
+            return
+        }
+
+        // Cancel any existing debounce timer
+        Self.thumbnailDebounceTimer?.cancel()
+        Self.thumbnailDebounceTimer = nil
+
+        // Store the request
+        Self.pendingThumbnailRequest = PendingThumbnailRequest(
+            windowInfo: windowInfo,
+            targetApp: targetApp,
+            instance: ObjectIdentifier(self),
+            timestamp: now,
+            identifier: requestIdentifier
+        )
+
+        // Avoid flashing icons while moving quickly across Dock items.
+        if !isMovingFast, !shouldShowLoadingIconImmediately(), let appIcon = targetApp.icon {
+            displayThumbnailInSharedWindow(appIcon, for: windowInfo, isLoading: true)
+        }
+
+        // Set up auto-close timer immediately for fast response
+        if withTimer {
+            setupAutoCloseTimer(for: windowInfo)
+        }
+
+        // When the caller already debounced (e.g. WindowChooserView's hover
+        // scheduler), there's no value in waiting another stableHoverDelay.
+        // Skipping that double-debounce can save up to ~90ms of perceived lag.
+        if skipDebounce {
+            Logger.perf("preview", "debounce skipped id=\(requestIdentifier) reason=hover-prewarmed")
+            let pending = Self.pendingThumbnailRequest
+            Self.pendingThumbnailRequest = nil
+            Task { @MainActor [weak self] in
+                guard let self,
+                      let pending,
+                      pending.instance == ObjectIdentifier(self) else { return }
+                await self.processThumbnailRequest(pending.windowInfo, withTimer: false, isDebounced: isMovingFast)
+            }
+            return
+        }
+
+        // Delay expensive capture until hover is stable.
+        let delay = isMovingFast ? Self.fastHoverDelay : Self.stableHoverDelay
+        Logger.perf("preview", "debounce scheduled id=\(requestIdentifier) delay_ms=\(Int(delay * 1000)) fast=\(isMovingFast)")
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + delay)
+
+        timer.setEventHandler { [weak self] in
+            guard let self = self,
+                  let pending = Self.pendingThumbnailRequest,
+                  pending.instance == ObjectIdentifier(self) else {
                 Self.thumbnailDebounceTimer?.cancel()
                 Self.thumbnailDebounceTimer = nil
                 Self.pendingThumbnailRequest = nil
+                return
             }
 
-            Self.thumbnailDebounceTimer = timer
-            timer.resume()
+            Logger.perf("preview", "debounce fired id=\(pending.identifier) wait_ms=\(Int((ProcessInfo.processInfo.systemUptime - requestStart) * 1000))")
+
+            // Process the debounced request
+            Task { @MainActor in
+                await self.processThumbnailRequest(pending.windowInfo, withTimer: false, isDebounced: isMovingFast)
+            }
+
+            Self.thumbnailDebounceTimer?.cancel()
+            Self.thumbnailDebounceTimer = nil
+            Self.pendingThumbnailRequest = nil
         }
+
+        Self.thumbnailDebounceTimer = timer
+        timer.resume()
     }
     
     // Extract thumbnail processing logic
     @MainActor private func processThumbnailRequest(_ windowInfo: WindowInfo, withTimer: Bool, isDebounced: Bool) async {
-        //Logger.debug("Processing thumbnail for window: \(windowInfo.name), debounced: \(isDebounced)")
+        let requestIdentifier = thumbnailRequestIdentifier(for: windowInfo)
+        let processingStart = ProcessInfo.processInfo.systemUptime
+        Logger.perf("preview", "process start id=\(requestIdentifier) debounced=\(isDebounced)")
+        let cacheKey = getCacheKey(for: windowInfo)
         
-        // Check screen recording permission
-        guard Self.checkScreenRecordingPermission() && !isWindowShared(windowName: windowInfo.name) else {
-            Logger.debug("No screen recording permission - cannot show thumbnail")
+        // Check cache before any more expensive guard logic.
+        if let cached = Self.cachedThumbnails[cacheKey],
+           cached.isValid(forHiddenApp: targetApp.isHidden) {
+            Logger.perf("preview", "process cache hit id=\(requestIdentifier) elapsed_ms=\(Int((ProcessInfo.processInfo.systemUptime - processingStart) * 1000))")
+            displayThumbnailInSharedWindow(cached.image, for: windowInfo, isLoading: false)
+            if withTimer {
+                setupAutoCloseTimer(for: windowInfo)
+            }
+            return
+        }
+
+        // Run expensive preview eligibility checks off the hot hover path.
+        let previewAvailability = await previewAvailability(for: windowInfo.name)
+        Logger.perf(
+            "preview",
+            "availability id=\(requestIdentifier) permission=\(previewAvailability.hasPermission) shared=\(previewAvailability.sharingDetected) elapsed_ms=\(Int((ProcessInfo.processInfo.systemUptime - processingStart) * 1000))"
+        )
+        guard previewAvailability.hasPermission && !previewAvailability.sharingDetected else {
+            Logger.debug("Preview unavailable; showing fallback icon")
             showAppIconFallback(for: windowInfo)
             return
         }
@@ -1055,22 +1172,10 @@ class WindowThumbnailView {
             return
         }
         
-        let cacheKey = getCacheKey(for: windowInfo)
-        
-        // Check cache first - even for hidden apps
-        if let cached = Self.cachedThumbnails[cacheKey],
-           cached.isValid(forHiddenApp: targetApp.isHidden) {
-            displayThumbnailInSharedWindow(cached.image, for: windowInfo, isLoading: false)
-            if withTimer {
-                setupAutoCloseTimer(for: windowInfo)
-            }
-            return
-        }
-        
         // Only show loading state and attempt to create new thumbnail if app is not hidden
         if !targetApp.isHidden {
             // Show loading state immediately using shared window
-            if shouldShowLoadingIconImmediately() {
+            if !shouldShowLoadingIconImmediately() {
                 showAppIconFallback(for: windowInfo)
             }
             isThumbnailLoading = true
@@ -1084,7 +1189,10 @@ class WindowThumbnailView {
             let useOptimizedCapture = isDebounced
             
             // Create a new task for thumbnail creation with cancellation support
+            Self.currentThumbnailRequestIdentifier = thumbnailRequestIdentifier(for: windowInfo)
             Self.currentThumbnailTask = Task { @MainActor in
+                let captureStart = ProcessInfo.processInfo.systemUptime
+                Logger.perf("preview", "capture start id=\(requestIdentifier) optimized=\(useOptimizedCapture)")
                 // Use optimized thumbnail creation for debounced requests
                 let thumbnail: NSImage?
                 if useOptimizedCapture {
@@ -1096,12 +1204,17 @@ class WindowThumbnailView {
                 if let thumbnail = thumbnail {
                     // Check if task was cancelled before updating UI
                     guard !Task.isCancelled else { return }
+                    Logger.perf("preview", "capture success id=\(requestIdentifier) elapsed_ms=\(Int((ProcessInfo.processInfo.systemUptime - captureStart) * 1000)) total_ms=\(Int((ProcessInfo.processInfo.systemUptime - processingStart) * 1000))")
                     displayThumbnailInSharedWindow(thumbnail, for: windowInfo, isLoading: false)
                 } else {
                     guard !Task.isCancelled else { return }
                     isThumbnailLoading = false
+                    Logger.perf("preview", "capture fallback id=\(requestIdentifier) elapsed_ms=\(Int((ProcessInfo.processInfo.systemUptime - captureStart) * 1000)) total_ms=\(Int((ProcessInfo.processInfo.systemUptime - processingStart) * 1000))")
                     showAppIconFallback(for: windowInfo)
                 }
+
+                Self.currentThumbnailTask = nil
+                Self.currentThumbnailRequestIdentifier = nil
             }
         } else {
             // For hidden apps, try to use cached app thumbnail first
@@ -1153,6 +1266,7 @@ class WindowThumbnailView {
         // Create views
         let containerView = NSView(frame: NSRect(origin: .zero, size: panelSize))
         containerView.wantsLayer = true
+        containerView.layer?.masksToBounds = false  // see getOrCreateSharedWindow
         
         let contentContainer = NSView(frame: NSRect(
             x: shadowPadding,
@@ -1209,7 +1323,7 @@ class WindowThumbnailView {
         
         // Create a dispatch timer that runs on main queue
         let timer = DispatchSource.makeTimerSource(queue: .main)
-        timer.schedule(deadline: .now() + 0.16, repeating: 0.16)
+        timer.schedule(deadline: .now() + 0.24, repeating: 0.24)
         
         timer.setEventHandler { [weak self] in
             guard let self = self else {
@@ -1229,6 +1343,26 @@ class WindowThumbnailView {
                 return
             }
 
+            // Check the cheap hover regions before doing an expensive Dock AX hit-test.
+            var isOverMenu = false
+            if let chooserWindow = self.windowChooser?.window {
+                isOverMenu = NSPointInRect(mouseLocation, chooserWindow.frame)
+            }
+
+            var isOverThumbnail = false
+            if let thumbnailWindow = self._thumbnailWindow {
+                isOverThumbnail = NSPointInRect(mouseLocation, thumbnailWindow.frame)
+            }
+
+            if let sharedWindow = Self.sharedThumbnailWindow {
+                isOverThumbnail = isOverThumbnail || NSPointInRect(mouseLocation, sharedWindow.frame)
+            }
+
+            if isOverMenu || isOverThumbnail {
+                Self.lastInteractiveHoverTime = Date()
+                return
+            }
+
             // Convert from global bottom-left coordinates to the coordinate space expected by Dock hit testing.
             let flippedY = screen.frame.maxY - mouseLocation.y
             let dockMouseLocation = CGPoint(x: mouseLocation.x, y: flippedY)
@@ -1237,26 +1371,6 @@ class WindowThumbnailView {
             let dockResult = DockService.shared.findAppUnderCursor(at: dockMouseLocation)
             let isOverAnyDockIcon = dockResult != nil
             let isInDockTransitionArea = self.isMouseInDockTransitionArea(mouseLocation, on: screen)
-            
-            // Improved menu detection
-            var isOverMenu = false
-            if let chooserWindow = self.windowChooser?.window {
-                let windowFrame = chooserWindow.frame
-                isOverMenu = NSPointInRect(mouseLocation, windowFrame)
-            }
-            
-            // Check if mouse is over the thumbnail itself
-            var isOverThumbnail = false
-            if let thumbnailWindow = self._thumbnailWindow {
-                let thumbnailFrame = thumbnailWindow.frame
-                isOverThumbnail = NSPointInRect(mouseLocation, thumbnailFrame)
-            }
-            
-            // Also check shared thumbnail window
-            if let sharedWindow = Self.sharedThumbnailWindow {
-                let sharedFrame = sharedWindow.frame
-                isOverThumbnail = isOverThumbnail || NSPointInRect(mouseLocation, sharedFrame)
-            }
 
             if isOverAnyDockIcon || isInDockTransitionArea || isOverMenu || isOverThumbnail {
                 Self.lastInteractiveHoverTime = Date()
@@ -1308,6 +1422,7 @@ class WindowThumbnailView {
         // Cancel any existing thumbnail creation task
         Self.currentThumbnailTask?.cancel()
         Self.currentThumbnailTask = nil
+        Self.currentThumbnailRequestIdentifier = nil
         
         // Cancel any existing pending cleanup
         Self.cancelPendingCleanup()
@@ -1321,6 +1436,19 @@ class WindowThumbnailView {
 
         // Schedule delayed fade-out
         Self.scheduleDelayedFadeOut()
+    }
+
+    @MainActor
+    func cancelPendingThumbnailWork() {
+        autoCloseTimer?.cancel()
+        autoCloseTimer = nil
+        Self.thumbnailDebounceTimer?.cancel()
+        Self.thumbnailDebounceTimer = nil
+        Self.pendingThumbnailRequest = nil
+        Self.currentThumbnailTask?.cancel()
+        Self.currentThumbnailTask = nil
+        Self.currentThumbnailRequestIdentifier = nil
+        isThumbnailLoading = false
     }
     
     // Add method to schedule delayed fade-out
@@ -1417,73 +1545,93 @@ class WindowThumbnailView {
         self.currentWindowID = nil
     }
 
-    func getActiveWindows(refresh: Bool = false) -> [[String: Any]] {
-        if !refresh,
-           !Self.activeWindowSnapshot.isEmpty,
-           Date().timeIntervalSince(Self.lastWindowSnapshotTime) < Self.windowSnapshotTTL {
-            return Self.activeWindowSnapshot
+    @MainActor
+    private func previewAvailability(for windowName: String) async -> PreviewAvailabilityResult {
+        let now = Date()
+        let start = ProcessInfo.processInfo.systemUptime
+        let hasCachedPermission = Self.cachedScreenRecordingPermission != nil &&
+            now.timeIntervalSince(Self.lastScreenRecordingPermissionCheckTime) < Self.screenRecordingPermissionCacheTTL
+        let hasCachedSharingState = now.timeIntervalSince(Self.lastWindowSharingCheckTime) < Self.windowSharingCheckInterval
+
+        if hasCachedPermission && hasCachedSharingState {
+            Logger.perf("preview", "availability cache hit window=\(windowName) elapsed_ms=\(Int((ProcessInfo.processInfo.systemUptime - start) * 1000))")
+            return PreviewAvailabilityResult(
+                hasPermission: Self.cachedScreenRecordingPermission ?? false,
+                sharingDetected: Self.lastWindowSharingDetected
+            )
         }
 
+        let cachedPermission = Self.cachedScreenRecordingPermission ?? false
+        let cachedSharingDetected = Self.lastWindowSharingDetected
+        let result = await Task.detached(priority: .utility) {
+            let hasPermission = hasCachedPermission ? cachedPermission : CGPreflightScreenCaptureAccess()
+            let sharingDetected: Bool
+
+            if hasCachedSharingState {
+                sharingDetected = cachedSharingDetected
+            } else {
+                let windows = Self.loadActiveWindowsSnapshot()
+                sharingDetected = Self.detectSharedWindow(in: windows)
+            }
+
+            return PreviewAvailabilityResult(
+                hasPermission: hasPermission,
+                sharingDetected: sharingDetected
+            )
+        }.value
+        Logger.perf("preview", "availability computed window=\(windowName) elapsed_ms=\(Int((ProcessInfo.processInfo.systemUptime - start) * 1000))")
+
+        if !hasCachedPermission {
+            Self.hasCheckedScreenRecordingPermission = true
+            Self.cachedScreenRecordingPermission = result.hasPermission
+            Self.lastScreenRecordingPermissionCheckTime = now
+            if !result.hasPermission && !Self.hasLoggedMissingScreenRecordingPermission {
+                Logger.warning("Screen recording permission missing; showing fallback icon for previews.")
+                Self.hasLoggedMissingScreenRecordingPermission = true
+            }
+        }
+
+        if !hasCachedSharingState {
+            Self.lastWindowSharingDetected = result.sharingDetected
+            Self.lastWindowSharingCheckTime = now
+            if result.sharingDetected {
+                Logger.debug("Window \(windowName) appears to be shared")
+            }
+        }
+
+        return result
+    }
+
+    nonisolated private static func loadActiveWindowsSnapshot() -> [[String: Any]] {
         let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
         guard let windowInfoList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
             return []
         }
-        Self.activeWindowSnapshot = windowInfoList
-        Self.lastWindowSnapshotTime = Date()
         return windowInfoList
     }
 
-    func isWindowShared(windowName: String) -> Bool {
-        let now = Date()
-        if now.timeIntervalSince(Self.lastWindowSharingCheckTime) < Self.windowSharingCheckInterval {
-            return Self.lastWindowSharingDetected
+    nonisolated private static func detectSharedWindow(in windows: [[String: Any]]) -> Bool {
+        let hasTeamsOrWebex = windows.contains { window in
+            guard let ownerName = window[kCGWindowOwnerName as String] as? String else {
+                return false
+            }
+            return ownerName.contains("Teams") || ownerName.contains("Webex")
         }
 
-        // Get all windows and check if Teams or Webex is running
-        let windows = self.getActiveWindows()
-        
-        // Check if Teams or Webex is running
-        var hasTeamsOrWebex = false
+        guard hasTeamsOrWebex else { return false }
+
         for window in windows {
-            if let ownerName = window[kCGWindowOwnerName as String] as? String {
-                if ownerName.contains("Teams") || ownerName.contains("Webex") {
-                    hasTeamsOrWebex = true
-                    break
+            guard let windowTitle = window[kCGWindowName as String] as? String else {
+                continue
+            }
+
+            for indicator in Self.sharingIndicators {
+                if windowTitle.localizedCaseInsensitiveContains(indicator) {
+                    return true
                 }
             }
         }
-        
-        // Only check sharing indicators if Teams or Webex is running
-        if hasTeamsOrWebex {
-            // Common sharing indicator phrases in different languages
-            let sharingIndicators = [
-                "is being shared",      // English
-                "sharing a window",     // English
-                "wird geteilt",         // German
-                "está compartiendo",    // Spanish
-                "est partagé",         // French
-                "está sendo compartilhada", // Portuguese
-                "viene condiviso",      // Italian
-                "wordt gedeeld",        // Dutch
-                "共有中",               // Japanese
-                "正在共享"             // Chinese
-            ]
-            
-            for window in windows {
-                if let windowTitle = window[kCGWindowName as String] as? String {
-                    for indicator in sharingIndicators {
-                        if windowTitle.localizedCaseInsensitiveContains(indicator) {
-                            print("⚠️ Window \(windowName) appears to be shared")
-                            Self.lastWindowSharingDetected = true
-                            Self.lastWindowSharingCheckTime = now
-                            return true
-                        }
-                    }
-                }
-            }
-        }
-        Self.lastWindowSharingDetected = false
-        Self.lastWindowSharingCheckTime = now
+
         return false
     }
 
@@ -1500,6 +1648,7 @@ class WindowThumbnailView {
         // Cancel any ongoing thumbnail creation task
         Self.currentThumbnailTask?.cancel()
         Self.currentThumbnailTask = nil
+        Self.currentThumbnailRequestIdentifier = nil
         
         // Cancel any debouncing timer and clear pending requests
         Self.thumbnailDebounceTimer?.cancel()
@@ -1512,6 +1661,7 @@ class WindowThumbnailView {
         
         // Unregister this instance
         Self.activeThumbnailViews.remove(ObjectIdentifier(self))
+        Logger.perf("preview", "thumbnail view cleanup active_views=\(Self.activeThumbnailViews.count)")
         
         // Cancel any pending cleanup timer if this is the current instance
         if Self.currentSharedInstance == ObjectIdentifier(self) {
@@ -1597,7 +1747,15 @@ class WindowThumbnailView {
     private func configurePanel(_ panel: NSPanel) {
         panel.backgroundColor = .clear
         panel.isOpaque = false
-        panel.hasShadow = false
+        // System shadow on: AppKit renders the macOS-standard drop shadow
+        // around the visible alpha mask of the panel content. The CALayer
+        // shadow on the contentContainer alone gets visually swallowed by
+        // the panel's own translucency, so we let the OS do the heavy
+        // lifting here. Without invalidateShadow() calls in the hot path
+        // the WindowServer recompute only fires when the window genuinely
+        // appears or resizes — not per move — so the long-session cost is
+        // bounded.
+        panel.hasShadow = true
         panel.level = .popUpMenu + 9  // Changed from 15 to 9 as requested
         panel.isMovable = false
         panel.ignoresMouseEvents = true
@@ -1611,8 +1769,16 @@ class WindowThumbnailView {
     
     // Add after togglePreviews() method
     @MainActor static func checkScreenRecordingPermission() -> Bool {
+        let now = Date()
+        if let cachedPermission = cachedScreenRecordingPermission,
+           now.timeIntervalSince(lastScreenRecordingPermissionCheckTime) < screenRecordingPermissionCacheTTL {
+            return cachedPermission
+        }
+
         hasCheckedScreenRecordingPermission = true
         let hasPermission = CGPreflightScreenCaptureAccess()
+        cachedScreenRecordingPermission = hasPermission
+        lastScreenRecordingPermissionCheckTime = now
         if !hasPermission && !hasLoggedMissingScreenRecordingPermission {
             Logger.warning("Screen recording permission missing; showing fallback icon for previews.")
             hasLoggedMissingScreenRecordingPermission = true
@@ -1756,6 +1922,7 @@ class WindowThumbnailView {
     private func displayThumbnailInSharedWindow(_ thumbnail: NSImage, for windowInfo: WindowInfo, isLoading: Bool) {
         // Get or create the shared window
         let panel = getOrCreateSharedWindow()
+        currentWindowID = isLoading ? nil : windowInfo.cgWindowID
         
         // Update content more efficiently
         updateSharedWindowContentFast(panel, thumbnail: thumbnail, windowInfo: windowInfo, isLoading: isLoading)
@@ -1789,6 +1956,10 @@ class WindowThumbnailView {
         // Create container view for shadow
         let containerView = NSView(frame: NSRect(origin: .zero, size: panelSize))
         containerView.wantsLayer = true
+        // The window-content layer must not clip — see comment in the
+        // non-shared (legacy) path. Without this the contentContainer's
+        // CALayer shadow is invisible.
+        containerView.layer?.masksToBounds = false
         
         let contentContainer = NSView(frame: NSRect(
             x: shadowPadding,
