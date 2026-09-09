@@ -47,6 +47,7 @@ private final class SettingsViewController: NSViewController {
     private var previewsCheckbox: NSButton!
     private var trayLimitCheckbox: NSButton!
     private var shortcutButton: NSButton!
+    private var shortcutStatusLabel: NSTextField!
     private var accessibilityStatusLabel: NSTextField!
     private var inputMonitoringStatusLabel: NSTextField!
     private var screenRecordingStatusLabel: NSTextField!
@@ -174,12 +175,15 @@ private final class SettingsViewController: NSViewController {
         row.addArrangedSubview(label)
         row.addArrangedSubview(shortcutButton)
         stackView.addArrangedSubview(row)
+        shortcutStatusLabel = makeDescription("")
+        shortcutStatusLabel.textColor = .systemOrange
+        stackView.addArrangedSubview(shortcutStatusLabel)
     }
 
     private func addPermissionsSection(to stackView: NSStackView) {
         stackView.addArrangedSubview(makeSectionTitle("Berechtigungen"))
         stackView.addArrangedSubview(makeDescription(
-            "macOS zeigt Berechtigungen pro App an. Nach dem Erteilen erkennt DockAppToggler die Änderung automatisch; ein Neustart ist normalerweise nicht nötig."
+            "Der Assistent prüft die Freigaben nacheinander. Ziehe das App-Symbol direkt in die passende Liste der Systemeinstellungen. Ein nötiger Neustart erfolgt am Ende."
         ))
 
         accessibilityStatusLabel = NSTextField(labelWithString: "")
@@ -239,6 +243,8 @@ private final class SettingsViewController: NSViewController {
 
     private func refreshPermissionLabels() {
         let state = AppPermissionState.current
+        shortcutStatusLabel?.stringValue = state.shortcutStatusMessage
+        shortcutStatusLabel?.isHidden = !state.secureInputEnabled
         updateStatusLabel(accessibilityStatusLabel, granted: state.accessibilityGranted)
         updateStatusLabel(inputMonitoringStatusLabel, granted: state.inputMonitoringGranted)
         updateStatusLabel(screenRecordingStatusLabel, granted: state.screenRecordingGranted)

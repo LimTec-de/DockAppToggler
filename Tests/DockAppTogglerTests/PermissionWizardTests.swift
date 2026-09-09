@@ -29,6 +29,15 @@ struct PermissionWizardTests {
         #expect(progress.refresh() == .complete)
     }
 
+    @Test func secureInputIsReportedSeparatelyFromGrantedPermissions() {
+        let state = AppPermissionState(accessibilityGranted: true, inputMonitoringGranted: true,
+                                       screenRecordingGranted: true, secureInputEnabled: true)
+        #expect(state.shortcutStatusMessage.contains("sichere Tastatureingabe"))
+        let unblocked = AppPermissionState(accessibilityGranted: true, inputMonitoringGranted: true,
+                                           screenRecordingGranted: true, secureInputEnabled: false)
+        #expect(unblocked.shortcutStatusMessage.isEmpty)
+    }
+
     @Test func missingPermissionsAreCheckedInOrderWithOneRestartAtTheEnd() {
         let permissions = Permissions()
         var progress = PermissionWizardProgress(steps: permissions.steps)
@@ -119,5 +128,54 @@ struct PermissionWizardTests {
         #expect(progress.refresh() == .permission(0))
         permissions.accessibility = true
         #expect(progress.refresh() == .permission(2))
+    }
+
+    @Test func systemDialogMustFinishBeforeAdvancingEvenIfGrantArrivesEarly() {
+        var microphoneGranted = false
+        let microphone = PermissionStep(title: "Mikrofon", settingsURLString: "",
+                                       isGranted: { microphoneGranted }, needsRestartToTakeEffect: false,
+                                       requestAccess: { _ in })
+        let speech = PermissionStep(title: "Spracherkennung", settingsURLString: "",
+                                   isGranted: { false }, needsRestartToTakeEffect: false,
+                                   requestAccess: { _ in })
+        var progress = PermissionWizardProgress(steps: [microphone, speech])
+        #expect(progress.beginRequest(at: 0) == true)
+        microphoneGranted = true
+        #expect(progress.refresh() == .permission(0))
+        #expect(progress.beginRequest(at: 0) == false)
+        #expect(progress.beginRequest(at: 1) == false)
+        progress.finishRequest()
+        #expect(progress.refresh() == .permission(1))
+        #expect(progress.beginRequest(at: 1) == true)
+    }
+
+    @Test func deniedSystemConsentCannotBeSkippedByConfirmation() {
+        let step = PermissionStep(title: "Mikrofon", settingsURLString: "",
+                                  isGranted: { false }, needsRestartToTakeEffect: false,
+                                  requestAccess: { _ in })
+        var progress = PermissionWizardProgress(steps: [step])
+        #expect(progress.beginRequest(at: 0) == true)
+        progress.finishRequest()
+        progress.confirmGrant(at: 0)
+        #expect(progress.refresh() == .permission(0))
+        #expect(progress.beginRequest(at: 0) == true)
+    }
+
+    @Test func addingStepsDuringSystemConsentPreservesOrderAndDefersRestart() {
+        var microphoneGranted = false
+        let microphone = PermissionStep(title: "Mikrofon", settingsURLString: "",
+                                       isGranted: { microphoneGranted }, needsRestartToTakeEffect: false,
+                                       requestAccess: { _ in })
+        let screen = PermissionStep(title: "Bildschirmaufnahme", settingsURLString: "",
+                                    isGranted: { false }, needsRestartToTakeEffect: true)
+        var progress = PermissionWizardProgress(steps: [microphone])
+        #expect(progress.beginRequest(at: 0) == true)
+        progress.include(steps: [microphone, screen])
+        microphoneGranted = true
+        #expect(progress.refresh() == .permission(0))
+        progress.finishRequest()
+        #expect(progress.refresh() == .permission(1))
+        progress.confirmGrant(at: 1)
+        #expect(progress.refresh() == .restart)
     }
 }

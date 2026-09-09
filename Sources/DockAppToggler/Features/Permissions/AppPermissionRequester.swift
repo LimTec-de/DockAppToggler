@@ -1,17 +1,27 @@
 import AppKit
 import ApplicationServices
 import CoreGraphics
+import Carbon
 
 struct AppPermissionState: Equatable {
     let accessibilityGranted: Bool
     let inputMonitoringGranted: Bool
     let screenRecordingGranted: Bool
+    let secureInputEnabled: Bool
+
+    var shortcutStatusMessage: String {
+        if secureInputEnabled {
+            return "Globale Shortcuts sind durch sichere Tastatureingabe blockiert. Schließe den Passwortdialog der anderen App oder entsperre sie. Zusätzliche Berechtigungen oder ein Neustart helfen hier nicht."
+        }
+        return ""
+    }
 
     static var current: AppPermissionState {
         AppPermissionState(
             accessibilityGranted: AXIsProcessTrusted(),
             inputMonitoringGranted: CGPreflightListenEventAccess(),
-            screenRecordingGranted: CGPreflightScreenCaptureAccess()
+            screenRecordingGranted: CGPreflightScreenCaptureAccess(),
+            secureInputEnabled: IsSecureEventInputEnabled()
         )
     }
 }
@@ -81,7 +91,7 @@ enum AppPermissionRequester {
     private static func presentWizard(titles: [String]) {
         // Feature-specific requests must not replace an ongoing startup check.
         let steps = (startupCompletion == nil ? titles : startupTitles).map { step(for: $0) }
-        PermissionAssistantWindowController.present(steps: steps)
+        PermissionAssistantWindowController.present(steps: steps, onGranted: wizardDidFinish)
     }
 
     private static func step(for title: String) -> PermissionStep {
@@ -110,7 +120,7 @@ final class AppPermissionMonitor {
     private init() {}
 
     func start() {
-        timer?.invalidate()
+        guard timer == nil else { return }
         lastState = AppPermissionState.current
 
         timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in

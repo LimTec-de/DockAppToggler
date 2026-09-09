@@ -15,7 +15,7 @@ extension NSApplication {
         NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: configuration) { _, error in
             DispatchQueue.main.async {
                 if let error {
-                    Logger.error("Failed to restart application: \(error.localizedDescription)")
+                    NSLog("Failed to restart application: %@", error.localizedDescription)
                     let alert = NSAlert()
                     alert.messageText = "Neustart fehlgeschlagen"
                     alert.informativeText = error.localizedDescription

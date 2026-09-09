@@ -8,30 +8,42 @@ struct PermissionStep {
     let isGranted: () -> Bool
     /// Newly granted access may require a relaunch after the remaining steps.
     let needsRestartToTakeEffect: Bool
+    /// System consent dialogs (microphone/speech) must finish before the next step.
+    let requestAccess: ((@escaping @MainActor @Sendable () -> Void) -> Void)?
+
+    init(title: String, settingsURLString: String, isGranted: @escaping () -> Bool,
+         needsRestartToTakeEffect: Bool,
+         requestAccess: ((@escaping @MainActor @Sendable () -> Void) -> Void)? = nil) {
+        self.title = title
+        self.settingsURLString = settingsURLString
+        self.isGranted = isGranted
+        self.needsRestartToTakeEffect = needsRestartToTakeEffect
+        self.requestAccess = requestAccess
+    }
 }
 
-/// An installer-style, self-advancing wizard. It shows the DockAppToggler.app icon to drag
-/// into the Privacy list, opens the matching System Settings pane automatically, and polls
-/// the grant state — once a step is granted it jumps to the next ungranted one (opening its
-/// pane without asking again). Closes itself when everything is granted.
+/// One ordered permission flow: drag the app into supported Privacy lists, or use
+/// the system consent dialog. Recheck grants and defer any relaunch until the end.
 @MainActor
 final class PermissionAssistantWindowController: NSWindowController, NSWindowDelegate {
     private static var current: PermissionAssistantWindowController?
 
-    static func present(steps: [PermissionStep]) {
-        if let existing = current, existing.window?.isVisible == true {
+    static func present(steps: [PermissionStep], onGranted: @escaping () -> Void = {}) {
+        if let existing = current {
+            existing.completions.append(onGranted)
             existing.contentVC.update(steps: steps)
+            existing.showWindow(nil)
             NSApp.activate(ignoringOtherApps: true)
             existing.window?.makeKeyAndOrderFront(nil)
             return
         }
 
         guard steps.contains(where: { !$0.isGranted() }) else {
-            AppPermissionRequester.wizardDidFinish()
+            onGranted()
             return
         }
 
-        let controller = PermissionAssistantWindowController(steps: steps)
+        let controller = PermissionAssistantWindowController(steps: steps, onGranted: onGranted)
         current = controller
         controller.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -39,8 +51,10 @@ final class PermissionAssistantWindowController: NSWindowController, NSWindowDel
     }
 
     private let contentVC: PermissionAssistantViewController
+    private var completions: [() -> Void]
 
-    private init(steps: [PermissionStep]) {
+    private init(steps: [PermissionStep], onGranted: @escaping () -> Void) {
+        completions = [onGranted]
         contentVC = PermissionAssistantViewController(steps: steps)
         let window = NSWindow(contentViewController: contentVC)
         window.title = "Berechtigungen erteilen"
@@ -50,11 +64,18 @@ final class PermissionAssistantWindowController: NSWindowController, NSWindowDel
         window.setContentSize(NSSize(width: 440, height: 460))
         super.init(window: window)
         window.delegate = self
-        window.center()
+        if let screen = NSScreen.main {
+            let frame = screen.visibleFrame
+            window.setFrameOrigin(NSPoint(x: frame.minX + 24, y: frame.midY - window.frame.height / 2))
+        }
 
         contentVC.onFinished = { [weak self] in
-            self?.close()
-            AppPermissionRequester.wizardDidFinish()
+            guard let self else { return }
+            let callbacks = self.completions
+            self.completions.removeAll()
+            Self.current = nil
+            self.close()
+            callbacks.forEach { $0() }
         }
         contentVC.onRestartRequested = {
             Self.relaunchApp()
@@ -64,8 +85,8 @@ final class PermissionAssistantWindowController: NSWindowController, NSWindowDel
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     func windowWillClose(_ notification: Notification) {
+        // Retain an unfinished sequence and its startup callback when dismissed.
         contentVC.stop()
-        Self.current = nil
     }
 
     override func close() {
@@ -91,7 +112,7 @@ private final class PermissionAssistantViewController: NSViewController {
     private let instructionsLabel = NSTextField(wrappingLabelWithString: "")
     private let statusLabel = NSTextField(labelWithString: "")
     private let dragView = AppBundleDragView()
-    private let nameLabel = NSTextField(labelWithString: "DockAppToggler.app")
+    private let nameLabel = NSTextField(labelWithString: Bundle.main.bundleURL.lastPathComponent)
     private lazy var openButton = NSButton(title: "Einstellungen erneut öffnen", target: self, action: #selector(reopenSettings))
     private lazy var continueButton = NSButton(title: "In Einstellungen erlaubt – weiter", target: self, action: #selector(confirmGrant))
     private lazy var restartButton = NSButton(title: "Jetzt neu starten", target: self, action: #selector(restartApp))
@@ -181,6 +202,8 @@ private final class PermissionAssistantViewController: NSViewController {
     }
 
     private func refresh() {
+        guard view.window?.isVisible == true else { return }
+        openButton.isEnabled = progress.requestingIndex == nil
         let nextStage = progress.refresh()
         guard nextStage != stage else { return }
         stage = nextStage
@@ -191,7 +214,11 @@ private final class PermissionAssistantViewController: NSViewController {
             let step = progress.steps[index]
             progressLabel.stringValue = "Schritt \(index + 1) von \(progress.steps.count)"
             headingLabel.stringValue = "\(step.title) erlauben"
-            instructionsLabel.stringValue = "Aktiviere DockAppToggler in der Liste \(step.title). Fehlt die App, ziehe das Symbol unten in die Liste."
+            dragView.allowsDragging = step.requestAccess == nil
+            openButton.title = step.requestAccess == nil ? "Einstellungen erneut öffnen" : "Freigabe erneut prüfen"
+            instructionsLabel.stringValue = step.requestAccess != nil
+                ? "Erlaube \(step.title) im macOS-Dialog. Wurde die Freigabe bereits abgelehnt, aktiviere die App in den Systemeinstellungen. Danach geht es automatisch weiter."
+                : "Aktiviere \(Bundle.main.bundleURL.deletingPathExtension().lastPathComponent) in der Liste \(step.title). Fehlt die App, ziehe das Symbol unten direkt in die Liste der Systemeinstellungen."
             if step.needsRestartToTakeEffect {
                 instructionsLabel.stringValue += "\n\nFragt macOS nach einem Neustart, wähle wenn möglich „Später“. Ist der Schalter aktiv, klicke auf „weiter“. Wir starten am Ende neu und prüfen alles erneut."
             }
@@ -201,7 +228,7 @@ private final class PermissionAssistantViewController: NSViewController {
             openButton.isHidden = false
             continueButton.isHidden = !step.needsRestartToTakeEffect
             restartButton.isHidden = true
-            openSettings(step.settingsURLString)
+            requestCurrentPermission()
         case .restart:
             showFinished(needsRestart: true)
             DispatchQueue.main.async { [weak self] in
@@ -222,7 +249,7 @@ private final class PermissionAssistantViewController: NSViewController {
         progressLabel.stringValue = ""
         headingLabel.stringValue = needsRestart ? "Einrichtung abgeschlossen" : "Alle Berechtigungen erteilt ✓"
         instructionsLabel.stringValue = needsRestart
-            ? "DockAppToggler startet jetzt einmal neu und prüft anschließend alle Freigaben erneut."
+            ? "Die App startet jetzt einmal neu und prüft anschließend alle Freigaben erneut."
             : "Alle Funktionen sind bereit."
         statusLabel.stringValue = ""
         dragView.isHidden = true
@@ -233,8 +260,23 @@ private final class PermissionAssistantViewController: NSViewController {
     }
 
     @objc private func reopenSettings() {
+        requestCurrentPermission()
+    }
+
+    private func requestCurrentPermission() {
         guard case .permission(let index) = stage else { return }
-        openSettings(progress.steps[index].settingsURLString)
+        let step = progress.steps[index]
+        guard let request = step.requestAccess else {
+            openSettings(step.settingsURLString)
+            return
+        }
+        guard progress.beginRequest(at: index) else { return }
+        openButton.isEnabled = false
+        request { [weak self] in
+            guard let self else { return }
+            self.progress.finishRequest()
+            self.refresh()
+        }
     }
 
     @objc private func confirmGrant() {
@@ -266,6 +308,9 @@ private final class PermissionAssistantViewController: NSViewController {
 @MainActor
 private final class AppBundleDragView: NSView, NSDraggingSource {
     private let iconSize: CGFloat = 84
+    var allowsDragging = true {
+        didSet { window?.invalidateCursorRects(for: self) }
+    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -296,10 +341,11 @@ private final class AppBundleDragView: NSView, NSDraggingSource {
     }
 
     override func resetCursorRects() {
-        addCursorRect(bounds, cursor: .openHand)
+        if allowsDragging { addCursorRect(bounds, cursor: .openHand) }
     }
 
     override func mouseDragged(with event: NSEvent) {
+        guard allowsDragging else { return }
         let bundleURL = Bundle.main.bundleURL
         let icon = NSWorkspace.shared.icon(forFile: bundleURL.path)
         icon.size = bounds.size

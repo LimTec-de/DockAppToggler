@@ -11,6 +11,18 @@ struct PermissionWizardProgress {
     private var grantedTitles: Set<String>
     private var confirmedTitles: Set<String> = []
     private var needsRestart = false
+    private(set) var requestingIndex: Int?
+
+    mutating func beginRequest(at index: Int) -> Bool {
+        guard requestingIndex == nil, refresh() == .permission(index),
+              steps[index].requestAccess != nil else { return false }
+        requestingIndex = index
+        return true
+    }
+
+    mutating func finishRequest() {
+        requestingIndex = nil
+    }
 
     init(steps: [PermissionStep]) {
         self.steps = steps
@@ -25,6 +37,7 @@ struct PermissionWizardProgress {
     }
 
     mutating func refresh() -> Stage {
+        if let requestingIndex { return .permission(requestingIndex) }
         let granted = steps.map { $0.isGranted() }
         for (index, step) in steps.enumerated() {
             if granted[index] {
