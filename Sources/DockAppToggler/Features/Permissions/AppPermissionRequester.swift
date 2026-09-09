@@ -24,10 +24,7 @@ enum AppPermissionRequester {
         if AXIsProcessTrusted() { return true }
         // No system prompt — the self-advancing wizard guides the user instead.
         if openSettings {
-            presentAssistant(
-                title: "Bedienungshilfen",
-                urlString: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
-            )
+            presentWizard(titles: ["Bedienungshilfen"])
         }
         return false
     }
@@ -37,10 +34,7 @@ enum AppPermissionRequester {
         AppPermissionMonitor.shared.start()
         if CGPreflightListenEventAccess() { return true }
         if openSettings {
-            presentAssistant(
-                title: "Eingabeüberwachung",
-                urlString: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
-            )
+            presentWizard(titles: ["Eingabeüberwachung"])
         }
         return false
     }
@@ -50,21 +44,20 @@ enum AppPermissionRequester {
         AppPermissionMonitor.shared.start()
         if CGPreflightScreenCaptureAccess() { return true }
         if openSettings {
-            presentAssistant(
-                title: "Bildschirmaufnahme",
-                urlString: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
-            )
+            presentWizard(titles: ["Bildschirmaufnahme"])
         }
         return false
     }
 
     // MARK: - Wizard
 
-    private static let pendingWizardKey = "PermissionWizardPendingTitles"
+    private static let startupTitles = ["Bedienungshilfen", "Eingabeüberwachung", "Bildschirmaufnahme"]
+    private static var startupCompletion: (() -> Void)?
 
-    /// Opens the wizard with a single permission step.
-    private static func presentAssistant(title: String, urlString: String) {
-        presentWizard(titles: [title])
+    /// Always recheck all permissions, including after a restart or dismissed setup.
+    static func checkStartupPermissions(onGranted: @escaping () -> Void) {
+        startupCompletion = onGranted
+        presentWizard(titles: startupTitles)
     }
 
     /// Permissions the tray popup needs: Accessibility (to read the other apps' icons) and
@@ -79,20 +72,15 @@ enum AppPermissionRequester {
         presentWizard(titles: ["Bedienungshilfen", "Eingabeüberwachung"])
     }
 
-    /// Re-opens the wizard after a relaunch if it was still in progress.
-    static func resumePendingWizardIfNeeded() {
-        guard let titles = UserDefaults.standard.array(forKey: pendingWizardKey) as? [String],
-              !titles.isEmpty else { return }
-        presentWizard(titles: titles)
-    }
-
-    static func clearPendingWizard() {
-        UserDefaults.standard.removeObject(forKey: pendingWizardKey)
+    static func wizardDidFinish() {
+        let completion = startupCompletion
+        startupCompletion = nil
+        completion?()
     }
 
     private static func presentWizard(titles: [String]) {
-        UserDefaults.standard.set(titles, forKey: pendingWizardKey)
-        let steps = titles.map { step(for: $0) }
+        // Feature-specific requests must not replace an ongoing startup check.
+        let steps = (startupCompletion == nil ? titles : startupTitles).map { step(for: $0) }
         PermissionAssistantWindowController.present(steps: steps)
     }
 

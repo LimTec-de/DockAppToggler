@@ -1,34 +1,33 @@
 import AppKit
 
 extension NSApplication {
+    private static var isRestarting = false
+
     static func restart(skipUpdateCheck: Bool = true) {
-        guard let executablePath = Bundle.main.executablePath else {
-            Logger.error("Failed to get executable path for restart")
-            return
-        }
-        
-        // Clean up resources before restart
-        Logger.info("Preparing for in-place restart...")
-        
-        // Prepare arguments
-        var args = [executablePath]
-        if skipUpdateCheck {
-            args.append("--s")
-        }
-        
-        // Convert arguments to C-style
-        let cArgs = args.map { strdup($0) } + [nil]
-        
-        // Execute the new process image
-        Logger.info("Executing in-place restart...")
-        execv(executablePath, cArgs)
-        
-        // If we get here, exec failed
-        Logger.error("Failed to restart application: \(String(cString: strerror(errno)))")
-        
-        // Clean up if exec failed
-        for ptr in cArgs where ptr != nil {
-            free(ptr)
+        guard !isRestarting else { return }
+        isRestarting = true
+
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.createsNewApplicationInstance = true
+        configuration.activates = false
+        configuration.arguments = skipUpdateCheck ? ["--s"] : []
+
+        NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: configuration) { _, error in
+            DispatchQueue.main.async {
+                if let error {
+                    Logger.error("Failed to restart application: \(error.localizedDescription)")
+                    let alert = NSAlert()
+                    alert.messageText = "Neustart fehlgeschlagen"
+                    alert.informativeText = error.localizedDescription
+                    alert.runModal()
+                    isRestarting = false
+                    return
+                }
+
+                // Let AppKit post willTerminateNotification and release the old
+                // menu-bar items instead of replacing its live process with execv.
+                NSApp.terminate(nil)
+            }
         }
     }
-} 
+}

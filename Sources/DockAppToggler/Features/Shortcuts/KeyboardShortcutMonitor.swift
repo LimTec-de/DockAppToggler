@@ -46,7 +46,8 @@ struct KeyboardShortcut: Equatable {
 
     func matches(_ event: NSEvent) -> Bool {
         guard event.keyCode == keyCode else { return false }
-        return modifiersPressed(in: event.modifierFlags)
+        let pressed = event.modifierFlags.intersection(Self.significantModifiers)
+        return pressed == modifiers || pressed == modifiers.union(.shift)
     }
 
     func modifiersPressed(in flags: NSEvent.ModifierFlags) -> Bool {
@@ -128,33 +129,22 @@ class KeyboardShortcutMonitor {
         return blocked.intersection(flags).isEmpty
     }
     
-    private var optionKeyMonitor: Any?
-    private var tabKeyMonitor: Any?
-    private var tabKeyUpMonitor: Any?  // Add monitor for key up events
-    private var isOptionPressed = false
-    private var isTabPressed = false   // Track tab key state
     private var switchingShortcut = KeyboardShortcut.savedSwitchingShortcut
+    private var shortcutState = SwitchingShortcutState()
+    private var isRecordingShortcut = false
+    private var eventGeneration = 0
     private var windowChooserController: WindowChooserController?
     private var currentWindowIndex = 0
     private var backdropWindow: NSWindow?
-    private var localEventMonitor: Any?  // Add this property
-    private var optionKeyLocalMonitor: Any?  // Add this property
-    private var eventTap: CFMachPort? {
-        willSet {
-            // Cleanup old event tap before assigning new one
-            if let tap = eventTap {
-                CGEvent.tapEnable(tap: tap, enable: false)
-            }
-        }
-    }
-    
+    private var eventTap: CFMachPort?
+    private var eventTapRunLoopSource: CFRunLoopSource?
+
     private var isOptionTabEnabled: Bool {
         UserDefaults.standard.bool(forKey: "OptionTabEnabled", defaultValue: false)
     }
 
     private init() {
         setupEventTap()
-        setupMonitors()
         
         // Add observer for option tab setting changes
         NotificationCenter.default.addObserver(
@@ -177,130 +167,23 @@ class KeyboardShortcutMonitor {
         )
     }
     
-    private func setupMonitors() {
-        // Set up option key monitors
-        setupOptionKeyMonitors()
-        
-        // Monitor tab key press globally
-        tabKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
-            guard let self else { return }
-            if self.switchingShortcut.matches(event), self.isOptionPressed {
-                // print("🔍 Consuming global tab key event")
-                self.handleTabKey(event)
-            }
-        }
-        
-        // Monitor tab key press locally to consume events
-        localEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] event in
-            // If option is pressed and it's a tab key, consume all tab events
-            guard let self else { return event }
-            if event.keyCode == self.switchingShortcut.keyCode && self.isOptionPressed {
-                // print("🔍 Consuming local tab key event")
-                if event.type == .keyDown {
-                    self.handleTabKey(event)
-                }
-                return nil  // Consume both keyDown and keyUp events
-            }
-            return event  // Pass through other events
-        }
-        
-        // Monitor tab key release
-        tabKeyUpMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyUp]) { [weak self] event in
-            guard let self else { return }
-            if event.keyCode == self.switchingShortcut.keyCode && self.isOptionPressed {
-                // print("🔍 Consuming global tab key up event")
-                self.handleTabKeyUp(event)
-            }
-        }
+    func setShortcutRecording(_ isRecording: Bool) {
+        isRecordingShortcut = isRecording
+        cancelSwitching()
     }
-    
-    private func setupOptionKeyMonitors() {
-        // print("🔍 Setting up option key monitors")
-        // Monitor option key press and release globally (when app is not active)
-        if optionKeyMonitor == nil {
-            optionKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.flagsChanged]) { [weak self] event in
-                // print("🔍 Global flag changed event received")
-                self?.handleOptionKey(event)
-            }
-        }
-        
-        // Monitor option key press and release locally (when app is active)
-        if optionKeyLocalMonitor == nil {
-            optionKeyLocalMonitor = NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged]) { [weak self] event in
-                // print("🔍 Local flag changed event received")
-                self?.handleOptionKey(event)
-                return event
-            }
-        }
+
+    private func cancelSwitching() {
+        eventGeneration += 1
+        shortcutState = SwitchingShortcutState()
+        hideWindowChooser()
     }
-    
-    private func handleOptionKey(_ event: NSEvent) {
-        // Check if feature is enabled before processing option key
-        guard isOptionTabEnabled else { return }
-        
-        let wasPressed = isOptionPressed
-        let isNowPressed = switchingShortcut.modifiersPressed(in: event.modifierFlags)
-        
-        isOptionPressed = isNowPressed
-        
-        if wasPressed && !isNowPressed {
-            if let chooserView = windowChooserController?.chooserView {
-                // Ensure we have a valid selection before proceeding
-                if chooserView.selectedIndex >= 0 && chooserView.selectedIndex < chooserView.options.count {
-                    // First select the current item
-                    chooserView.selectCurrentItem()
-                    
-                    // Then hide the chooser after a short delay to ensure the selection is processed
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                        self.hideWindowChooser()
-                    }
-                } else {
-                    // If no valid selection, just hide the chooser
-                    hideWindowChooser()
-                }
-            } else {
-                hideWindowChooser()
-            }
-        }
-    }
-    
-    private func handleTabKey(_ event: NSEvent) {
-        // Check if feature is enabled before processing tab key
-        guard isOptionTabEnabled,
-              isOptionPressed,
-              event.keyCode == switchingShortcut.keyCode
-        else {
-            return
-        }
-        
-        if windowChooserController == nil {
-            // print("  - Creating new window chooser")
-            showWindowChooser()
-        } else if let chooserView = windowChooserController?.chooserView,
-                  !chooserView.options.isEmpty {
-            // print("  - Cycling through windows")
-            if event.modifierFlags.contains(.shift) {
-                // print("  - Selecting previous item")
-                chooserView.selectPreviousItem()
-            } else {
-                // print("  - Selecting next item")
-                chooserView.selectNextItem()
-            }
-        } else {
-            // print("  - ⚠️ No windows available for cycling")
-        }
-    }
-    
-    private func handleTabKeyUp(_ event: NSEvent) {
-        guard event.keyCode == switchingShortcut.keyCode else { return }
-        isTabPressed = false
-    }
-    
+
     private func showWindowChooser() {
         currentWindowIndex = 0
         
         // Get the main screen
-        guard let screen = NSScreen.main else { return }
+        let windows = WindowHistory.shared.getAllRecentWindows()
+        guard !windows.isEmpty, let screen = NSScreen.main else { return }
         
         // Create backdrop window
         let backdropWindow = NSPanel(
@@ -311,18 +194,8 @@ class KeyboardShortcutMonitor {
         )
         
         // Configure backdrop window with minimal event handling
-        let contentView = KeyCaptureView()
-        contentView.keyDownHandler = { [weak self] event in
-            guard let self else { return }
-            if event.keyCode == self.switchingShortcut.keyCode {
-                if event.modifierFlags.contains(.shift) {
-                    self.windowChooserController?.chooserView?.selectPreviousItem()
-                } else {
-                    self.windowChooserController?.chooserView?.selectNextItem()
-                }
-            }
-        }
-        
+        let contentView = NSView()
+
         // Configure backdrop window
         backdropWindow.contentView = contentView
         backdropWindow.backgroundColor = NSColor.black.withAlphaComponent(0.2)
@@ -347,7 +220,6 @@ class KeyboardShortcutMonitor {
         self.backdropWindow = backdropWindow
         
         // Calculate center position for window chooser
-        let windows = WindowHistory.shared.getAllRecentWindows()
         let chooserPoint = NSPoint(
             x: screen.frame.midX,
             y: screen.frame.midY
@@ -367,7 +239,7 @@ class KeyboardShortcutMonitor {
                         ? NSRunningApplication(processIdentifier: pid)
                         : nil
                     AccessibilityService.shared.focusWindow(element, for: selectedApp)
-                    self?.hideWindowChooser()
+                    self?.cancelSwitching()
                 }
             }
         )
@@ -377,36 +249,12 @@ class KeyboardShortcutMonitor {
     }
     
     private func hideWindowChooser() {
-        // print("🔍 Hiding window chooser")
-        // Remove monitors
-        if let monitor = optionKeyLocalMonitor {
-            NSEvent.removeMonitor(monitor)
-            optionKeyLocalMonitor = nil
-        }
-        if let monitor = optionKeyMonitor {
-            NSEvent.removeMonitor(monitor)
-            optionKeyMonitor = nil
-        }
-        if let monitor = localEventMonitor {
-            NSEvent.removeMonitor(monitor)
-            localEventMonitor = nil
-        }
-        
-        // Reset all state
-        isOptionPressed = false
-        isTabPressed = false
-        
-        // Close windows
-        //windowChooserController?.chooserView?.thumbnailView?.hideThumbnail(removePanel: true)
         windowChooserController?.close()
         windowChooserController = nil
         backdropWindow?.close()
         backdropWindow = nil
-        
-        // Re-initialize monitors
-        setupOptionKeyMonitors()
     }
-    
+
     private func cycleToNextWindow() {
         let windows = WindowHistory.shared.getAllRecentWindows()
         guard !windows.isEmpty else { return }
@@ -424,197 +272,119 @@ class KeyboardShortcutMonitor {
     }
     
     private func setupEventTap() {
-        // Don't raise the raw macOS input-monitoring prompt on launch. If the permission
-        // isn't granted yet, skip the tap; the permission wizard guides the user, and
-        // handlePermissionsChanged() re-runs this once it's granted.
-        guard CGPreflightListenEventAccess() else { return }
+        // The permission wizard handles missing grants without prompting on launch.
+        guard eventTap == nil, CGPreflightListenEventAccess(), AXIsProcessTrusted() else { return }
 
-        // Create event tap to intercept key events
         let eventMask = (1 << CGEventType.keyDown.rawValue) |
                         (1 << CGEventType.keyUp.rawValue) |
-                        (1 << CGEventType.flagsChanged.rawValue)  // Add flags changed to catch modifier keys
-        
+                        (1 << CGEventType.flagsChanged.rawValue)
+
         guard let eventTap = CGEvent.tapCreate(
-            tap: .cgAnnotatedSessionEventTap,  // Changed from cgSessionEventTap
+            tap: .cgSessionEventTap,
             place: .headInsertEventTap,
             options: .defaultTap,
             eventsOfInterest: CGEventMask(eventMask),
-            callback: { proxy, type, event, refcon in
-                guard let refcon = refcon else { return Unmanaged.passRetained(event) }
+            callback: { _, type, event, refcon in
+                guard let refcon else { return Unmanaged.passUnretained(event) }
                 let monitor = Unmanaged<KeyboardShortcutMonitor>.fromOpaque(refcon).takeUnretainedValue()
-                return monitor.handleEventTap(proxy: proxy, type: type, event: event)
+                return monitor.handleEventTap(type: type, event: event)
             },
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else {
-            print("Failed to create event tap - check accessibility permissions")
+            Logger.error("Failed to create keyboard event tap - check accessibility and input monitoring permissions")
             return
         }
-        
-        // Create a run loop source and add it to the current run loop
+
         guard let runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0) else {
-            print("Failed to create run loop source")
+            CFMachPortInvalidate(eventTap)
+            Logger.error("Failed to create keyboard event tap run loop source")
             return
         }
-        
-        CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
-        
-        // Enable the event tap
-        CGEvent.tapEnable(tap: eventTap, enable: true)
-        
+
+        CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
         self.eventTap = eventTap
+        eventTapRunLoopSource = runLoopSource
+        CGEvent.tapEnable(tap: eventTap, enable: true)
     }
-    
-    private func handleEventTap(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
-        // Re-enable event tap if macOS disabled it (e.g. due to timeout)
+
+    private func handleEventTap(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             if let tap = eventTap {
                 CGEvent.tapEnable(tap: tap, enable: true)
-                Logger.warning("Event tap was disabled by system, re-enabled")
+                Logger.warning("Keyboard event tap was disabled by system, re-enabled")
             }
-            return Unmanaged.passRetained(event)
+            return Unmanaged.passUnretained(event)
         }
-        
-        // Check if feature is enabled first
-        guard isOptionTabEnabled else {
-            return Unmanaged.passRetained(event)
-        }
-        
-        // Handle flags changed events to track option key state
-        if type == .flagsChanged {
-            if let nsEvent = NSEvent(cgEvent: event) {
-                let wasPressed = isOptionPressed
-                isOptionPressed = switchingShortcut.modifiersPressed(in: nsEvent.modifierFlags)
-                
-                // Handle option key release
-                if wasPressed && !isOptionPressed {
-                    Task { @MainActor in
-                        if let chooserView = windowChooserController?.chooserView {
-                            chooserView.selectCurrentItem()
-                            hideWindowChooser()
-                        } else {
-                            hideWindowChooser()
-                        }
-                    }
-                }
-            }
-            return Unmanaged.passRetained(event)
-        }
-        
-        // Check if it's a tab key event
-        if let nsEvent = NSEvent(cgEvent: event),
-           nsEvent.keyCode == switchingShortcut.keyCode {
-            
-            // If option is pressed, we need to handle tab key events
-            if isOptionPressed {
-                // If this is a key up event, reset tab state
-                if type == .keyUp {
-                    isTabPressed = false
-                    return nil  // Consume the event
-                }
-                
-                // For key down events
-                if type == .keyDown {
-                    Task { @MainActor in
-                        if windowChooserController == nil {
-                            showWindowChooser()
-                        } else {
-                            handleTabKey(nsEvent)
-                        }
-                    }
-                    return nil  // Consume the event
-                }
-            }
-        }
-        
-        // Pass through all other events
-        return Unmanaged.passRetained(event)
+
+        guard let nsEvent = NSEvent(cgEvent: event) else { return Unmanaged.passUnretained(event) }
+        return handleKeyEvent(nsEvent) ? nil : Unmanaged.passUnretained(event)
     }
-    
+
+    func handleKeyEvent(_ event: NSEvent) -> Bool {
+        let action = shortcutState.handle(
+            event, shortcut: switchingShortcut,
+            isEnabled: isOptionTabEnabled, isRecording: isRecordingShortcut
+        )
+        guard action != .passThrough, action != .consume else { return action.consumesEvent }
+
+        // Keep the tap fast and preserve key-down/release order, including quick taps.
+        // Setting changes cancel actions that were queued for the previous shortcut.
+        let generation = eventGeneration
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.eventGeneration == generation else { return }
+            switch action {
+            case .next, .previous:
+                if self.windowChooserController == nil { self.showWindowChooser() }
+                if action == .previous {
+                    self.windowChooserController?.chooserView?.selectPreviousItem()
+                } else {
+                    self.windowChooserController?.chooserView?.selectNextItem()
+                }
+            case .select:
+                self.windowChooserController?.chooserView?.selectCurrentItem()
+                self.hideWindowChooser()
+            case .cancel:
+                self.hideWindowChooser()
+            case .passThrough, .consume:
+                break
+            }
+        }
+        return action.consumesEvent
+    }
+
     private nonisolated func cleanup() {
         DispatchQueue.main.sync {
-            // Cleanup monitors
-            if let monitor = optionKeyMonitor {
-                NSEvent.removeMonitor(monitor)
-                optionKeyMonitor = nil
-            }
-            if let monitor = tabKeyMonitor {
-                NSEvent.removeMonitor(monitor)
-                tabKeyMonitor = nil
-            }
-            if let monitor = tabKeyUpMonitor {
-                NSEvent.removeMonitor(monitor)
-                tabKeyUpMonitor = nil
-            }
-            if let monitor = localEventMonitor {
-                NSEvent.removeMonitor(monitor)
-                localEventMonitor = nil
-            }
-            if let monitor = optionKeyLocalMonitor {
-                NSEvent.removeMonitor(monitor)
-                optionKeyLocalMonitor = nil
-            }
-            
-            // Cleanup event tap
             if let tap = eventTap {
                 CGEvent.tapEnable(tap: tap, enable: false)
+                CFMachPortInvalidate(tap)
                 eventTap = nil
+            }
+            if let source = eventTapRunLoopSource {
+                CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+                eventTapRunLoopSource = nil
             }
         }
     }
-    
+
     deinit {
         cleanup()
         NotificationCenter.default.removeObserver(self)
     }
-    
-    func handleKeyEvent(_ event: NSEvent) -> Bool {
-        // First check if Option+Tab is enabled
-        guard isOptionTabEnabled else {
-            return false // Let the system handle the event
-        }
-        
-        // ... rest of existing handleKeyEvent implementation ...
-        return true
-    }
-    
+
     @objc private func handleOptionTabSettingChanged(_ notification: Notification) {
-        if let enabled = notification.userInfo?["enabled"] as? Bool {
-            if enabled {
-                if eventTap == nil {
-                    setupEventTap()
-                }
-            } else {
-                // Clean up when disabled
-                hideWindowChooser()
-                isOptionPressed = false
-                isTabPressed = false
-            }
-        }
+        cancelSwitching()
+        if isOptionTabEnabled { setupEventTap() }
     }
 
     @objc private func handleSwitchingShortcutChanged() {
         switchingShortcut = KeyboardShortcut.savedSwitchingShortcut
-        hideWindowChooser()
-        isOptionPressed = false
-        isTabPressed = false
+        cancelSwitching()
     }
 
     @objc private func handlePermissionsChanged() {
-        if eventTap == nil {
-            setupEventTap()
-        }
+        setupEventTap()
     }
 }
-
-private class KeyCaptureView: NSView {
-    var keyDownHandler: ((NSEvent) -> Void)?
-    
-    override var acceptsFirstResponder: Bool { true }
-    
-    override func keyDown(with event: NSEvent) {
-        keyDownHandler?(event)
-    }
-} 
 
 extension Notification.Name {
     static let switchingShortcutChanged = Notification.Name("switchingShortcutChanged")

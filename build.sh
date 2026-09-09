@@ -1,4 +1,7 @@
 #!/bin/bash
+set -e
+
+cd "$(dirname "$0")"
 
 # Build script for DockAppToggler
 # Rule applied: Script Organization - Clear sections with descriptive comments
@@ -174,6 +177,7 @@ fi
 
 # Verify the app bundle
 print_status "Verifying app bundle..."
+codesign --verify --deep --strict "$APP_BUNDLE_PATH"
 if [ -d "$APP_BUNDLE_PATH" ]; then
     print_status "App bundle created successfully at: $APP_BUNDLE_PATH"
     
@@ -182,10 +186,38 @@ if [ -d "$APP_BUNDLE_PATH" ]; then
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         print_status "Installing to /Applications..."
-        if ! sudo cp -R "$APP_BUNDLE_PATH" "/Applications/"; then
-            print_error "Failed to copy app to /Applications"
+        # Stage on the destination volume and replace the whole bundle. Copying
+        # into an existing app can leave mixed versions or broken framework links.
+        if ! swift - "$APP_BUNDLE_PATH" "/Applications/$APP_NAME.app" <<'SWIFT'
+import Foundation
+
+let files = FileManager.default
+let source = URL(fileURLWithPath: CommandLine.arguments[1])
+let destination = URL(fileURLWithPath: CommandLine.arguments[2])
+
+do {
+    let staging = try files.url(
+        for: .itemReplacementDirectory, in: .userDomainMask,
+        appropriateFor: destination, create: true
+    )
+    let stagedApp = staging.appendingPathComponent(source.lastPathComponent)
+    try files.copyItem(at: source, to: stagedApp)
+    if files.fileExists(atPath: destination.path) {
+        try files.replaceItemAt(destination, withItemAt: stagedApp, options: .usingNewMetadataOnly)
+    } else {
+        try files.moveItem(at: stagedApp, to: destination)
+    }
+    try files.removeItem(at: staging)
+} catch {
+    FileHandle.standardError.write(Data("App installation failed: \(error)\n".utf8))
+    exit(1)
+}
+SWIFT
+        then
+            print_error "Installation failed. For 'Operation not permitted', enable your terminal app (e.g. Ghostty) in System Settings > Privacy & Security > App Management, then rerun ./build.sh. sudo does not bypass this permission."
             exit 1
         fi
+        codesign --verify --deep --strict "/Applications/$APP_NAME.app"
         print_status "Installation successful!"
         print_status "Launching app from /Applications..."
         print_status "Note: You may need to grant accessibility permissions in System Settings > Privacy & Security > Accessibility"

@@ -6,8 +6,7 @@ struct PermissionStep {
     let title: String
     let settingsURLString: String
     let isGranted: () -> Bool
-    /// Some permissions (Screen Recording, Input Monitoring) only take effect after the
-    /// app relaunches, so once granted the wizard restarts the app and resumes.
+    /// Newly granted access may require a relaunch after the remaining steps.
     let needsRestartToTakeEffect: Bool
 }
 
@@ -20,15 +19,15 @@ final class PermissionAssistantWindowController: NSWindowController, NSWindowDel
     private static var current: PermissionAssistantWindowController?
 
     static func present(steps: [PermissionStep]) {
-        guard steps.contains(where: { !$0.isGranted() }) else {
-            AppPermissionRequester.clearPendingWizard()
-            return
-        }
-
         if let existing = current, existing.window?.isVisible == true {
             existing.contentVC.update(steps: steps)
             NSApp.activate(ignoringOtherApps: true)
             existing.window?.makeKeyAndOrderFront(nil)
+            return
+        }
+
+        guard steps.contains(where: { !$0.isGranted() }) else {
+            AppPermissionRequester.wizardDidFinish()
             return
         }
 
@@ -40,8 +39,6 @@ final class PermissionAssistantWindowController: NSWindowController, NSWindowDel
     }
 
     private let contentVC: PermissionAssistantViewController
-    private var isFinishing = false
-    private var isRestarting = false
 
     private init(steps: [PermissionStep]) {
         contentVC = PermissionAssistantViewController(steps: steps)
@@ -50,19 +47,16 @@ final class PermissionAssistantWindowController: NSWindowController, NSWindowDel
         window.styleMask = [.titled, .closable]
         window.isReleasedWhenClosed = false
         window.level = .floating
-        window.setContentSize(NSSize(width: 380, height: 340))
+        window.setContentSize(NSSize(width: 440, height: 460))
         super.init(window: window)
         window.delegate = self
         window.center()
 
         contentVC.onFinished = { [weak self] in
-            self?.isFinishing = true
-            AppPermissionRequester.clearPendingWizard()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { self?.close() }
+            self?.close()
+            AppPermissionRequester.wizardDidFinish()
         }
-        contentVC.onRestartRequested = { [weak self] in
-            // Keep the pending-wizard state so it resumes after the relaunch.
-            self?.isRestarting = true
+        contentVC.onRestartRequested = {
             Self.relaunchApp()
         }
     }
@@ -70,11 +64,6 @@ final class PermissionAssistantWindowController: NSWindowController, NSWindowDel
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     func windowWillClose(_ notification: Notification) {
-        // If the user dismissed the wizard themselves (not finishing, not restarting),
-        // forget the pending state so it doesn't pop up again on the next launch.
-        if !isFinishing && !isRestarting {
-            AppPermissionRequester.clearPendingWizard()
-        }
         contentVC.stop()
         Self.current = nil
     }
@@ -85,19 +74,14 @@ final class PermissionAssistantWindowController: NSWindowController, NSWindowDel
     }
 
     static func relaunchApp() {
-        let url = Bundle.main.bundleURL
-        let configuration = NSWorkspace.OpenConfiguration()
-        configuration.createsNewApplicationInstance = true
-        NSWorkspace.shared.openApplication(at: url, configuration: configuration) { _, _ in
-            DispatchQueue.main.async { NSApp.terminate(nil) }
-        }
+        NSApplication.restart()
     }
 }
 
 @MainActor
 private final class PermissionAssistantViewController: NSViewController {
-    private var steps: [PermissionStep]
-    private var currentIndex = 0
+    private var progress: PermissionWizardProgress
+    private var stage: PermissionWizardProgress.Stage?
     private var timer: Timer?
     var onFinished: (() -> Void)?
     var onRestartRequested: (() -> Void)?
@@ -107,11 +91,13 @@ private final class PermissionAssistantViewController: NSViewController {
     private let instructionsLabel = NSTextField(wrappingLabelWithString: "")
     private let statusLabel = NSTextField(labelWithString: "")
     private let dragView = AppBundleDragView()
+    private let nameLabel = NSTextField(labelWithString: "DockAppToggler.app")
     private lazy var openButton = NSButton(title: "Einstellungen erneut öffnen", target: self, action: #selector(reopenSettings))
-    private lazy var restartButton = NSButton(title: "Bereits erteilt? App neu starten", target: self, action: #selector(restartApp))
+    private lazy var continueButton = NSButton(title: "In Einstellungen erlaubt – weiter", target: self, action: #selector(confirmGrant))
+    private lazy var restartButton = NSButton(title: "Jetzt neu starten", target: self, action: #selector(restartApp))
 
     init(steps: [PermissionStep]) {
-        self.steps = steps
+        progress = PermissionWizardProgress(steps: steps)
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -135,9 +121,8 @@ private final class PermissionAssistantViewController: NSViewController {
         instructionsLabel.font = .systemFont(ofSize: NSFont.systemFontSize)
         instructionsLabel.textColor = .secondaryLabelColor
         instructionsLabel.alignment = .center
-        instructionsLabel.preferredMaxLayoutWidth = 320
+        instructionsLabel.preferredMaxLayoutWidth = 392
 
-        let nameLabel = NSTextField(labelWithString: "DockAppToggler.app")
         nameLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         nameLabel.textColor = .secondaryLabelColor
 
@@ -145,10 +130,11 @@ private final class PermissionAssistantViewController: NSViewController {
         statusLabel.textColor = .tertiaryLabelColor
 
         openButton.bezelStyle = .rounded
+        continueButton.bezelStyle = .rounded
         restartButton.bezelStyle = .rounded
 
-        let buttonRow = NSStackView(views: [openButton, restartButton])
-        buttonRow.orientation = .horizontal
+        let buttonRow = NSStackView(views: [openButton, continueButton, restartButton])
+        buttonRow.orientation = .vertical
         buttonRow.spacing = 8
 
         stack.addArrangedSubview(progressLabel)
@@ -173,13 +159,13 @@ private final class PermissionAssistantViewController: NSViewController {
 
     override func viewDidAppear() {
         super.viewDidAppear()
-        moveToFirstUngranted(openPane: true)
         startPolling()
+        refresh()
     }
 
     func update(steps: [PermissionStep]) {
-        self.steps = steps
-        moveToFirstUngranted(openPane: true)
+        progress.include(steps: steps)
+        refresh()
     }
 
     func stop() {
@@ -190,68 +176,75 @@ private final class PermissionAssistantViewController: NSViewController {
     private func startPolling() {
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.tick() }
+            MainActor.assumeIsolated { self?.refresh() }
         }
     }
 
-    private func tick() {
-        guard currentIndex < steps.count else { return }
-        let step = steps[currentIndex]
-        guard step.isGranted() else { return }
+    private func refresh() {
+        let nextStage = progress.refresh()
+        guard nextStage != stage else { return }
+        stage = nextStage
 
-        if step.needsRestartToTakeEffect {
-            // Granted, but only takes effect after a relaunch — restart and resume.
-            stop()
-            statusLabel.stringValue = "Erteilt — App wird neu gestartet …"
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-                self?.onRestartRequested?()
+        switch nextStage {
+        case .permission(let index):
+            if timer == nil { startPolling() }
+            let step = progress.steps[index]
+            progressLabel.stringValue = "Schritt \(index + 1) von \(progress.steps.count)"
+            headingLabel.stringValue = "\(step.title) erlauben"
+            instructionsLabel.stringValue = "Aktiviere DockAppToggler in der Liste \(step.title). Fehlt die App, ziehe das Symbol unten in die Liste."
+            if step.needsRestartToTakeEffect {
+                instructionsLabel.stringValue += "\n\nFragt macOS nach einem Neustart, wähle wenn möglich „Später“. Ist der Schalter aktiv, klicke auf „weiter“. Wir starten am Ende neu und prüfen alles erneut."
             }
-        } else {
-            moveToFirstUngranted(openPane: true)
-        }
-    }
-
-    private func moveToFirstUngranted(openPane: Bool) {
-        guard let index = steps.firstIndex(where: { !$0.isGranted() }) else {
-            showFinished()
-            return
-        }
-        currentIndex = index
-        let step = steps[index]
-
-        progressLabel.stringValue = "Schritt \(index + 1) von \(steps.count)"
-        headingLabel.stringValue = "\(step.title) erlauben"
-        instructionsLabel.stringValue = "Ziehe das Symbol unten in die Liste \(step.title) der geöffneten Systemeinstellungen — wie bei einem Installer."
-        statusLabel.stringValue = "Warte auf Erteilung …"
-        dragView.isHidden = false
-        openButton.isHidden = false
-        restartButton.isHidden = false
-
-        if openPane {
+            statusLabel.stringValue = "Warte auf Erteilung …"
+            dragView.isHidden = false
+            nameLabel.isHidden = false
+            openButton.isHidden = false
+            continueButton.isHidden = !step.needsRestartToTakeEffect
+            restartButton.isHidden = true
             openSettings(step.settingsURLString)
+        case .restart:
+            showFinished(needsRestart: true)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.view.window?.isVisible == true, self.stage == .restart else { return }
+                self.onRestartRequested?()
+            }
+        case .complete:
+            showFinished(needsRestart: false)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.stage == .complete else { return }
+                self.onFinished?()
+            }
         }
     }
 
-    private func showFinished() {
+    private func showFinished(needsRestart: Bool) {
         stop()
         progressLabel.stringValue = ""
-        headingLabel.stringValue = "Alle Berechtigungen erteilt ✓"
-        instructionsLabel.stringValue = "Du kannst dieses Fenster schließen."
+        headingLabel.stringValue = needsRestart ? "Einrichtung abgeschlossen" : "Alle Berechtigungen erteilt ✓"
+        instructionsLabel.stringValue = needsRestart
+            ? "DockAppToggler startet jetzt einmal neu und prüft anschließend alle Freigaben erneut."
+            : "Alle Funktionen sind bereit."
         statusLabel.stringValue = ""
         dragView.isHidden = true
+        nameLabel.isHidden = true
         openButton.isHidden = true
-        restartButton.isHidden = true
-        onFinished?()
+        continueButton.isHidden = true
+        restartButton.isHidden = !needsRestart
     }
 
     @objc private func reopenSettings() {
-        guard currentIndex < steps.count else { return }
-        openSettings(steps[currentIndex].settingsURLString)
+        guard case .permission(let index) = stage else { return }
+        openSettings(progress.steps[index].settingsURLString)
+    }
+
+    @objc private func confirmGrant() {
+        guard case .permission(let index) = stage else { return }
+        progress.confirmGrant(at: index)
+        refresh()
     }
 
     @objc private func restartApp() {
-        // Manual restart fallback — routes through the controller so the pending wizard
-        // state is preserved and resumes after relaunch.
+        guard stage == .restart else { return }
         stop()
         onRestartRequested?()
     }

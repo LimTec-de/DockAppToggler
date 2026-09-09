@@ -3,7 +3,7 @@ import ApplicationServices
 import Carbon
 
 @MainActor
-final class SettingsWindowController: NSWindowController {
+final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     init(checkForUpdates: (() -> Void)?, trayLimitChanged: (() -> Void)?) {
         let viewController = SettingsViewController(
             checkForUpdates: checkForUpdates,
@@ -15,6 +15,7 @@ final class SettingsWindowController: NSWindowController {
         window.isReleasedWhenClosed = false
         window.setContentSize(NSSize(width: 560, height: 660))
         super.init(window: window)
+        window.delegate = self
     }
 
     required init?(coder: NSCoder) {
@@ -28,6 +29,10 @@ final class SettingsWindowController: NSWindowController {
         showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
+    }
+
+    func windowDidResignKey(_ notification: Notification) {
+        (window?.contentViewController as? SettingsViewController)?.finishShortcutRecording()
     }
 }
 
@@ -123,6 +128,11 @@ private final class SettingsViewController: NSViewController {
         super.viewWillAppear()
         refreshState()
         AppPermissionMonitor.shared.start()
+    }
+
+    override func viewWillDisappear() {
+        finishShortcutRecording()
+        super.viewWillDisappear()
     }
 
     private func addSettingsSection(to stackView: NSStackView) {
@@ -279,15 +289,16 @@ private final class SettingsViewController: NSViewController {
     }
 
     @objc private func startShortcutRecording() {
+        KeyboardShortcutMonitor.shared.setShortcutRecording(true)
         shortcutButton.title = "Shortcut drücken..."
         if let shortcutRecordingMonitor {
             NSEvent.removeMonitor(shortcutRecordingMonitor)
         }
 
         shortcutRecordingMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            Task { @MainActor in
-                self?.handleShortcutRecording(event)
-            }
+            guard let self, self.shortcutRecordingMonitor != nil,
+                  event.window === self.view.window else { return event }
+            self.handleShortcutRecording(event)
             return nil
         }
     }
@@ -304,11 +315,11 @@ private final class SettingsViewController: NSViewController {
         finishShortcutRecording()
     }
 
-    private func finishShortcutRecording() {
-        if let shortcutRecordingMonitor {
-            NSEvent.removeMonitor(shortcutRecordingMonitor)
-            self.shortcutRecordingMonitor = nil
-        }
+    func finishShortcutRecording() {
+        guard let shortcutRecordingMonitor else { return }
+        NSEvent.removeMonitor(shortcutRecordingMonitor)
+        self.shortcutRecordingMonitor = nil
+        KeyboardShortcutMonitor.shared.setShortcutRecording(false)
         shortcutButton.title = KeyboardShortcut.savedSwitchingShortcut.displayString
     }
 

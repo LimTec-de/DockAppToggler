@@ -96,10 +96,6 @@ class StatusBarController: NSObject, NSMenuDelegate {
         setupTrayBoundaryPositionObserver()
         updateTrayIconLimiter()
 
-        // If a permission wizard was mid-flow when the app last relaunched, resume it.
-        DispatchQueue.main.async {
-            AppPermissionRequester.resumePendingWizardIfNeeded()
-        }
     }
 
     private func configureStatusItem() {

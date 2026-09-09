@@ -37,6 +37,10 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("Sparkle")
             ]
+        ),
+        .testTarget(
+            name: "DockAppTogglerTests",
+            dependencies: ["DockAppToggler"]
         )
     ]
 )

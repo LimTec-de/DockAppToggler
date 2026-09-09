@@ -31,8 +31,6 @@ let app = NSApplication.shared
 // Configure the app as an accessory before creating status-bar items.
 app.setActivationPolicy(.accessory)
 
-// Run the accessibility check once at startup
-_ = AccessibilityService.shared.requestAccessibilityPermissions()
 AppPermissionMonitor.shared.start()
 
 // Check if displays have separate spaces and log the status
@@ -47,11 +45,6 @@ if NSScreen.displaysHaveSeparateSpaces {
     multiDisplayManager.ensureAppPresenceOnAllScreens()
 }
 
-// Show help screen on first launch
-DispatchQueue.main.async {
-    HelpWindowController.showIfNeeded()
-}
-
 // Create the shared updater controller - always create it, but control auto-check behavior
 let sharedUpdater = SPUStandardUpdaterController(
     startingUpdater: !shouldSkipUpdateCheck,  // Only start the updater if not skipping
@@ -61,15 +54,23 @@ let sharedUpdater = SPUStandardUpdaterController(
 
 // Create and store all controllers to prevent deallocation
 let appController = (
-    watcher: DockWatcher(),
     statusBar: StatusBarController(updater: sharedUpdater),
-    statusBarWatcher: StatusBarWatcher(),
     updater: sharedUpdater,
     multiDisplay: multiDisplayManager  // Add the multi-display manager to the tuple
 )
 
-// Initialize keyboard shortcut monitor
-_ = KeyboardShortcutMonitor.shared
+// Keep settings available during setup; start permission-dependent features only
+// after every permission is verified in the running process.
+var dockWatcher: DockWatcher?
+var statusBarWatcher: StatusBarWatcher?
+DispatchQueue.main.async {
+    AppPermissionRequester.checkStartupPermissions {
+        dockWatcher = DockWatcher()
+        statusBarWatcher = StatusBarWatcher()
+        _ = KeyboardShortcutMonitor.shared
+        HelpWindowController.showIfNeeded()
+    }
+}
 
 // Start the application
 app.run()
