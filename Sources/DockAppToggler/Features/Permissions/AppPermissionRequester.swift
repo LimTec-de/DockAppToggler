@@ -1,27 +1,15 @@
 import AppKit
 import ApplicationServices
 import CoreGraphics
-import Carbon
 
 struct AppPermissionState: Equatable {
     let accessibilityGranted: Bool
-    let inputMonitoringGranted: Bool
     let screenRecordingGranted: Bool
-    let secureInputEnabled: Bool
-
-    var shortcutStatusMessage: String {
-        if secureInputEnabled {
-            return "Globale Shortcuts sind durch sichere Tastatureingabe blockiert. Schließe den Passwortdialog der anderen App oder entsperre sie. Zusätzliche Berechtigungen oder ein Neustart helfen hier nicht."
-        }
-        return ""
-    }
 
     static var current: AppPermissionState {
         AppPermissionState(
             accessibilityGranted: AXIsProcessTrusted(),
-            inputMonitoringGranted: CGPreflightListenEventAccess(),
-            screenRecordingGranted: CGPreflightScreenCaptureAccess(),
-            secureInputEnabled: IsSecureEventInputEnabled()
+            screenRecordingGranted: CGPreflightScreenCaptureAccess()
         )
     }
 }
@@ -40,16 +28,6 @@ enum AppPermissionRequester {
     }
 
     @discardableResult
-    static func requestInputMonitoringIfNeeded(openSettings: Bool = true) -> Bool {
-        AppPermissionMonitor.shared.start()
-        if CGPreflightListenEventAccess() { return true }
-        if openSettings {
-            presentWizard(titles: ["Eingabeüberwachung"])
-        }
-        return false
-    }
-
-    @discardableResult
     static func requestScreenRecordingIfNeeded(openSettings: Bool = true) -> Bool {
         AppPermissionMonitor.shared.start()
         if CGPreflightScreenCaptureAccess() { return true }
@@ -61,7 +39,7 @@ enum AppPermissionRequester {
 
     // MARK: - Wizard
 
-    private static let startupTitles = ["Bedienungshilfen", "Eingabeüberwachung", "Bildschirmaufnahme"]
+    static let startupTitles = ["Bedienungshilfen", "Bildschirmaufnahme"]
     private static var startupCompletion: (() -> Void)?
 
     /// Always recheck all permissions, including after a restart or dismissed setup.
@@ -76,10 +54,9 @@ enum AppPermissionRequester {
         presentWizard(titles: ["Bedienungshilfen", "Bildschirmaufnahme"])
     }
 
-    /// Permissions Window Switching needs: Accessibility (control windows) and Input
-    /// Monitoring (global hotkey).
+    /// Native hotkeys need no input-monitoring grant; window actions and previews need AX + capture.
     static func presentShortcutWizard() {
-        presentWizard(titles: ["Bedienungshilfen", "Eingabeüberwachung"])
+        presentWizard(titles: startupTitles)
     }
 
     static func wizardDidFinish() {
@@ -103,9 +80,8 @@ enum AppPermissionRequester {
         case "Bildschirmaufnahme":
             return PermissionStep(title: title, settingsURLString: base + "Privacy_ScreenCapture",
                                   isGranted: { CGPreflightScreenCaptureAccess() }, needsRestartToTakeEffect: true)
-        default: // Eingabeüberwachung
-            return PermissionStep(title: title, settingsURLString: base + "Privacy_ListenEvent",
-                                  isGranted: { CGPreflightListenEventAccess() }, needsRestartToTakeEffect: true)
+        default:
+            preconditionFailure("Unknown permission: \(title)")
         }
     }
 }

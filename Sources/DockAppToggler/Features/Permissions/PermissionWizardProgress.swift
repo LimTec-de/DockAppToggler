@@ -41,9 +41,6 @@ struct PermissionWizardProgress {
         let granted = steps.map { $0.isGranted() }
         for (index, step) in steps.enumerated() {
             if granted[index] {
-                if !grantedTitles.contains(step.title) && step.needsRestartToTakeEffect {
-                    needsRestart = true
-                }
                 grantedTitles.insert(step.title)
             } else {
                 grantedTitles.remove(step.title)
@@ -58,10 +55,11 @@ struct PermissionWizardProgress {
         return needsRestart ? .restart : .complete
     }
 
-    /// The user enabled this switch, but macOS may report access only after relaunch.
-    /// This advances setup, never treats the running process as authorized.
+    /// The user enabled this switch, but this process still cannot observe it.
+    /// This advances setup to one optional relaunch instead of looping on the same pane.
     mutating func confirmGrant(at index: Int) {
-        guard steps.indices.contains(index), steps[index].needsRestartToTakeEffect else { return }
+        guard steps.indices.contains(index), steps[index].needsRestartToTakeEffect,
+              !steps[index].isGranted() else { return }
         confirmedTitles.insert(steps[index].title)
         needsRestart = true
     }

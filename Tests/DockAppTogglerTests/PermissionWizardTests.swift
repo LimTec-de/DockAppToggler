@@ -29,16 +29,11 @@ struct PermissionWizardTests {
         #expect(progress.refresh() == .complete)
     }
 
-    @Test func secureInputIsReportedSeparatelyFromGrantedPermissions() {
-        let state = AppPermissionState(accessibilityGranted: true, inputMonitoringGranted: true,
-                                       screenRecordingGranted: true, secureInputEnabled: true)
-        #expect(state.shortcutStatusMessage.contains("sichere Tastatureingabe"))
-        let unblocked = AppPermissionState(accessibilityGranted: true, inputMonitoringGranted: true,
-                                           screenRecordingGranted: true, secureInputEnabled: false)
-        #expect(unblocked.shortcutStatusMessage.isEmpty)
+    @Test func nativeSwitchingDoesNotRequireInputMonitoring() {
+        #expect(AppPermissionRequester.startupTitles == ["Bedienungshilfen", "Bildschirmaufnahme"])
     }
 
-    @Test func missingPermissionsAreCheckedInOrderWithOneRestartAtTheEnd() {
+    @Test func missingPermissionsCompleteWithoutRestartWhenMacOSReportsTheGrant() {
         let permissions = Permissions()
         var progress = PermissionWizardProgress(steps: permissions.steps)
         #expect(progress.refresh() == .permission(0))
@@ -47,10 +42,7 @@ struct PermissionWizardTests {
         permissions.input = true
         #expect(progress.refresh() == .permission(2))
         permissions.screen = true
-        #expect(progress.refresh() == .restart)
-
-        var afterRestart = PermissionWizardProgress(steps: permissions.steps)
-        #expect(afterRestart.refresh() == .complete)
+        #expect(progress.refresh() == .complete)
     }
 
     @Test func existingPermissionsAreSkippedAndAccessibilityNeedsNoRestart() {

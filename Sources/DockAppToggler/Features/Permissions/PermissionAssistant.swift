@@ -61,7 +61,7 @@ final class PermissionAssistantWindowController: NSWindowController, NSWindowDel
         window.styleMask = [.titled, .closable]
         window.isReleasedWhenClosed = false
         window.level = .floating
-        window.setContentSize(NSSize(width: 440, height: 460))
+        window.setContentSize(NSSize(width: 540, height: 560))
         super.init(window: window)
         window.delegate = self
         if let screen = NSScreen.main {
@@ -103,19 +103,22 @@ final class PermissionAssistantWindowController: NSWindowController, NSWindowDel
 private final class PermissionAssistantViewController: NSViewController {
     private var progress: PermissionWizardProgress
     private var stage: PermissionWizardProgress.Stage?
+    private var automaticallyRequestedStage: PermissionWizardProgress.Stage?
     private var timer: Timer?
     var onFinished: (() -> Void)?
     var onRestartRequested: (() -> Void)?
 
+    private let appDisplayName = Bundle.main.bundleURL.deletingPathExtension().lastPathComponent
     private let progressLabel = NSTextField(labelWithString: "")
     private let headingLabel = NSTextField(labelWithString: "")
+    private let overviewView = PermissionOverviewView()
     private let instructionsLabel = NSTextField(wrappingLabelWithString: "")
     private let statusLabel = NSTextField(labelWithString: "")
-    private let dragView = AppBundleDragView()
-    private let nameLabel = NSTextField(labelWithString: Bundle.main.bundleURL.lastPathComponent)
+    private let dragGuideView = PermissionDragGuideView()
     private lazy var openButton = NSButton(title: "Einstellungen erneut öffnen", target: self, action: #selector(reopenSettings))
-    private lazy var continueButton = NSButton(title: "In Einstellungen erlaubt – weiter", target: self, action: #selector(confirmGrant))
-    private lazy var restartButton = NSButton(title: "Jetzt neu starten", target: self, action: #selector(restartApp))
+    private lazy var continueButton = NSButton(title: "Ich habe es aktiviert", target: self, action: #selector(confirmGrant))
+    private lazy var restartButton = NSButton(title: "\(appDisplayName) neu starten", target: self, action: #selector(restartApp))
+    private lazy var laterButton = NSButton(title: "Später", target: self, action: #selector(closeForLater))
 
     init(steps: [PermissionStep]) {
         progress = PermissionWizardProgress(steps: steps)
@@ -142,10 +145,7 @@ private final class PermissionAssistantViewController: NSViewController {
         instructionsLabel.font = .systemFont(ofSize: NSFont.systemFontSize)
         instructionsLabel.textColor = .secondaryLabelColor
         instructionsLabel.alignment = .center
-        instructionsLabel.preferredMaxLayoutWidth = 392
-
-        nameLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        nameLabel.textColor = .secondaryLabelColor
+        instructionsLabel.preferredMaxLayoutWidth = 492
 
         statusLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .medium)
         statusLabel.textColor = .tertiaryLabelColor
@@ -153,18 +153,18 @@ private final class PermissionAssistantViewController: NSViewController {
         openButton.bezelStyle = .rounded
         continueButton.bezelStyle = .rounded
         restartButton.bezelStyle = .rounded
+        laterButton.bezelStyle = .rounded
 
-        let buttonRow = NSStackView(views: [openButton, continueButton, restartButton])
+        let buttonRow = NSStackView(views: [openButton, continueButton, restartButton, laterButton])
         buttonRow.orientation = .vertical
         buttonRow.spacing = 8
 
         stack.addArrangedSubview(progressLabel)
         stack.addArrangedSubview(headingLabel)
+        stack.addArrangedSubview(overviewView)
         stack.addArrangedSubview(instructionsLabel)
-        stack.addArrangedSubview(dragView)
-        stack.addArrangedSubview(nameLabel)
+        stack.addArrangedSubview(dragGuideView)
         stack.addArrangedSubview(statusLabel)
-        stack.setCustomSpacing(4, after: dragView)
         stack.setCustomSpacing(16, after: statusLabel)
         stack.addArrangedSubview(buttonRow)
 
@@ -180,6 +180,7 @@ private final class PermissionAssistantViewController: NSViewController {
 
     override func viewDidAppear() {
         super.viewDidAppear()
+        automaticallyRequestedStage = nil
         startPolling()
         refresh()
     }
@@ -205,37 +206,53 @@ private final class PermissionAssistantViewController: NSViewController {
         guard view.window?.isVisible == true else { return }
         openButton.isEnabled = progress.requestingIndex == nil
         let nextStage = progress.refresh()
-        guard nextStage != stage else { return }
-        stage = nextStage
+        let currentIndex: Int?
+        if case .permission(let index) = nextStage {
+            currentIndex = index
+        } else {
+            currentIndex = nil
+        }
+        overviewView.update(steps: progress.steps, currentIndex: currentIndex)
+        let stageChanged = nextStage != stage
+        if stageChanged {
+            stage = nextStage
+        }
 
         switch nextStage {
         case .permission(let index):
-            if timer == nil { startPolling() }
-            let step = progress.steps[index]
-            progressLabel.stringValue = "Schritt \(index + 1) von \(progress.steps.count)"
-            headingLabel.stringValue = "\(step.title) erlauben"
-            dragView.allowsDragging = step.requestAccess == nil
-            openButton.title = step.requestAccess == nil ? "Einstellungen erneut öffnen" : "Freigabe erneut prüfen"
-            instructionsLabel.stringValue = step.requestAccess != nil
-                ? "Erlaube \(step.title) im macOS-Dialog. Wurde die Freigabe bereits abgelehnt, aktiviere die App in den Systemeinstellungen. Danach geht es automatisch weiter."
-                : "Aktiviere \(Bundle.main.bundleURL.deletingPathExtension().lastPathComponent) in der Liste \(step.title). Fehlt die App, ziehe das Symbol unten direkt in die Liste der Systemeinstellungen."
-            if step.needsRestartToTakeEffect {
-                instructionsLabel.stringValue += "\n\nFragt macOS nach einem Neustart, wähle wenn möglich „Später“. Ist der Schalter aktiv, klicke auf „weiter“. Wir starten am Ende neu und prüfen alles erneut."
+            if stageChanged {
+                if timer == nil { startPolling() }
+                let step = progress.steps[index]
+                let missingTitles = progress.steps.filter { !$0.isGranted() }.map(\.title)
+                progressLabel.stringValue = missingTitles.isEmpty
+                    ? "Alles erledigt"
+                    : "Noch offen: \(missingTitles.joined(separator: ", "))"
+                headingLabel.stringValue = "Berechtigungen einrichten"
+                dragGuideView.permissionTitle = step.title
+                dragGuideView.allowsDragging = step.requestAccess == nil
+                openButton.title = step.requestAccess == nil ? "Zu \(step.title) öffnen" : "Freigabe erneut prüfen"
+                instructionsLabel.stringValue = step.requestAccess != nil
+                    ? "Erlaube \(step.title) im macOS-Dialog. Wurde die Freigabe bereits abgelehnt, öffnet der Assistent die passende Systemeinstellung automatisch. Danach geht es automatisch weiter."
+                    : "Aktiviere \(appDisplayName) in der automatisch geöffneten Liste \(step.title). Fehlt die App dort, ziehe das App-Symbol aus der Grafik direkt in die Liste."
+                if step.needsRestartToTakeEffect {
+                    instructionsLabel.stringValue += "\n\nWenn macOS nach einem Neustart fragt, wähle erstmal „Später“. Am Ende bietet \(appDisplayName) genau einen App-Neustart an."
+                }
+                statusLabel.stringValue = "Prüfe im Hintergrund …"
+                dragGuideView.isHidden = step.requestAccess != nil
+                openButton.isHidden = false
+                continueButton.isHidden = !step.needsRestartToTakeEffect
+                restartButton.isHidden = true
+                laterButton.isHidden = true
             }
-            statusLabel.stringValue = "Warte auf Erteilung …"
-            dragView.isHidden = false
-            nameLabel.isHidden = false
-            openButton.isHidden = false
-            continueButton.isHidden = !step.needsRestartToTakeEffect
-            restartButton.isHidden = true
-            requestCurrentPermission()
+            if automaticallyRequestedStage != nextStage {
+                automaticallyRequestedStage = nextStage
+                requestCurrentPermission()
+            }
         case .restart:
+            guard stageChanged else { return }
             showFinished(needsRestart: true)
-            DispatchQueue.main.async { [weak self] in
-                guard let self, self.view.window?.isVisible == true, self.stage == .restart else { return }
-                self.onRestartRequested?()
-            }
         case .complete:
+            guard stageChanged else { return }
             showFinished(needsRestart: false)
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.stage == .complete else { return }
@@ -247,16 +264,16 @@ private final class PermissionAssistantViewController: NSViewController {
     private func showFinished(needsRestart: Bool) {
         stop()
         progressLabel.stringValue = ""
-        headingLabel.stringValue = needsRestart ? "Einrichtung abgeschlossen" : "Alle Berechtigungen erteilt ✓"
+        headingLabel.stringValue = needsRestart ? "Ein Neustart reicht" : "Alle Berechtigungen erteilt ✓"
         instructionsLabel.stringValue = needsRestart
-            ? "Die App startet jetzt einmal neu und prüft anschließend alle Freigaben erneut."
+            ? "macOS übernimmt manche Freigaben erst nach einem App-Neustart. Du kannst jetzt \(appDisplayName) einmal neu starten oder das Fenster schließen und später neu starten."
             : "Alle Funktionen sind bereit."
         statusLabel.stringValue = ""
-        dragView.isHidden = true
-        nameLabel.isHidden = true
+        dragGuideView.isHidden = true
         openButton.isHidden = true
         continueButton.isHidden = true
         restartButton.isHidden = !needsRestart
+        laterButton.isHidden = !needsRestart
     }
 
     @objc private func reopenSettings() {
@@ -291,6 +308,11 @@ private final class PermissionAssistantViewController: NSViewController {
         onRestartRequested?()
     }
 
+    @objc private func closeForLater() {
+        stop()
+        view.window?.close()
+    }
+
     private func openSettings(_ urlString: String) {
         if let url = URL(string: urlString) {
             NSWorkspace.shared.open(url)
@@ -300,6 +322,224 @@ private final class PermissionAssistantViewController: NSViewController {
     override func viewWillDisappear() {
         super.viewWillDisappear()
         stop()
+    }
+}
+
+@MainActor
+private final class PermissionOverviewView: NSStackView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        orientation = .vertical
+        alignment = .leading
+        spacing = 6
+        translatesAutoresizingMaskIntoConstraints = false
+        widthAnchor.constraint(equalToConstant: 492).isActive = true
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func update(steps: [PermissionStep], currentIndex: Int?) {
+        arrangedSubviews.forEach {
+            removeArrangedSubview($0)
+            $0.removeFromSuperview()
+        }
+
+        for (index, step) in steps.enumerated() {
+            let granted = step.isGranted()
+            let active = index == currentIndex
+            addArrangedSubview(PermissionOverviewRow(title: step.title, granted: granted, active: active))
+        }
+    }
+}
+
+@MainActor
+private final class PermissionOverviewRow: NSView {
+    private let titleLabel = NSTextField(labelWithString: "")
+    private let statusLabel = NSTextField(labelWithString: "")
+    private let active: Bool
+
+    init(title: String, granted: Bool, active: Bool) {
+        self.active = active
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = true
+        layer?.cornerRadius = 8
+        layer?.backgroundColor = active
+            ? NSColor.controlAccentColor.withAlphaComponent(0.12).cgColor
+            : NSColor.controlBackgroundColor.withAlphaComponent(0.75).cgColor
+
+        let stateLabel = NSTextField(labelWithString: granted ? "✓" : active ? "●" : "○")
+        stateLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        stateLabel.textColor = granted ? .systemGreen : active ? .controlAccentColor : .tertiaryLabelColor
+        stateLabel.alignment = .center
+        stateLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        titleLabel.stringValue = title
+        titleLabel.font = .systemFont(ofSize: NSFont.systemFontSize)
+        titleLabel.textColor = .labelColor
+
+        statusLabel.stringValue = granted ? "Erteilt" : active ? "Jetzt aktivieren" : "Offen"
+        statusLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        statusLabel.textColor = granted ? .systemGreen : active ? .controlAccentColor : .secondaryLabelColor
+
+        let row = NSStackView(views: [stateLabel, titleLabel, statusLabel])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 10
+        row.translatesAutoresizingMaskIntoConstraints = false
+        row.setHuggingPriority(.required, for: .vertical)
+        titleLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        statusLabel.setContentHuggingPriority(.required, for: .horizontal)
+
+        addSubview(row)
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: 34),
+            stateLabel.widthAnchor.constraint(equalToConstant: 20),
+            row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            row.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            row.topAnchor.constraint(equalTo: topAnchor),
+            row.bottomAnchor.constraint(equalTo: bottomAnchor)
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+}
+
+@MainActor
+private final class PermissionDragGuideView: NSView {
+    private let appDragView = AppBundleDragView()
+    private let appCaption = NSTextField(labelWithString: "Dieses Symbol ziehen")
+    private let targetCaption = NSTextField(labelWithString: "in die Liste fallen lassen")
+    private let targetView = PermissionDropTargetIllustrationView()
+
+    var permissionTitle: String = "" {
+        didSet { targetView.permissionTitle = permissionTitle }
+    }
+
+    var allowsDragging: Bool {
+        get { appDragView.allowsDragging }
+        set {
+            appDragView.allowsDragging = newValue
+            alphaValue = newValue ? 1.0 : 0.55
+        }
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = true
+        layer?.cornerRadius = 12
+        layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.85).cgColor
+
+        appCaption.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
+        appCaption.textColor = .labelColor
+        appCaption.alignment = .center
+
+        targetCaption.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
+        targetCaption.textColor = .labelColor
+        targetCaption.alignment = .center
+
+        [appDragView, appCaption, targetView, targetCaption].forEach {
+            $0.translatesAutoresizingMaskIntoConstraints = false
+            addSubview($0)
+        }
+
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: 492),
+            heightAnchor.constraint(equalToConstant: 152),
+
+            appDragView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 30),
+            appDragView.topAnchor.constraint(equalTo: topAnchor, constant: 22),
+
+            appCaption.centerXAnchor.constraint(equalTo: appDragView.centerXAnchor),
+            appCaption.topAnchor.constraint(equalTo: appDragView.bottomAnchor, constant: 8),
+            appCaption.widthAnchor.constraint(equalToConstant: 150),
+
+            targetView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -28),
+            targetView.topAnchor.constraint(equalTo: topAnchor, constant: 20),
+            targetView.widthAnchor.constraint(equalToConstant: 192),
+            targetView.heightAnchor.constraint(equalToConstant: 94),
+
+            targetCaption.centerXAnchor.constraint(equalTo: targetView.centerXAnchor),
+            targetCaption.topAnchor.constraint(equalTo: targetView.bottomAnchor, constant: 8),
+            targetCaption.widthAnchor.constraint(equalToConstant: 190)
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+
+        let start = NSPoint(x: 132, y: 88)
+        let end = NSPoint(x: bounds.width - 242, y: 88)
+        let path = NSBezierPath()
+        path.move(to: start)
+        path.curve(to: end, controlPoint1: NSPoint(x: 178, y: 116), controlPoint2: NSPoint(x: 222, y: 116))
+        path.lineWidth = 3
+        NSColor.controlAccentColor.withAlphaComponent(0.8).setStroke()
+        path.stroke()
+
+        let head = NSBezierPath()
+        head.move(to: end)
+        head.line(to: NSPoint(x: end.x - 12, y: end.y + 8))
+        head.move(to: end)
+        head.line(to: NSPoint(x: end.x - 4, y: end.y - 14))
+        head.lineWidth = 3
+        head.stroke()
+    }
+}
+
+@MainActor
+private final class PermissionDropTargetIllustrationView: NSView {
+    var permissionTitle: String = "" {
+        didSet { needsDisplay = true }
+    }
+
+    override var isFlipped: Bool { true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+
+        let panel = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 10, yRadius: 10)
+        NSColor.windowBackgroundColor.setFill()
+        panel.fill()
+        NSColor.separatorColor.setStroke()
+        panel.lineWidth = 1
+        panel.stroke()
+
+        drawText("Datenschutz", in: NSRect(x: 12, y: 9, width: bounds.width - 24, height: 18),
+                 font: .systemFont(ofSize: 11, weight: .semibold), color: .secondaryLabelColor)
+        drawText(permissionTitle.isEmpty ? "Berechtigung" : permissionTitle,
+                 in: NSRect(x: 12, y: 28, width: bounds.width - 24, height: 18),
+                 font: .systemFont(ofSize: 12, weight: .semibold), color: .labelColor)
+
+        let dropRect = NSRect(x: 10, y: 54, width: bounds.width - 20, height: 28)
+        let dropPath = NSBezierPath(roundedRect: dropRect, xRadius: 7, yRadius: 7)
+        NSColor.controlAccentColor.withAlphaComponent(0.14).setFill()
+        dropPath.fill()
+        NSColor.controlAccentColor.withAlphaComponent(0.55).setStroke()
+        dropPath.setLineDash([4, 3], count: 2, phase: 0)
+        dropPath.lineWidth = 1.4
+        dropPath.stroke()
+
+        let appIconRect = NSRect(x: dropRect.minX + 8, y: dropRect.minY + 6, width: 16, height: 16)
+        let appIcon = NSWorkspace.shared.icon(forFile: Bundle.main.bundleURL.path)
+        appIcon.draw(in: appIconRect)
+        let appName = Bundle.main.bundleURL.deletingPathExtension().lastPathComponent
+        drawText("\(appName) hier ablegen",
+                 in: NSRect(x: dropRect.minX + 30, y: dropRect.minY + 6, width: dropRect.width - 38, height: 17),
+                 font: .systemFont(ofSize: 11, weight: .medium), color: .labelColor)
+    }
+
+    private func drawText(_ text: String, in rect: NSRect, font: NSFont, color: NSColor) {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byTruncatingTail
+        (text as NSString).draw(in: rect, withAttributes: [
+            .font: font,
+            .foregroundColor: color,
+            .paragraphStyle: paragraph
+        ])
     }
 }
 

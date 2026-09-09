@@ -59,8 +59,7 @@ not available yet
 
 ### Prerequisites
 
-- Xcode 14.0 or later
-- Swift 5.9 or later
+- Xcode or Command Line Tools with Swift 6.2 or later
 - Apple Developer Account (for signing and notarization)
 
 ### Build Steps

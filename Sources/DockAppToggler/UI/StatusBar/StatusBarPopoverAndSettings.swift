@@ -49,7 +49,6 @@ private final class SettingsViewController: NSViewController {
     private var shortcutButton: NSButton!
     private var shortcutStatusLabel: NSTextField!
     private var accessibilityStatusLabel: NSTextField!
-    private var inputMonitoringStatusLabel: NSTextField!
     private var screenRecordingStatusLabel: NSTextField!
     private nonisolated(unsafe) var shortcutRecordingMonitor: Any?
     private nonisolated(unsafe) var permissionsObserver: NSObjectProtocol?
@@ -183,11 +182,10 @@ private final class SettingsViewController: NSViewController {
     private func addPermissionsSection(to stackView: NSStackView) {
         stackView.addArrangedSubview(makeSectionTitle("Berechtigungen"))
         stackView.addArrangedSubview(makeDescription(
-            "Der Assistent prüft die Freigaben nacheinander. Ziehe das App-Symbol direkt in die passende Liste der Systemeinstellungen. Ein nötiger Neustart erfolgt am Ende."
+            "Der Assistent zeigt alle fehlenden Freigaben auf einmal, prüft im Hintergrund weiter und öffnet die passende Systemeinstellung automatisch. Ziehe das App-Symbol aus der Grafik in die Liste, falls es fehlt."
         ))
 
         accessibilityStatusLabel = NSTextField(labelWithString: "")
-        inputMonitoringStatusLabel = NSTextField(labelWithString: "")
         screenRecordingStatusLabel = NSTextField(labelWithString: "")
 
         stackView.addArrangedSubview(makePermissionRow(
@@ -195,12 +193,6 @@ private final class SettingsViewController: NSViewController {
             description: "Benötigt für Dock-/Fensteraktionen und um Tray-Icons für Tooltips per Accessibility zu erkennen.",
             statusLabel: accessibilityStatusLabel,
             action: #selector(requestAccessibilityAccess)
-        ))
-        stackView.addArrangedSubview(makePermissionRow(
-            title: "Eingabeüberwachung",
-            description: "Benötigt für globale Shortcuts wie Window Switching, auch wenn DockAppToggler nicht fokussiert ist.",
-            statusLabel: inputMonitoringStatusLabel,
-            action: #selector(requestInputMonitoringAccess)
         ))
         stackView.addArrangedSubview(makePermissionRow(
             title: "Bildschirmaufnahme",
@@ -243,10 +235,10 @@ private final class SettingsViewController: NSViewController {
 
     private func refreshPermissionLabels() {
         let state = AppPermissionState.current
-        shortcutStatusLabel?.stringValue = state.shortcutStatusMessage
-        shortcutStatusLabel?.isHidden = !state.secureInputEnabled
+        let error = KeyboardShortcutMonitor.shared.registrationError
+        shortcutStatusLabel?.stringValue = error ?? ""
+        shortcutStatusLabel?.isHidden = error == nil
         updateStatusLabel(accessibilityStatusLabel, granted: state.accessibilityGranted)
-        updateStatusLabel(inputMonitoringStatusLabel, granted: state.inputMonitoringGranted)
         updateStatusLabel(screenRecordingStatusLabel, granted: state.screenRecordingGranted)
     }
 
@@ -273,8 +265,9 @@ private final class SettingsViewController: NSViewController {
         let enabled = sender.state == .on
         UserDefaults.standard.set(enabled, forKey: "OptionTabEnabled")
         NotificationCenter.default.post(name: .optionTabStateChanged, object: nil, userInfo: ["enabled": enabled])
-        // Window Switching needs Accessibility (window control) + Input Monitoring (hotkey).
+        // Window switching reads and activates other apps' windows.
         if enabled { AppPermissionRequester.presentShortcutWizard() }
+        refreshPermissionLabels()
     }
 
     @objc private func toggleWindowPreviews(_ sender: NSButton) {
@@ -327,15 +320,11 @@ private final class SettingsViewController: NSViewController {
         self.shortcutRecordingMonitor = nil
         KeyboardShortcutMonitor.shared.setShortcutRecording(false)
         shortcutButton.title = KeyboardShortcut.savedSwitchingShortcut.displayString
+        refreshPermissionLabels()
     }
 
     @objc private func requestAccessibilityAccess() {
         AppPermissionRequester.requestAccessibilityIfNeeded(openSettings: true)
-        refreshPermissionLabels()
-    }
-
-    @objc private func requestInputMonitoringAccess() {
-        AppPermissionRequester.requestInputMonitoringIfNeeded(openSettings: true)
         refreshPermissionLabels()
     }
 

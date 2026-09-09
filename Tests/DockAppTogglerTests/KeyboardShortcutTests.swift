@@ -4,124 +4,93 @@ import Testing
 @testable import DockAppToggler
 
 struct KeyboardShortcutTests {
-    private func keyEvent(
-        _ modifiers: NSEvent.ModifierFlags,
-        keyCode: Int = kVK_Tab,
-        type: NSEvent.EventType = .keyDown
-    ) -> NSEvent {
-        NSEvent.keyEvent(
-            with: type, location: .zero, modifierFlags: modifiers,
-            timestamp: 0, windowNumber: 0, context: nil,
-            characters: "", charactersIgnoringModifiers: "", isARepeat: false,
-            keyCode: UInt16(keyCode)
-        )!
-    }
-
-    @Test func testShortcutDoesNotStealChordsWithExtraCommandOrControl() {
+    @Test func optionTabRegistersForwardAndShiftReverseOnly() {
         let shortcut = KeyboardShortcut.defaultSwitchingShortcut
-        #expect(!shortcut.matches(keyEvent([.option, .command])))
-        #expect(!shortcut.matches(keyEvent([.option, .control])))
+        #expect(shortcut.keyCode == kVK_Tab)
+        #expect(shortcut.registrations.map(\.modifiers) == [UInt32(optionKey), UInt32(optionKey | shiftKey)])
+        #expect(shortcut.registrations.map(\.reverse) == [false, true])
+        #expect(shortcut.carbonModifiers != UInt32(NSEvent.ModifierFlags.option.rawValue))
     }
 
-    @Test func testShiftCanReverseSwitchingAndCapsLockDoesNotPreventMatching() {
-        let shortcut = KeyboardShortcut.defaultSwitchingShortcut
-        #expect(shortcut.matches(keyEvent(.option)))
-        #expect(shortcut.matches(keyEvent([.option, .shift])))
-        #expect(shortcut.matches(keyEvent([.option, .capsLock])))
-        #expect(!shortcut.matches(keyEvent([])))
-        #expect(!shortcut.matches(keyEvent(.option, keyCode: kVK_ANSI_A)))
+    @Test func customShortcutMapsAllModifiersWithoutCapsLock() {
+        let shortcut = KeyboardShortcut(keyCode: UInt16(kVK_ANSI_K), modifiers: [.command, .control, .option, .capsLock])
+        #expect(shortcut.carbonModifiers == UInt32(cmdKey | controlKey | optionKey))
+        #expect(shortcut.registrations.count == 2)
     }
 
-    @Test func testCustomShortcutRequiresAllRecordedModifiers() {
-        let shortcut = KeyboardShortcut(keyCode: UInt16(kVK_ANSI_K), modifiers: [.command, .control])
-        #expect(shortcut.matches(keyEvent([.command, .control], keyCode: kVK_ANSI_K)))
-        #expect(!shortcut.matches(keyEvent(.command, keyCode: kVK_ANSI_K)))
-        #expect(!shortcut.matches(keyEvent([.command, .control, .option], keyCode: kVK_ANSI_K)))
+    @Test func shiftInRecordedShortcutDoesNotRegisterItTwice() {
+        let shortcut = KeyboardShortcut(keyCode: UInt16(kVK_Tab), modifiers: [.option, .shift])
+        #expect(shortcut.registrations.count == 1)
+        #expect(shortcut.registrations.first?.reverse == false)
+        #expect(shortcut.registrations.first?.modifiers == UInt32(optionKey | shiftKey))
     }
 
-    private func handle(
-        _ event: NSEvent,
-        state: inout SwitchingShortcutState,
-        shortcut: KeyboardShortcut = .defaultSwitchingShortcut,
-        isEnabled: Bool = true,
-        isRecording: Bool = false
-    ) -> SwitchingShortcutState.Action {
-        state.handle(event, shortcut: shortcut, isEnabled: isEnabled, isRecording: isRecording)
+    @Test func recordingNormalizesModifiersAndRejectsUnmodifiedKeys() {
+        func event(_ flags: NSEvent.ModifierFlags) -> NSEvent {
+            NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags,
+                            timestamp: 0, windowNumber: 0, context: nil,
+                            characters: "", charactersIgnoringModifiers: "", isARepeat: false,
+                            keyCode: UInt16(kVK_Tab))!
+        }
+        #expect(KeyboardShortcut.from(event: event([.option, .capsLock])) == .defaultSwitchingShortcut)
+        #expect(KeyboardShortcut.from(event: event([])) == nil)
     }
 
-    @Test func testShortcutStartsWithoutAnEarlierModifierEvent() {
-        var state = SwitchingShortcutState()
-        let shortcut = KeyboardShortcut(keyCode: UInt16(kVK_ANSI_K), modifiers: [.command, .control])
-        #expect(handle(keyEvent([.command, .control], keyCode: kVK_ANSI_K), state: &state, shortcut: shortcut) == .next)
-        #expect(handle(keyEvent(.control, type: .flagsChanged), state: &state, shortcut: shortcut) == .select)
-    }
-
-    @Test func testRepeatedSwitchingSessionsKeepWorking() {
+    @Test func repeatedTabReleaseKeepsChooserOpenUntilOptionIsReleased() {
         var state = SwitchingShortcutState()
         for _ in 0..<3 {
-            #expect(handle(keyEvent(.option), state: &state) == .next)
-            #expect(handle(keyEvent(.option, type: .keyUp), state: &state) == .consume)
-            #expect(handle(keyEvent(.option), state: &state) == .next)
-            #expect(handle(keyEvent(.option, type: .keyUp), state: &state) == .consume)
-            #expect(handle(keyEvent([], type: .flagsChanged), state: &state) == .select)
-            #expect(handle(keyEvent([], type: .flagsChanged), state: &state) == .passThrough)
+            for _ in 0..<2 {
+                #expect(state.press(reverse: false, isEnabled: true, isRecording: false) == .next)
+                #expect(state.checkModifiers(UInt32(optionKey), shortcut: .defaultSwitchingShortcut) == .none)
+                #expect(state.isSwitching)
+            }
+            #expect(state.checkModifiers(0, shortcut: .defaultSwitchingShortcut) == .select)
+            #expect(state.checkModifiers(0, shortcut: .defaultSwitchingShortcut) == .none)
         }
     }
 
-    @Test func testQuickTapSelectsAndConsumesKeyUpAfterModifierRelease() {
+    @Test func quickTapSelectsEvenWhenOptionWasReleasedBeforeHandlerRuns() {
         var state = SwitchingShortcutState()
-        #expect(handle(keyEvent(.option), state: &state) == .next)
-        let release = handle(keyEvent([], type: .flagsChanged), state: &state)
-        #expect(release == .select)
-        #expect(!release.consumesEvent)
-        #expect(handle(keyEvent([], type: .keyUp), state: &state) == .consume)
-        #expect(handle(keyEvent([], type: .keyUp), state: &state) == .passThrough)
+        #expect(state.press(reverse: false, isEnabled: true, isRecording: false) == .next)
+        #expect(state.checkModifiers(0, shortcut: .defaultSwitchingShortcut) == .select)
+        #expect(!state.isSwitching)
     }
 
-    @Test func testRecordingDoesNotTriggerTheCurrentlyConfiguredShortcut() {
+    @Test func reverseSwitchingDoesNotSelectOnShiftRelease() {
         var state = SwitchingShortcutState()
-        #expect(handle(keyEvent(.option), state: &state, isRecording: true) == .passThrough)
-        #expect(handle(keyEvent(.option, type: .keyUp), state: &state, isRecording: true) == .passThrough)
-        #expect(handle(keyEvent([], type: .flagsChanged), state: &state) == .passThrough)
-        #expect(handle(keyEvent(.option), state: &state) == .next)
+        #expect(state.press(reverse: true, isEnabled: true, isRecording: false) == .previous)
+        #expect(state.checkModifiers(UInt32(optionKey), shortcut: .defaultSwitchingShortcut) == .none)
+        #expect(state.press(reverse: false, isEnabled: true, isRecording: false) == .next)
+        #expect(state.checkModifiers(0, shortcut: .defaultSwitchingShortcut) == .select)
     }
 
-    @Test func testDisabledSwitchingDoesNotConsumeTyping() {
+    @Test func customShortcutSelectsWhenAnyRequiredModifierIsReleased() {
+        let shortcut = KeyboardShortcut(keyCode: UInt16(kVK_ANSI_K), modifiers: [.command, .control])
         var state = SwitchingShortcutState()
-        #expect(handle(keyEvent(.option), state: &state, isEnabled: false) == .passThrough)
-        #expect(handle(keyEvent([], type: .flagsChanged), state: &state) == .passThrough)
-        #expect(handle(keyEvent([]), state: &state) == .passThrough)
-        #expect(handle(keyEvent(.option, keyCode: kVK_ANSI_A), state: &state) == .passThrough)
+        #expect(state.press(reverse: false, isEnabled: true, isRecording: false) == .next)
+        #expect(state.checkModifiers(UInt32(cmdKey | controlKey | shiftKey), shortcut: shortcut) == .none)
+        #expect(state.checkModifiers(UInt32(controlKey), shortcut: shortcut) == .select)
     }
 
-    @Test func testShiftReversesOnlyWhenItIsNotPartOfTheRecordedShortcut() {
-        var state = SwitchingShortcutState()
-        #expect(handle(keyEvent([.option, .shift]), state: &state) == .previous)
-        #expect(handle(keyEvent(.option, type: .flagsChanged), state: &state) == .passThrough)
-        #expect(handle(keyEvent([], type: .flagsChanged), state: &state) == .select)
-
-        let shortcut = KeyboardShortcut(keyCode: UInt16(kVK_Tab), modifiers: [.option, .shift])
-        #expect(handle(keyEvent([.option, .shift]), state: &state, shortcut: shortcut) == .next)
-        #expect(handle(keyEvent(.option, type: .flagsChanged), state: &state, shortcut: shortcut) == .select)
+    @Test func rightHandModifiersAlsoKeepTheChooserOpen() {
+        let shortcut = KeyboardShortcut(keyCode: UInt16(kVK_Tab), modifiers: [.control, .option, .shift])
+        #expect(shortcut.modifiersPressed(in: UInt32(rightControlKey | rightOptionKey | rightShiftKey)))
+        #expect(!shortcut.modifiersPressed(in: UInt32(rightControlKey | rightOptionKey)))
     }
 
-    @Test func testEscapeCancelsWithoutSelectingAndAllowsTheNextSession() {
+    @Test func disabledAndRecordingShortcutsCannotStartSwitching() {
         var state = SwitchingShortcutState()
-        #expect(handle(keyEvent(.option), state: &state) == .next)
-        #expect(handle(keyEvent(.option, keyCode: kVK_Escape), state: &state) == .cancel)
-        #expect(handle(keyEvent([], keyCode: kVK_Escape, type: .keyUp), state: &state) == .consume)
-        #expect(handle(keyEvent([], type: .flagsChanged), state: &state) == .passThrough)
-        #expect(handle(keyEvent([], type: .keyUp), state: &state) == .consume)
-        #expect(handle(keyEvent(.option), state: &state) == .next)
+        #expect(state.press(reverse: false, isEnabled: false, isRecording: false) == .none)
+        #expect(state.press(reverse: true, isEnabled: true, isRecording: true) == .none)
+        #expect(!state.isSwitching)
+        #expect(state.checkModifiers(0, shortcut: .defaultSwitchingShortcut) == .none)
     }
 
-    @Test func testChangingShortcutResetsThePreviousSession() {
+    @Test func cancellationDoesNotSelectAndNextSessionStillWorks() {
         var state = SwitchingShortcutState()
-        #expect(handle(keyEvent(.option), state: &state) == .next)
+        #expect(state.press(reverse: false, isEnabled: true, isRecording: false) == .next)
         state = SwitchingShortcutState()
-        let shortcut = KeyboardShortcut(keyCode: UInt16(kVK_ANSI_K), modifiers: .control)
-        #expect(handle(keyEvent([], type: .flagsChanged), state: &state, shortcut: shortcut) == .passThrough)
-        #expect(handle(keyEvent(.option), state: &state, shortcut: shortcut) == .passThrough)
-        #expect(handle(keyEvent(.control, keyCode: kVK_ANSI_K), state: &state, shortcut: shortcut) == .next)
+        #expect(state.checkModifiers(0, shortcut: .defaultSwitchingShortcut) == .none)
+        #expect(state.press(reverse: false, isEnabled: true, isRecording: false) == .next)
     }
 }
