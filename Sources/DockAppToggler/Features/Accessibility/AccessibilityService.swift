@@ -326,6 +326,8 @@ class AccessibilityService {
     }
 
     func focusWindow(_ window: AXUIElement, for app: NSRunningApplication?) {
+        // Application hiding is separate from a window's minimized state.
+        app?.unhide()
         AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
         AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, true as CFTypeRef)
         AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, true as CFTypeRef)
@@ -346,6 +348,7 @@ class AccessibilityService {
     }
     
     func raiseWindowOnly(_ window: AXUIElement, for app: NSRunningApplication) {
+        app.unhide()
         AXUIElementSetAttributeValue(window, kAXHiddenAttribute as CFString, false as CFTypeRef)
         AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
         AXUIElementPerformAction(window, kAXRaiseAction as CFString)
@@ -410,26 +413,12 @@ class AccessibilityService {
             app.activate(options: [.activateIgnoringOtherApps])
             Logger.debug("Activated application directly")
         } else {
-            // Existing window raising logic
-            // Get the window's owner PID
-            var pid: pid_t = 0
-            AXUIElementGetPid(windowInfo.window, &pid)
-            
-            // First try using CGWindow APIs if we have a window ID
-            if let windowID = windowInfo.cgWindowID {
-                Logger.debug("Using CGWindow APIs with ID: \(windowID)")
-                raiseCGWindow(windowID: windowID, ownerPID: pid)
-            } else {
-                Logger.debug("No CGWindowID available, using AX APIs")
-                // Unminimize first if needed
-                AXUIElementSetAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
-                
-                // Then raise the window
-                AXUIElementPerformAction(windowInfo.window, kAXRaiseAction as CFString)
-            }
-            
-            // Activate the app
+            // A CGWindowID is metadata; CGWindow list APIs cannot raise a window.
+            // Restore and raise the actual AX window even when an ID is available.
+            app.unhide()
+            AXUIElementSetAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
             app.activate(options: [.activateIgnoringOtherApps])
+            AXUIElementPerformAction(windowInfo.window, kAXRaiseAction as CFString)
         }
         
         Logger.debug("=== RAISING COMPLETE ===")
@@ -440,40 +429,6 @@ class AccessibilityService {
         }
     }
 
-    // Move raiseWindowWithCGWindow inside AccessibilityService as a private method
-    private func raiseCGWindow(windowID: CGWindowID, ownerPID: pid_t) {
-        // Get current window list
-        let windowList = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] ?? []
-        
-        // Find our window
-        guard let windowInfo = windowList.first(where: { ($0[kCGWindowNumber as String] as? CGWindowID) == windowID }) else {
-            return
-        }
-        
-        // Get window owner PID
-        guard let ownerPID = windowInfo[kCGWindowOwnerPID as String] as? pid_t else {
-            return
-        }
-        
-        // Try multiple methods to raise the window
-        
-        // 1. Activate the app
-        if let app = NSRunningApplication(processIdentifier: ownerPID) {
-            app.activate(options: [.activateIgnoringOtherApps])
-            usleep(5000)
-        }
-        
-        // 2. Try to reorder window list
-        let options = CGWindowListOption(arrayLiteral: .optionOnScreenOnly, .optionIncludingWindow)
-        let _ = CGWindowListCopyWindowInfo(options, windowID)
-        
-        // 3. Try to bring window to front using window list manipulation
-        let windowArray = [windowID] as CFArray
-        let _ = CGWindowListCreateDescriptionFromArray(windowArray)
-        
-        Logger.debug("Attempted to raise window \(windowID) using multiple methods")
-    }
-    
     func hideWindow(window: AXUIElement, for app: NSRunningApplication) {
         var pid: pid_t = 0
         AXUIElementGetPid(window, &pid)
