@@ -18,9 +18,11 @@ let package = Package(
         .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.5.1")
     ],
     targets: [
+        .target(name: "MenuBarVisibility", publicHeadersPath: "include"),
         .executableTarget(
             name: "DockAppToggler",
             dependencies: [
+                "MenuBarVisibility",
                 .product(name: "Sparkle", package: "Sparkle")
             ],
             exclude: ["Info.plist"],

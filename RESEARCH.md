@@ -1,5 +1,12 @@
 # External findings
 
+## macOS 27 menu bar
+
+- macOS 27 moved status items into managed scenes; oversized spacers and per-item WindowServer frames no longer establish hide state. Read app-owned `AXExtrasMenuBar` items and give our markers explicit accessibility identifiers. Keep section assignments while a native restriction is active: hidden items can retain stale frames. [Primary implementation](https://github.com/dwarvesf/hidden/pull/403); verified against 27.0.1 on 2026-10-26.
+- `MenuBarClientCore` exposes `MBAssessmentModeConfiguration.initWithAllowedSystemItems:allowedBundleIdentifiers:` and `MBAssessmentModeAssertion.activateWithConfiguration:completionHandler:` / `invalidate`. Restrictions are process-scoped and per bundle, not per icon. Resolve dynamically, retain the handle, and invalidate stale asynchronous activations. This is a private API with no public compatibility guarantee. [Primary bridge source](https://github.com/dwarvesf/hidden/blob/develop/hidden/Features/StatusBar/Engine/Native/HBNativeVisibilityShim.m); runtime signatures verified on 27.0.1, 2026-10-26.
+
+## Other APIs
+
 - 2026-09-09 | AppKit keyboard monitors: local monitor receives app `sendEvent` events; returning nil stops dispatch; global monitor observes other apps, cannot consume. https://developer.apple.com/documentation/appkit/nsevent/addlocalmonitorforevents(matching:handler:) https://developer.apple.com/documentation/appkit/nsevent
 - 2026-09-09 | CGEvent taps: `.defaultTap` actively filters; callback runs on source run loop; `.cgSessionEventTap` precedes application annotation. Add source to main run loop/common modes; defer window/AX work. https://developer.apple.com/documentation/coregraphics/cgevent/tapcreate(tap:place:options:eventsofinterest:callback:userinfo:) https://developer.apple.com/documentation/coregraphics/cgeventtaplocation
 - 2026-09-09 | Swift Testing: `import Testing`, `@Test`, `#expect`; SwiftPM `.testTarget` dependency on app target. Local CLT 6.2.4 lacks XCTest; Testing.framework under `/Library/Developer/CommandLineTools/Library/Developer/Frameworks`; invocation: `swift test --disable-xctest -Xswiftc -F -Xswiftc /Library/Developer/CommandLineTools/Library/Developer/Frameworks -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/Frameworks`. https://developer.apple.com/documentation/testing https://docs.swift.org/package-manager/PackageDescription/PackageDescription.html

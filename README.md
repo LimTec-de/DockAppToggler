@@ -42,6 +42,16 @@ Transform your macOS Dock into a powerful window management hub while maintainin
 - macOS 13.0 or later
 - Accessibility permissions (required for window management)
 
+## Menu bar icons on macOS 27
+
+Enable **Tray-Iconbegrenzung** in Settings. Icons left of the arrow hide when collapsed; icons left of the always-hidden marker stay hidden when expanded. Use **Dauerhaft versteckte Icons bearbeiten** to reveal and rearrange all sections.
+
+macOS 27 visibility applies to whole apps. If an app has icons in several sections, its most visible section wins. System controls stay visible. When the requested icons exceed the space beside a built-in display's notch, a scrollable strip below the menu bar shows app symbols that trigger their original status-item action.
+
+This uses the private macOS 27 menu-bar visibility API, resolved at runtime. A failure is reported under **Problem mit Menüleisten-Icons…** in the app menu. Quitting releases the visibility restriction. Earlier macOS versions retain the separator-based implementation.
+
+The opt-in live regression test is documented in [Tests/StatusBarTests/test_status_bar.py](Tests/StatusBarTests/test_status_bar.py).
+
 ## Installation
 
 ### Direct Download

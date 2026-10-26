@@ -30,6 +30,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
     private var isApplyingInternalTrayPositionChange = false
     private var isEditingAlwaysHiddenTraySection = false
     private var restoreCollapseAfterAlwaysHiddenEditing = false
+    private var nativeTrayController: NativeTrayController?
 
     private var settingsWindowController: SettingsWindowController?
 
@@ -54,6 +55,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
     }
 
     private var isTrayLimitCollapsed: Bool {
+        if let nativeTrayController { return nativeTrayController.isCollapsed }
         if let separatorWidth = trayLimitSeparatorWindow()?.frame.width {
             return separatorWidth > max(100, trayLimitNormalLength)
         }
@@ -94,6 +96,16 @@ class StatusBarController: NSObject, NSMenuDelegate {
         setupPermissionObserver()
         setupTooltipTargetRefreshObserver()
         setupTrayBoundaryPositionObserver()
+        if ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 27 {
+            guard let bundle = Bundle.main.bundleIdentifier else {
+                preconditionFailure("DockAppToggler muss als .app mit Bundle-ID gestartet werden.")
+            }
+            nativeTrayController = NativeTrayController(
+                ownBundle: bundle,
+                boundaryIdentifier: Self.boundaryAutosaveName,
+                alwaysHiddenIdentifier: Self.alwaysHiddenSeparatorAutosaveName
+            ) { [weak self] in self?.updateTrayBoundarySeparatorAppearance() }
+        }
         updateTrayIconLimiter()
 
     }
@@ -106,6 +118,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
 
         guard let button = statusItem.button else { return }
         button.image = makeStatusIcon()
+        button.setAccessibilityIdentifier(Self.toggleAutosaveName)
         configureStatusButtonTooltip(button, text: Bundle.main.infoDictionary?[kCFBundleNameKey as String] as? String ?? "DockAppToggler")
         button.target = self
         button.action = #selector(statusBarButtonClicked(_:))
@@ -191,6 +204,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
         separator.length = isTrayLimitEnabled ? Self.boundaryStatusItemLength : 0
         separator.behavior = NSStatusItem.Behavior()
         separator.button?.image = makeTrayBoundarySeparatorImage(collapsed: isTrayLimitCollapsed)
+        separator.button?.setAccessibilityIdentifier(Self.boundaryAutosaveName)
         configureStatusButtonTooltip(separator.button, text: trayBoundarySeparatorToolTip)
         separator.button?.target = self
         separator.button?.action = #selector(trayBoundarySeparatorClicked(_:))
@@ -207,6 +221,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
         separator.autosaveName = Self.alwaysHiddenSeparatorAutosaveName
         separator.behavior = NSStatusItem.Behavior()
         separator.button?.image = makeTrayBoundarySeparatorImage(collapsed: isTrayLimitCollapsed)
+        separator.button?.setAccessibilityIdentifier(Self.alwaysHiddenSeparatorAutosaveName)
         configureStatusButtonTooltip(separator.button, text: "Dauerhaft versteckte Tray-Icons")
         separator.isVisible = true
         alwaysHiddenSeparatorItem = separator
@@ -370,6 +385,10 @@ class StatusBarController: NSObject, NSMenuDelegate {
 
     private func recalculateHiddenTrayIconsAfterToggleMove() {
         guard isTrayLimitEnabled else { return }
+        if let nativeTrayController {
+            nativeTrayController.refresh()
+            return
+        }
 
         let shouldReCollapse = isTrayLimitCollapsed
         trayLimitCollapseRetryCount = 0
@@ -534,6 +553,18 @@ class StatusBarController: NSObject, NSMenuDelegate {
     }
 
     private func updateTrayIconLimiter() {
+        if let nativeTrayController {
+            nativeTrayController.stop()
+            trayLimitSeparatorItem?.length = 0
+            trayLimitSeparatorItem?.isVisible = false
+            trayBoundarySeparatorItem?.length = isTrayLimitEnabled ? Self.boundaryStatusItemLength : 0
+            alwaysHiddenSeparatorItem?.length = isTrayLimitEnabled && isAlwaysHiddenTraySectionEnabled ? alwaysHiddenEditLength : 0
+            if isTrayLimitEnabled {
+                nativeTrayController.set(collapsed: true, editing: false, alwaysHidden: isAlwaysHiddenTraySectionEnabled)
+            }
+            updateTrayBoundarySeparatorAppearance()
+            return
+        }
         updateTrayLimitCollapsedLength()
         setupTrayBoundarySeparator()
         setupAlwaysHiddenSeparator()
@@ -560,6 +591,10 @@ class StatusBarController: NSObject, NSMenuDelegate {
 
     private func collapseTrayIcons() {
         guard isTrayLimitEnabled else { return }
+        if let nativeTrayController {
+            nativeTrayController.set(collapsed: true, editing: isEditingAlwaysHiddenTraySection, alwaysHidden: isAlwaysHiddenTraySectionEnabled)
+            return
+        }
         setupTrayLimitSeparator()
         setupTrayBoundarySeparator()
         setupAlwaysHiddenSeparator()
@@ -609,6 +644,14 @@ class StatusBarController: NSObject, NSMenuDelegate {
     }
 
     private func expandTrayIcons() {
+        if let nativeTrayController {
+            if isTrayLimitEnabled {
+                nativeTrayController.set(collapsed: false, editing: isEditingAlwaysHiddenTraySection, alwaysHidden: isAlwaysHiddenTraySectionEnabled)
+            } else {
+                nativeTrayController.stop()
+            }
+            return
+        }
         trayLimitReapplyTask?.cancel()
         trayLimitReapplyTask = nil
         trayLimitCollapseRetryCount = 0
@@ -630,6 +673,12 @@ class StatusBarController: NSObject, NSMenuDelegate {
 
         restoreCollapseAfterAlwaysHiddenEditing = isTrayLimitCollapsed
         isEditingAlwaysHiddenTraySection = true
+        if let nativeTrayController {
+            nativeTrayController.stop()
+            alwaysHiddenSeparatorItem?.length = alwaysHiddenEditLength
+            nativeTrayController.set(collapsed: false, editing: true, alwaysHidden: true)
+            return
+        }
 
         trayLimitReapplyTask?.cancel()
         trayLimitReapplyTask = nil
@@ -649,6 +698,8 @@ class StatusBarController: NSObject, NSMenuDelegate {
     private func finishAlwaysHiddenTraySectionEditing() {
         isEditingAlwaysHiddenTraySection = false
         UserDefaults.standard.set(true, forKey: "TrayIconAlwaysHiddenSectionEnabled")
+        // Re-read the user's arrangement after editing from an unrestricted bar.
+        nativeTrayController?.stop()
 
         if restoreCollapseAfterAlwaysHiddenEditing {
             collapseTrayIcons()
@@ -675,6 +726,10 @@ class StatusBarController: NSObject, NSMenuDelegate {
         let menu = NSMenu()
         menu.delegate = self
         menu.appearance = NSAppearance(named: .aqua)
+        if nativeTrayController?.errorMessage != nil {
+            menu.addItem(makeMenuItem(title: "Problem mit Menüleisten-Icons…", action: #selector(showTrayIconError)))
+            menu.addItem(.separator())
+        }
 
         if isTrayLimitEnabled {
             menu.addItem(makeMenuItem(
@@ -764,6 +819,12 @@ class StatusBarController: NSObject, NSMenuDelegate {
         isEditingAlwaysHiddenTraySection = false
         UserDefaults.standard.set(false, forKey: "TrayIconAlwaysHiddenSectionEnabled")
         alwaysHiddenSeparatorItem?.length = 0
+        if let nativeTrayController {
+            let collapsed = nativeTrayController.isCollapsed
+            nativeTrayController.stop()
+            nativeTrayController.set(collapsed: collapsed, editing: false, alwaysHidden: false)
+            return
+        }
 
         if isTrayLimitCollapsed {
             collapseTrayIcons()
@@ -774,6 +835,14 @@ class StatusBarController: NSObject, NSMenuDelegate {
 
     @objc private func showSettingsWindowFromStatusMenu() {
         showSettingsWindow()
+    }
+
+    @objc private func showTrayIconError() {
+        guard let message = nativeTrayController?.errorMessage else { return }
+        let alert = NSAlert()
+        alert.messageText = "Menüleisten-Icons konnten nicht angeordnet werden"
+        alert.informativeText = message
+        alert.runModal()
     }
 
     @objc private func quitFromStatusMenu() {
@@ -787,6 +856,10 @@ class StatusBarController: NSObject, NSMenuDelegate {
     /// Brings any pushed-off icons back into the menu bar so they aren't left hidden after
     /// the app goes away.
     private func restoreHiddenIconsBeforeExit() {
+        if let nativeTrayController {
+            nativeTrayController.stop()
+            return
+        }
         expandTrayIcons()
         // Drop the toggle's forced divider position too, so a future run / other launch
         // doesn't inherit a layout that hides icons.
@@ -858,6 +931,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
     /// Re-parks the spacer around the boundary separator. The boundary may have been
     /// ⌘-dragged to a new divider spot; DockAppToggler keeps its own position.
     private func positionItemsAroundBoundary() {
+        guard nativeTrayController == nil else { return }
         let boundaryPosition = savedPreferredPosition(for: Self.boundaryAutosaveName) ?? Self.boundaryDefaultPosition
 
         applyInternalTrayPositionChange {
