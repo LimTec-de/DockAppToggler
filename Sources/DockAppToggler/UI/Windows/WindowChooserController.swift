@@ -99,6 +99,7 @@ class WindowChooserController: NSWindowController {
             app: app,
             iconCenter: point,
             isHistory: isHistory,
+            presorted: true,
             callback: callback
         )
         
@@ -305,6 +306,10 @@ class WindowChooserController: NSWindowController {
         }
     }
     
+    /// Resizes the chooser window and everything inside it to `height`.
+    /// The chooser view follows its host: its rows are anchored to the top
+    /// edge, so a view that kept its old height inside a resized window
+    /// showed an empty band above the title (or lost its title).
     func updateWindowSize(to height: CGFloat) {
         guard let window = window else { return }
         
@@ -317,7 +322,9 @@ class WindowChooserController: NSWindowController {
         )
         
         // Update window frame
-        window.setFrame(newFrame, display: true)
+        if window.frame != newFrame {
+            window.setFrame(newFrame, display: true)
+        }
         
         // Update container view and its subviews
         if let containerView = window.contentView {
@@ -326,15 +333,31 @@ class WindowChooserController: NSWindowController {
                 view.frame = containerView.bounds
             }
         }
+
+        if let chooserView, let host = chooserView.superview, chooserView.frame != host.bounds {
+            chooserView.frame = host.bounds
+        }
     }
 
     func updateWindows(_ windows: [WindowInfo], for app: NSRunningApplication, at point: CGPoint) {
-        let appChanged = self.app.processIdentifier != app.processIdentifier
-        self.app = app
-
         // Ensure window level and ordering
         window?.level = NSWindow.Level.popUpMenu + 2
         window?.orderFront(nil)
+
+        applyWindows(windows, for: app, at: point)
+
+        updatePosition(point)
+
+        DispatchQueue.main.async { [weak self] in
+            self?.chooserView?.syncHoverToCurrentMouseLocation()
+        }
+    }
+
+    /// Updates rows and size for `windows` without ordering or moving the
+    /// chooser window.
+    func applyWindows(_ windows: [WindowInfo], for app: NSRunningApplication, at point: CGPoint) {
+        let appChanged = self.app.processIdentifier != app.processIdentifier
+        self.app = app
 
         // The chooser view is bound to a single NSRunningApplication via a `let`,
         // so reusing it across apps would leave it filtering/showing the wrong
@@ -347,32 +370,28 @@ class WindowChooserController: NSWindowController {
             chooserView = nil
         }
 
-        // Resize the chooser to fit the new window count before layout.
-        let targetHeight = Constants.UI.windowHeight(for: windows.count)
-        if let currentHeight = window?.frame.height, abs(currentHeight - targetHeight) > 1 {
-            updateWindowSize(to: targetHeight)
-        }
+        // One filtered and sorted list decides both the rows and the height.
+        // Sizing from the unfiltered list made the menu one row too tall for
+        // every window the view hides (smaller than 200x200).
+        let sortedWindows = WindowChooserView.sortWindows(windows, app: app, isHistory: false)
+        let targetHeight = Constants.UI.windowHeight(for: sortedWindows.count)
 
         if let existingView = chooserView {
-            let currentWindows = existingView.options
-            let sortedIncomingWindows = WindowChooserView.sortWindows(windows, app: app, isHistory: false)
-            let windowsChanged = currentWindows.count != sortedIncomingWindows.count ||
-                zip(currentWindows, sortedIncomingWindows).contains { current, updated in
-                    current.cgWindowID != updated.cgWindowID ||
-                    current.name != updated.name ||
-                    current.isAppElement != updated.isAppElement
-                }
-
-            if windowsChanged {
-                existingView.updateWindows(windows, forceNormalMode: true)
+            if existingView.showsSameWindows(as: sortedWindows) {
+                updateWindowSize(to: targetHeight)
+            } else {
+                existingView.setSortedWindows(sortedWindows, forceNormalMode: true)
             }
         } else {
+            updateWindowSize(to: targetHeight)
+
             let newView = WindowChooserView(
-                windows: windows,
+                windows: sortedWindows,
                 appName: app.localizedName ?? "Unknown",
                 app: app,
                 iconCenter: point,
                 isHistory: false,
+                presorted: true,
                 callback: callback
             )
 
@@ -382,12 +401,6 @@ class WindowChooserController: NSWindowController {
             }
 
             chooserView = newView
-        }
-
-        updatePosition(point)
-
-        DispatchQueue.main.async { [weak self] in
-            self?.chooserView?.syncHoverToCurrentMouseLocation()
         }
     }
 

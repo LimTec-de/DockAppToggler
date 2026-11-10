@@ -11,8 +11,42 @@ class DockService {
     private init() {}
     
     private let timeout: TimeInterval = 3.0 // 3 second timeout
+
+    /// Dock geometry as needed by `isPointNearDockArea`, which the event tap
+    /// asks for on every mouse move anywhere on screen. Reading it means two
+    /// Accessibility round trips to the Dock, a running-applications lookup
+    /// and two preference reads; it only changes when the user reconfigures
+    /// the Dock, so a short-lived snapshot is enough.
+    private struct DockGeometry {
+        let height: CGFloat
+        let magnificationSize: CGFloat
+        let orientation: String
+        let timestamp: TimeInterval
+    }
+    private var cachedGeometry: DockGeometry?
+    private let geometryCacheLifetime: TimeInterval = 2.0
+    private var cachedDockProcess: NSRunningApplication?
+
+    private func dockGeometry() -> DockGeometry {
+        let now = ProcessInfo.processInfo.systemUptime
+        if let cachedGeometry, now - cachedGeometry.timestamp < geometryCacheLifetime {
+            return cachedGeometry
+        }
+        let geometry = DockGeometry(
+            height: readDockHeight(),
+            magnificationSize: readDockMagnificationSize(),
+            orientation: readDockOrientation(),
+            timestamp: now
+        )
+        cachedGeometry = geometry
+        return geometry
+    }
     
     func getDockMagnificationSize() -> CGFloat {
+        dockGeometry().magnificationSize
+    }
+
+    private func readDockMagnificationSize() -> CGFloat {
         let defaults = UserDefaults.init(suiteName: "com.apple.dock")
         let magnificationEnabled = defaults?.bool(forKey: "magnification") ?? false
         if magnificationEnabled {
@@ -24,6 +58,10 @@ class DockService {
     
     // Get dock orientation: 'bottom', 'left', or 'right'
     func getDockOrientation() -> String {
+        dockGeometry().orientation
+    }
+
+    private func readDockOrientation() -> String {
         let defaults = UserDefaults(suiteName: "com.apple.dock")
         return defaults?.string(forKey: "orientation") ?? "bottom"
     }
@@ -49,7 +87,12 @@ class DockService {
     }
     
     func findDockProcess() -> NSRunningApplication? {
-        return workspace.runningApplications.first(where: { $0.bundleIdentifier == Constants.Identifiers.dockBundleID })
+        // The Dock only changes when it is relaunched.
+        if let cachedDockProcess, !cachedDockProcess.isTerminated {
+            return cachedDockProcess
+        }
+        cachedDockProcess = workspace.runningApplications.first(where: { $0.bundleIdentifier == Constants.Identifiers.dockBundleID })
+        return cachedDockProcess
     }
 
     func isPointNearDockArea(_ point: CGPoint) -> Bool {
@@ -57,10 +100,9 @@ class DockService {
             return false
         }
 
-        let dockHeight = getDockHeight()
-        let magnificationHeight = getDockMagnificationSize()
-        let maxDockHeight = max(dockHeight, magnificationHeight) + 24
-        let orientation = getDockOrientation()
+        let geometry = dockGeometry()
+        let maxDockHeight = max(geometry.height, geometry.magnificationSize) + 24
+        let orientation = geometry.orientation
 
         switch orientation {
         case "left":
@@ -282,8 +324,12 @@ class DockService {
     
     // Add method to get dock height
     func getDockHeight() -> CGFloat {
+        dockGeometry().height
+    }
+
+    private func readDockHeight() -> CGFloat {
         // Get the dock's frame
-        guard let dockFrame = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first?.processIdentifier else {
+        guard let dockFrame = findDockProcess()?.processIdentifier else {
             return 70
         }
         

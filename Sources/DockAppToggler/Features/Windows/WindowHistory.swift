@@ -85,12 +85,6 @@ class WindowHistory {
         lastActiveApp = frontApp
     }
     
-    /// Get recent windows for an app
-    func getRecentWindows(for bundleIdentifier: String) -> [WindowInfo] {
-        // Get top 5 windows from the system
-        return getTopWindows()
-    }
-    
     /// Get all recent windows across all apps
     func getAllRecentWindows() -> [WindowInfo] {
         // Get top 5 windows from the system
@@ -118,54 +112,71 @@ class WindowHistory {
         return windows
     }
     
+    /// Window IDs of the (up to five) most recently used windows, front to
+    /// back. Same selection as `getTopWindows()` but without resolving the
+    /// Accessibility element of each window: the chooser only needs to know
+    /// *which* windows are recent in order to sort its rows, and it asks on
+    /// every dock hover. Resolving the elements costs a window-list query per
+    /// owning app (measured: ~10 ms per call, more when one of the frontmost
+    /// apps answers Accessibility slowly).
+    func recentWindowIDs() -> [CGWindowID] {
+        topWindowDescriptions().compactMap { $0[kCGWindowNumber as String] as? CGWindowID }
+    }
+
+    private static func isHistoryCandidate(_ window: [String: Any]) -> Bool {
+        // Only include normal windows
+        guard let layer = window[kCGWindowLayer as String] as? Int32,
+              // Allow normal windows and other standard window layers
+              (layer == kCGNormalWindowLevel || layer == kCGFloatingWindowLevel || layer == kCGModalPanelWindowLevel),
+              // Must have a title
+              let title = window[kCGWindowName as String] as? String,
+              !title.isEmpty,
+              // Must have an owner PID
+              window[kCGWindowOwnerPID as String] as? pid_t != nil,
+              // Must have a window ID
+              window[kCGWindowNumber as String] as? CGWindowID != nil,
+              // Must have bounds
+              let bounds = window[kCGWindowBounds as String] as? [String: CGFloat],
+              // Get owner name for filtering
+              let ownerName = window[kCGWindowOwnerName as String] as? String,
+              // Filter out some system windows
+              !ownerName.contains("Window Server"),
+              !ownerName.contains("Dock") else {
+            return false
+        }
+
+        // Check window size
+        let width = bounds["Width"] ?? 0
+        let height = bounds["Height"] ?? 0
+        return width >= 200 && height >= 200
+    }
+
+    /// CGWindow descriptions of the top 5 windows: on-screen windows in
+    /// z-order (front to back), then off-screen ones (minimized, hidden).
+    private func topWindowDescriptions() -> [[String: Any]] {
+        let limit = 5
+        // optionOnScreenOnly with kCGNullWindowID returns windows in proper z-order.
+        let windowList = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        var validWindows = Array(windowList.lazy.filter(Self.isHistoryCandidate).prefix(limit))
+        guard validWindows.count < limit else { return validWindows }
+
+        // Fewer than five on screen: fill up with off-screen windows. The
+        // full list is several times more expensive, so it is only fetched
+        // when it can contribute.
+        let onscreenWindowIDs = Set(windowList.compactMap { $0[kCGWindowNumber as String] as? CGWindowID })
+        let offscreenWindowList = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        for window in offscreenWindowList where validWindows.count < limit {
+            guard let windowID = window[kCGWindowNumber as String] as? CGWindowID,
+                  !onscreenWindowIDs.contains(windowID),
+                  Self.isHistoryCandidate(window) else { continue }
+            validWindows.append(window)
+        }
+        return validWindows
+    }
+
     /// Get the top 5 windows from the system
     private func getTopWindows() -> [WindowInfo] {
-        // Get all windows using CGWindow API with proper ordering - include all windows, including minimized ones
-        // Use optionOnScreenOnly with kCGNullWindowID to get windows in proper z-order (front to back)
-        let windowList = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
-        
-        // Also get off-screen windows (minimized, hidden)
-        let offscreenWindowList = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
-        
-        // Create a set of window IDs from the on-screen list to avoid duplicates
-        let onscreenWindowIDs = Set(windowList.compactMap { $0[kCGWindowNumber as String] as? CGWindowID })
-        
-        // Add off-screen windows that aren't already in the on-screen list
-        let combinedWindowList = windowList + offscreenWindowList.filter {
-            guard let windowID = $0[kCGWindowNumber as String] as? CGWindowID else { return false }
-            return !onscreenWindowIDs.contains(windowID)
-        }
-        
-        // Filter and process windows
-        let validWindows = combinedWindowList
-            .filter { window in
-                // Only include normal windows
-                guard let layer = window[kCGWindowLayer as String] as? Int32,
-                      // Allow normal windows and other standard window layers
-                      (layer == kCGNormalWindowLevel || layer == kCGFloatingWindowLevel || layer == kCGModalPanelWindowLevel),
-                      // Must have a title
-                      let title = window[kCGWindowName as String] as? String,
-                      !title.isEmpty,
-                      // Must have an owner PID
-                      let ownerPID = window[kCGWindowOwnerPID as String] as? pid_t,
-                      // Must have a window ID
-                      let windowID = window[kCGWindowNumber as String] as? CGWindowID,
-                      // Must have bounds
-                      let bounds = window[kCGWindowBounds as String] as? [String: CGFloat],
-                      // Get owner name for filtering
-                      let ownerName = window[kCGWindowOwnerName as String] as? String,
-                      // Filter out some system windows
-                      !ownerName.contains("Window Server"),
-                      !ownerName.contains("Dock") else {
-                    return false
-                }
-                
-                // Check window size
-                let width = bounds["Width"] ?? 0
-                let height = bounds["Height"] ?? 0
-                return width >= 200 && height >= 200
-            }
-            .prefix(5) // Only take top 5 windows
+        let validWindows = topWindowDescriptions()
         
         // Convert to WindowInfo objects with proper window bounds
         return validWindows.compactMap { window -> WindowInfo? in

@@ -1,6 +1,10 @@
 import Foundation
 
 /// Centralized logging functionality with different log levels and emoji indicators
+///
+/// Messages are autoclosures: the hover and mouse-move paths log on every
+/// event, and building the interpolated string (frames, app names, window
+/// lists) must cost nothing while the corresponding switch is off.
 enum Logger {
     private static let debugLoggingEnabled: Bool = {
         let environment = ProcessInfo.processInfo.environment
@@ -14,38 +18,38 @@ enum Logger {
         return value == "1" || value == "true" || value == "yes" || value == "on"
     }()
 
-    static func debug(_ message: String) {
+    static func debug(_ message: @autoclosure () -> String) {
         #if DEBUG
         guard debugLoggingEnabled else { return }
-        print("🔍 \(message)")
-        #endif
-    }
-    
-    static func info(_ message: String) {
-        #if DEBUG
-        guard debugLoggingEnabled else { return }
-        print("ℹ️ \(message)")
-        #endif
-    }
-    
-    static func warning(_ message: String) {
-        print("⚠️ \(message)")
-    }
-    
-    static func error(_ message: String) {
-        print("❌ \(message)")
-    }
-    
-    static func success(_ message: String) {
-        #if DEBUG
-        guard debugLoggingEnabled else { return }
-        print("✅ \(message)")
+        print("🔍 \(message())")
         #endif
     }
 
-    static func perf(_ category: String, _ message: String) {
+    static func info(_ message: @autoclosure () -> String) {
+        #if DEBUG
+        guard debugLoggingEnabled else { return }
+        print("ℹ️ \(message())")
+        #endif
+    }
+
+    static func warning(_ message: @autoclosure () -> String) {
+        print("⚠️ \(message())")
+    }
+
+    static func error(_ message: @autoclosure () -> String) {
+        print("❌ \(message())")
+    }
+
+    static func success(_ message: @autoclosure () -> String) {
+        #if DEBUG
+        guard debugLoggingEnabled else { return }
+        print("✅ \(message())")
+        #endif
+    }
+
+    static func perf(_ category: String, _ message: @autoclosure () -> String) {
         guard perfLoggingEnabled else { return }
         let uptime = String(format: "%.3f", ProcessInfo.processInfo.systemUptime)
-        print("⏱️ [\(uptime)] [\(category)] \(message)")
+        print("⏱️ [\(uptime)] [\(category)] \(message())")
     }
 }

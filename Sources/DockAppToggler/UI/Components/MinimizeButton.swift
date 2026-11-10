@@ -35,13 +35,7 @@ class MinimizeButton: NSButton {
             Constants.UI.Theme.iconSecondaryTintColor.withAlphaComponent(0.2)
         self.layer?.backgroundColor = initialColor.cgColor
         
-        // Configure the minus symbol with adjusted size
-        let config = NSImage.SymbolConfiguration(pointSize: 9, weight: .semibold)
-            .applying(.init(paletteColors: [.systemGray]))
-        let minusImage = NSImage(systemSymbolName: "minus", accessibilityDescription: "Minimize")?
-            .withSymbolConfiguration(config)
-        self.image = minusImage
-        
+        // The symbol image itself is set by updateMinimizedState(_:) below.
         self.contentTintColor = .systemGray
         self.alphaValue = 0.8
         

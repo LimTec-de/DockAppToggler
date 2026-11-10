@@ -136,6 +136,11 @@ class WindowChooserView: NSView {
                 return true
             }
             
+            // The listing that produced this entry already read the size.
+            if let size = windowInfo.size {
+                return size.width >= 200 && size.height >= 200
+            }
+
             // For regular windows, check size
             var pid: pid_t = 0
             if AXUIElementGetPid(windowInfo.window, &pid) == .success {
@@ -179,17 +184,17 @@ class WindowChooserView: NSView {
         
         Logger.debug("Windows after size filtering: \(filteredWindows.count)")
         
-        // Get recent windows for this app
-        let recentWindows = WindowHistory.shared.getRecentWindows(for: app.bundleIdentifier ?? "")
-        let recentWindowIds = Set(recentWindows.compactMap { $0.cgWindowID })
+        // Recently used windows (front to back); only their IDs matter here.
+        let recentWindowIDList = WindowHistory.shared.recentWindowIDs()
+        let recentWindowIds = Set(recentWindowIDList)
         
         // Sort windows based on history mode
         if isHistory {
             // In history mode, sort purely by recency (newest first)
             return filteredWindows.sorted { win1, win2 in
                 // Get indices from recent windows list for sorting
-                let index1 = recentWindows.firstIndex { $0.cgWindowID == win1.cgWindowID } ?? Int.max
-                let index2 = recentWindows.firstIndex { $0.cgWindowID == win2.cgWindowID } ?? Int.max
+                let index1 = win1.cgWindowID.flatMap { recentWindowIDList.firstIndex(of: $0) } ?? Int.max
+                let index2 = win2.cgWindowID.flatMap { recentWindowIDList.firstIndex(of: $0) } ?? Int.max
                 return index1 < index2
             }
         } else {
@@ -207,14 +212,16 @@ class WindowChooserView: NSView {
         }
     }
     
-    init(windows: [WindowInfo], appName: String, app: NSRunningApplication, iconCenter: NSPoint, isHistory: Bool = false, callback: @escaping (AXUIElement, Bool) -> Void) {
+    /// - Parameter presorted: `windows` already went through `sortWindows`
+    ///   (the controller needs that list for the window height anyway).
+    init(windows: [WindowInfo], appName: String, app: NSRunningApplication, iconCenter: NSPoint, isHistory: Bool = false, presorted: Bool = false, callback: @escaping (AXUIElement, Bool) -> Void) {
         // Store history mode
         self.isHistoryMode = isHistory
         
         Logger.debug("WindowChooserView init - Initial windows count: \(windows.count)")
         
         // Use static method to filter and sort windows, passing the app and history mode
-        self.options = WindowChooserView.sortWindows(windows, app: app, isHistory: isHistory)
+        self.options = presorted ? windows : WindowChooserView.sortWindows(windows, app: app, isHistory: isHistory)
         Logger.debug("WindowChooserView init - After filtering count: \(self.options.count)")
         
         self.callback = callback
@@ -273,6 +280,22 @@ class WindowChooserView: NSView {
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
+
+    /// Title and rows are laid out from the top edge. When the view's height
+    /// changes, keep them attached to the top instead of to the (bottom-left)
+    /// origin, where AppKit would leave them.
+    override func resizeSubviews(withOldSize oldSize: NSSize) {
+        let delta = bounds.height - oldSize.height
+        guard delta != 0 else { return }
+        for subview in subviews {
+            subview.setFrameOrigin(NSPoint(x: subview.frame.origin.x, y: subview.frame.origin.y + delta))
+        }
+    }
+
+    /// Frames of the title and of the window rows (top to bottom), for layout checks.
+    var layoutSnapshot: (title: NSRect, rows: [NSRect]) {
+        (titleField?.frame ?? .zero, buttons.sorted { $0.tag < $1.tag }.map(\.frame))
+    }
     
     private func setupTitle(_ appName: String) {
         titleField = NSTextField(frame: NSRect(
@@ -312,13 +335,20 @@ class WindowChooserView: NSView {
             }
         }
         
+        // Everything a row shows about its window (minimized, maximized,
+        // snapped, on the other display) is read once per row: three
+        // Accessibility round trips instead of about fifteen, and the screen
+        // layout once per menu instead of once per button.
+        let screenLayout = ScreenLayout.current()
+
         for (index, windowInfo) in options.enumerated() {
             /*Logger.debug("Creating button for window:")
             Logger.debug("  - Index: \(index)")
             Logger.debug("  - Name: \(windowInfo.name)")
             Logger.debug("  - ID: \(windowInfo.cgWindowID ?? 0)")*/
             
-            let button = createButton(for: windowInfo, at: index)
+            let rowState = readRowState(for: windowInfo, screenLayout: screenLayout)
+            let button = createButton(for: windowInfo, at: index, isMinimized: rowState.isMinimized)
             let closeButton = createCloseButton(for: windowInfo, at: index)
             
             addSubview(button)
@@ -335,23 +365,15 @@ class WindowChooserView: NSView {
             if !windowInfo.isAppElement {  // Remove the cgWindowID check
                 // Add minimize button only in normal mode
                 if !isHistoryMode {
-                    let hideButton = createHideButton(for: windowInfo, at: index)
+                    let hideButton = createHideButton(for: windowInfo, at: index, isMinimized: rowState.isMinimized)
                     addSubview(hideButton)
                     hideButtons.append(hideButton)
-                    
-                    // Update minimize button state
-                    if let minimizeButton = hideButtons.first(where: { $0.tag == index }) as? MinimizeButton {
-                        var minimizedValue: AnyObject?
-                        let isMinimized = AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success &&
-                                         (minimizedValue as? Bool == true)
-                        minimizeButton.updateMinimizedState(isMinimized)
-                    }
                 }
                 
                 // Always create window control buttons for actual windows
-                let leftButton = createSideButton(for: windowInfo, at: index, isLeft: true)
-                let centerButton = createSideButton(for: windowInfo, at: index, isLeft: false, isCenter: true)
-                let rightButton = createSideButton(for: windowInfo, at: index, isLeft: false)
+                let leftButton = createSideButton(for: windowInfo, at: index, isLeft: true, placement: rowState.placement)
+                let centerButton = createSideButton(for: windowInfo, at: index, isLeft: false, isCenter: true, placement: rowState.placement)
+                let rightButton = createSideButton(for: windowInfo, at: index, isLeft: false, placement: rowState.placement)
                 
                 addSubview(leftButton)
                 addSubview(centerButton)
@@ -361,6 +383,82 @@ class WindowChooserView: NSView {
                 sideButtons.append(rightButton)
             }
         }
+    }
+
+    /// Screen geometry the row buttons are judged against.
+    private struct ScreenLayout {
+        let mainVisibleFrame: NSRect?
+        /// Frames of all displays except the main one; empty with a single display.
+        let secondaryFrames: [NSRect]
+
+        static func current() -> ScreenLayout {
+            let main = NSScreen.main
+            let screens = NSScreen.screens
+            let secondary = (screens.count > 1 && main != nil)
+                ? screens.filter { $0 != main }.map(\.frame)
+                : []
+            return ScreenLayout(mainVisibleFrame: main?.visibleFrame, secondaryFrames: secondary)
+        }
+    }
+
+    private struct WindowPlacement {
+        var isMaximized = false
+        var isSnappedLeft = false
+        var isSnappedRight = false
+        var isOnSecondaryDisplay = false
+    }
+
+    private struct RowState {
+        var isMinimized = false
+        var placement = WindowPlacement()
+    }
+
+    private func readRowState(for windowInfo: WindowInfo, screenLayout: ScreenLayout) -> RowState {
+        var state = RowState()
+        // An app entry has neither a minimized state nor a frame.
+        guard !windowInfo.isAppElement else { return state }
+
+        var minimizedValue: AnyObject?
+        state.isMinimized = AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success &&
+            (minimizedValue as? Bool == true)
+
+        if let windowFrame = getWindowFrame(windowInfo.window) {
+            if let visibleFrame = screenLayout.mainVisibleFrame {
+                state.placement.isMaximized = Self.isMaximized(windowFrame, visibleFrame: visibleFrame)
+                state.placement.isSnappedLeft = Self.isSnapped(windowFrame, visibleFrame: visibleFrame, onLeft: true)
+                state.placement.isSnappedRight = Self.isSnapped(windowFrame, visibleFrame: visibleFrame, onLeft: false)
+            }
+            state.placement.isOnSecondaryDisplay = Self.isOnSecondaryDisplay(windowFrame, secondaryFrames: screenLayout.secondaryFrames)
+        }
+        return state
+    }
+
+    private static func isMaximized(_ windowFrame: CGRect, visibleFrame: NSRect) -> Bool {
+        // Consider window maximized if it covers more than 80% of screen space
+        let windowArea = windowFrame.width * windowFrame.height
+        let screenArea = visibleFrame.width * visibleFrame.height
+        return (windowArea / screenArea) * 100 > 80
+    }
+
+    private static func isSnapped(_ windowFrame: CGRect, visibleFrame: NSRect, onLeft: Bool) -> Bool {
+        let margin = Constants.UI.screenEdgeMargin
+        let expectedWidth = (visibleFrame.width - (margin * 3)) / 2
+
+        // Calculate expected positions
+        let leftPosition = visibleFrame.minX + margin
+        let rightPosition = visibleFrame.maxX - expectedWidth - margin
+
+        let tolerance: CGFloat = 10.0
+        let widthTolerance: CGFloat = 20.0  // Separate tolerance for width
+        let isExpectedWidth = abs(windowFrame.width - expectedWidth) < widthTolerance
+
+        return abs(windowFrame.minX - (onLeft ? leftPosition : rightPosition)) < tolerance && isExpectedWidth
+    }
+
+    private static func isOnSecondaryDisplay(_ windowFrame: CGRect, secondaryFrames: [NSRect]) -> Bool {
+        // Check if window center is on any non-main screen
+        let windowCenter = CGPoint(x: windowFrame.midX, y: windowFrame.midY)
+        return secondaryFrames.contains { $0.contains(windowCenter) }
     }
 
     private func clearButtonsForRefresh() {
@@ -451,7 +549,7 @@ class WindowChooserView: NSView {
         // No need to adjust button position since we're using padding in the title
     }
     
-    private func createButton(for windowInfo: WindowInfo, at index: Int) -> NSButton {
+    private func createButton(for windowInfo: WindowInfo, at index: Int, isMinimized: Bool) -> NSButton {
         let button = NSButton()
         
         // Adjust button width and position based on whether it needs control buttons
@@ -476,12 +574,12 @@ class WindowChooserView: NSView {
             height: Constants.UI.buttonHeight
         )
         
-        configureButton(button, title: windowInfo.name, tag: index)
+        configureButton(button, title: windowInfo.name, tag: index, isMinimized: isMinimized)
         
         return button
     }
     
-    private func createHideButton(for windowInfo: WindowInfo, at index: Int) -> NSButton {
+    private func createHideButton(for windowInfo: WindowInfo, at index: Int, isMinimized: Bool) -> NSButton {
         let button = MinimizeButton(
             frame: NSRect(
                 x: Constants.UI.windowPadding + 24,
@@ -494,11 +592,9 @@ class WindowChooserView: NSView {
             action: #selector(hideButtonClicked(_:))
         )
         
-        // Check initial minimize state
-        var minimizedValue: AnyObject?
-        if AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success,
-           let isMinimized = minimizedValue as? Bool {
-            button.updateMinimizedState(isMinimized)
+        // Initial minimize state (the button starts out as "not minimized")
+        if isMinimized {
+            button.updateMinimizedState(true)
         }
         
         button.wantsLayer = true
@@ -517,7 +613,7 @@ class WindowChooserView: NSView {
         return button
     }
     
-    private func configureButton(_ button: NSButton, title: String, tag: Int) {
+    private func configureButton(_ button: NSButton, title: String, tag: Int, isMinimized: Bool) {
         // Truncate title if too long
         let maxTitleLength = isHistoryMode ? 45 : 60  // Shorter titles in history mode
         let truncatedTitle = title.count > maxTitleLength ? 
@@ -562,10 +658,6 @@ class WindowChooserView: NSView {
         button.lineBreakMode = .byTruncatingTail
         button.cell?.wraps = false
         
-        // Check if window is minimized and if it's the topmost window
-        var minimizedValue: AnyObject?
-        let isMinimized = AXUIElementCopyAttributeValue(windowInfo.window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success &&
-                          (minimizedValue as? Bool == true)
         minimizedStateByTag[tag] = isMinimized
         
         // Set initial color based on window state
@@ -1100,7 +1192,7 @@ class WindowChooserView: NSView {
     }
     
     // Add new method to create side buttons
-    private func createSideButton(for windowInfo: WindowInfo, at index: Int, isLeft: Bool, isCenter: Bool = false) -> NSButton {
+    private func createSideButton(for windowInfo: WindowInfo, at index: Int, isLeft: Bool, isCenter: Bool = false, placement: WindowPlacement) -> NSButton {
         let spacing = Constants.UI.sideButtonsSpacing
         let buttonWidth = Constants.UI.leftSideButtonWidth
         let totalWidth = buttonWidth * 3 + spacing * 2
@@ -1129,8 +1221,8 @@ class WindowChooserView: NSView {
         let accessibilityDescription: String
 
         if isCenter {
-            let isOnSecondary = isWindowOnSecondaryDisplay(windowInfo.window)
-            let isMaximized = isWindowMaximized(windowInfo.window)  // Add this line
+            let isOnSecondary = placement.isOnSecondaryDisplay
+            let isMaximized = placement.isMaximized
             let config = NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
                 .applying(.init(paletteColors: [isMaximized ? Constants.UI.Theme.iconTintColor : Constants.UI.Theme.iconSecondaryTintColor]))  // Update this line
 
@@ -1185,7 +1277,7 @@ class WindowChooserView: NSView {
         button.layer?.backgroundColor = .clear
         
         // Set initial color based on window position/state
-        let isInPosition = isCenter ? isWindowMaximized(windowInfo.window) : isWindowInPosition(windowInfo.window, onLeft: isLeft)
+        let isInPosition = isCenter ? placement.isMaximized : (isLeft ? placement.isSnappedLeft : placement.isSnappedRight)
         button.contentTintColor = isInPosition ? 
             Constants.UI.Theme.iconTintColor : 
             Constants.UI.Theme.iconSecondaryTintColor
@@ -1209,35 +1301,8 @@ class WindowChooserView: NSView {
     
     // Add method to check if window is maximized
     private func isWindowMaximized(_ window: AXUIElement) -> Bool {
-        guard let screen = NSScreen.main else { return false }
-        
-        var positionValue: AnyObject?
-        var sizeValue: AnyObject?
-        var position = CGPoint.zero
-        var size = CGSize.zero
-        
-        if AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &positionValue) == .success,
-           let cfPosition = positionValue,
-           CFGetTypeID(cfPosition) == AXValueGetTypeID(),
-           AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &sizeValue) == .success,
-           let cfSize = sizeValue,
-           CFGetTypeID(cfSize) == AXValueGetTypeID() {
-            let posRef = cfPosition as! AXValue
-            let sizeRef = cfSize as! AXValue
-            AXValueGetValue(posRef, .cgPoint, &position)
-            AXValueGetValue(sizeRef, .cgSize, &size)
-            
-            let visibleFrame = screen.visibleFrame
-            
-            // Calculate window coverage percentage
-            let windowArea = size.width * size.height
-            let screenArea = visibleFrame.width * visibleFrame.height
-            let coveragePercentage = (windowArea / screenArea) * 100
-            
-            // Consider window maximized if it covers more than 80% of screen space
-            return coveragePercentage > 80
-        }
-        return false
+        guard let screen = NSScreen.main, let windowFrame = getWindowFrame(window) else { return false }
+        return Self.isMaximized(windowFrame, visibleFrame: screen.visibleFrame)
     }
     
     // Add maximize window action
@@ -1477,45 +1542,8 @@ class WindowChooserView: NSView {
     
     // Add helper method to WindowChooserView to check window position
     private func isWindowInPosition(_ window: AXUIElement, onLeft: Bool) -> Bool {
-        guard let screen = NSScreen.main else { return false }
-        
-        var positionValue: AnyObject?
-        var sizeValue: AnyObject?
-        var position = CGPoint.zero
-        var size = CGSize.zero
-        
-        if AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &positionValue) == .success,
-           let cfPosition = positionValue,
-           CFGetTypeID(cfPosition) == AXValueGetTypeID(),
-           AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &sizeValue) == .success,
-           let cfSize = sizeValue,
-           CFGetTypeID(cfSize) == AXValueGetTypeID() {
-            let posRef = cfPosition as! AXValue
-            let sizeRef = cfSize as! AXValue
-            AXValueGetValue(posRef, .cgPoint, &position)
-            AXValueGetValue(sizeRef, .cgSize, &size)
-            
-            let visibleFrame = screen.visibleFrame
-            let margin = Constants.UI.screenEdgeMargin
-            let expectedWidth = (visibleFrame.width - (margin * 3)) / 2
-            
-            // Calculate expected positions
-            let leftPosition = visibleFrame.minX + margin
-            let rightPosition = visibleFrame.maxX - expectedWidth - margin
-            
-            // Increase tolerance for position and size checks
-            let tolerance: CGFloat = 10.0  // Increased from 5.0
-            let widthTolerance: CGFloat = 20.0  // Separate tolerance for width
-            
-            let isExpectedWidth = abs(size.width - expectedWidth) < widthTolerance
-            
-            if onLeft {
-                return abs(position.x - leftPosition) < tolerance && isExpectedWidth
-            } else {
-                return abs(position.x - rightPosition) < tolerance && isExpectedWidth
-            }
-        }
-        return false
+        guard let screen = NSScreen.main, let windowFrame = getWindowFrame(window) else { return false }
+        return Self.isSnapped(windowFrame, visibleFrame: screen.visibleFrame, onLeft: onLeft)
     }
     
     @objc private func moveWindowLeft(_ sender: NSButton) {
@@ -1538,23 +1566,8 @@ class WindowChooserView: NSView {
     
     // Add method to check if window is on secondary display
     private func isWindowOnSecondaryDisplay(_ window: AXUIElement) -> Bool {
-        guard NSScreen.screens.count > 1,
-              let mainScreen = NSScreen.main,
-              let windowFrame = getWindowFrame(window) else {
-            return false
-        }
-        
-        let windowCenter = CGPoint(
-            x: windowFrame.midX,
-            y: windowFrame.midY
-        )
-        
-        // Check if window center is on any non-main screen
-        return NSScreen.screens
-            .filter { $0 != mainScreen }
-            .contains { screen in
-                screen.frame.contains(windowCenter)
-            }
+        guard let windowFrame = getWindowFrame(window) else { return false }
+        return Self.isOnSecondaryDisplay(windowFrame, secondaryFrames: ScreenLayout.current().secondaryFrames)
     }
     
     // Add helper to get window frame
@@ -1754,6 +1767,11 @@ class WindowChooserView: NSView {
         )
     }
 
+    /// Whether the rows currently shown are exactly `sortedWindows`.
+    func showsSameWindows(as sortedWindows: [WindowInfo]) -> Bool {
+        hasSameWindowOrdering(as: sortedWindows)
+    }
+
     private func hasSameWindowOrdering(as windows: [WindowInfo]) -> Bool {
         guard options.count == windows.count else { return false }
 
@@ -1780,7 +1798,19 @@ class WindowChooserView: NSView {
         }
         
         // Use static method to filter and sort
-        let sortedWindows = WindowChooserView.sortWindows(windows, app: targetApp, isHistory: isHistoryMode)
+        applySortedWindows(WindowChooserView.sortWindows(windows, app: targetApp, isHistory: isHistoryMode))
+    }
+
+    /// Like `updateWindows`, for a list that already went through `sortWindows`.
+    func setSortedWindows(_ sortedWindows: [WindowInfo], forceNormalMode: Bool = false) {
+        if forceNormalMode {
+            self.isHistoryMode = false
+            titleField.stringValue = targetApp.localizedName ?? "Unknown"
+        }
+        applySortedWindows(sortedWindows)
+    }
+
+    private func applySortedWindows(_ sortedWindows: [WindowInfo]) {
         let windowsChanged = !hasSameWindowOrdering(as: sortedWindows)
         self.options = sortedWindows
         
@@ -1796,10 +1826,15 @@ class WindowChooserView: NSView {
             self.topmostWindow = frontmost.window
         }
         
-        // Update frame height based on filtered windows count
+        // Update frame height based on filtered windows count. This has to
+        // happen before the rows are rebuilt: they are positioned relative to
+        // this view's current height.
         let newHeight = Constants.UI.windowHeight(for: self.options.count)
         if let windowController = self.window?.windowController as? WindowChooserController {
             windowController.updateWindowSize(to: newHeight)
+        }
+        if frame.height != newHeight {
+            setFrameSize(NSSize(width: frame.width, height: newHeight))
         }
         
         if windowsChanged {

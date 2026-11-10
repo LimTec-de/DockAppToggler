@@ -65,9 +65,20 @@ class AccessibilityService {
         // Clean app name by removing special characters
         let cleanAppName = app.localizedName?.replacingOccurrences(of: "\u{200E}", with: "") ?? "Application"
         
+        // CGWindow information is only used for a handful of apps whose
+        // windows Accessibility does not report (see the guard below). For
+        // every other app the system-wide window list (about half of this
+        // function's run time) would be fetched and then discarded.
+        let appName = app.localizedName ?? ""
+        let specialWindowApp = ["NoMachine", "Parallels"].contains { appName.starts(with: $0) }
+        let isTrayApp = ["KeePassXC", "Bitwarden"].contains { appName.starts(with: $0) }
+        let usesCGWindows = app.isActive && isTrayApp || specialWindowApp
+
         // First get all windows using CGWindow API
         let cgWindowListOptions = CGWindowListOption([.optionAll])
-        let windowList = CGWindowListCopyWindowInfo(cgWindowListOptions, kCGNullWindowID) as? [[String: Any]] ?? []
+        let windowList = usesCGWindows
+            ? CGWindowListCopyWindowInfo(cgWindowListOptions, kCGNullWindowID) as? [[String: Any]] ?? []
+            : []
         
         // Store CGWindow information for debugging and matching
         var cgWindows: [(id: CGWindowID, name: String?, bounds: CGRect)] = []
@@ -85,15 +96,8 @@ class AccessibilityService {
             let windowAlpha = window[kCGWindowAlpha as String] as? Float
             let windowSharingState = window[kCGWindowSharingState as String] as? Int32
             
-            // Check if the app name starts with any of the allowed prefixes
-            let allowedPrefixes = ["NoMachine", "Parallels"]
-            let trayAppPrefixes = ["KeePassXC", "Bitwarden"]
-            let appName = app.localizedName ?? ""
-            let specialWindowApp = allowedPrefixes.contains { appName.starts(with: $0) }
-            let isTrayApp = trayAppPrefixes.contains { appName.starts(with: $0) }
-
             // Ensure the application is active
-            guard app.isActive && isTrayApp || specialWindowApp else { return nil }
+            guard usesCGWindows else { return nil }
             
             // Filter conditions for regular windows:
             // 1. Must belong to the app
@@ -225,7 +229,8 @@ class AccessibilityService {
                         bundleIdentifier: app.bundleIdentifier,
                         position: position,
                         size: size,
-                        bounds: getWindowBounds(window)
+                        // Position and size were read just above; no second query.
+                        bounds: position.flatMap { origin in size.map { CGRect(origin: origin, size: $0) } }
                     )
                     windows.append(windowInfo)
                 } else {
@@ -985,25 +990,3 @@ class AccessibilityService {
     }
 }
 
-// Add helper function to get window bounds
-private func getWindowBounds(_ window: AXUIElement) -> CGRect? {
-    var positionValue: CFTypeRef?
-    var sizeValue: CFTypeRef?
-    
-    guard AXUIElementCopyAttributeValue(window, Constants.Accessibility.frameKey, &positionValue) == .success,
-          AXUIElementCopyAttributeValue(window, Constants.Accessibility.sizeKey, &sizeValue) == .success,
-          CFGetTypeID(positionValue!) == AXValueGetTypeID(),
-          CFGetTypeID(sizeValue!) == AXValueGetTypeID() else {
-        return nil
-    }
-    
-    var position = CGPoint.zero
-    var size = CGSize.zero
-    
-    guard AXValueGetValue(positionValue as! AXValue, .cgPoint, &position),
-          AXValueGetValue(sizeValue as! AXValue, .cgSize, &size) else {
-        return nil
-    }
-    
-    return CGRect(origin: position, size: size)
-}
