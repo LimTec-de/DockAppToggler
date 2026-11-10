@@ -86,6 +86,17 @@ class WindowThumbnailView {
     @MainActor private static var lastPreviewShowTime: Date = .distantPast
     private static let minVisibleDuration: TimeInterval = 0.28
     
+    /// Identifies the preview request that may still put something on screen.
+    /// A request is prepared asynchronously (permission/sharing check, window
+    /// capture); every new request and every dismissal bumps this counter, and
+    /// work that resumes with an older value must not touch the panel. Without
+    /// it, a preview whose preparation outlived the hover appeared after the
+    /// chooser was already gone, and nothing was left to close it.
+    @MainActor private static var requestGeneration: UInt64 = 0
+    /// Bumped whenever the shared panel is (re)shown, so a fade-out that is
+    /// still animating does not order the panel out underneath a new preview.
+    @MainActor private static var displayGeneration: UInt64 = 0
+
     // Add cancellation support for thumbnail creation
     @MainActor private static var currentThumbnailTask: Task<Void, Never>?
     @MainActor private static var currentThumbnailRequestIdentifier: String?
@@ -1038,6 +1049,10 @@ class WindowThumbnailView {
         Self.currentThumbnailTask = nil
         Self.currentThumbnailRequestIdentifier = nil
 
+        // Whatever is still in flight for an older request is stale from here on.
+        Self.requestGeneration &+= 1
+        let generation = Self.requestGeneration
+
         // Cancel any pending cleanup - we want to reuse the window
         Self.cancelPendingCleanup()
 
@@ -1099,7 +1114,7 @@ class WindowThumbnailView {
                 guard let self,
                       let pending,
                       pending.instance == ObjectIdentifier(self) else { return }
-                await self.processThumbnailRequest(pending.windowInfo, withTimer: false, isDebounced: isMovingFast)
+                await self.processThumbnailRequest(pending.windowInfo, withTimer: false, isDebounced: isMovingFast, generation: generation)
             }
             return
         }
@@ -1124,7 +1139,7 @@ class WindowThumbnailView {
 
             // Process the debounced request
             Task { @MainActor in
-                await self.processThumbnailRequest(pending.windowInfo, withTimer: false, isDebounced: isMovingFast)
+                await self.processThumbnailRequest(pending.windowInfo, withTimer: false, isDebounced: isMovingFast, generation: generation)
             }
 
             Self.thumbnailDebounceTimer?.cancel()
@@ -1137,9 +1152,14 @@ class WindowThumbnailView {
     }
     
     // Extract thumbnail processing logic
-    @MainActor private func processThumbnailRequest(_ windowInfo: WindowInfo, withTimer: Bool, isDebounced: Bool) async {
+    @MainActor private func processThumbnailRequest(_ windowInfo: WindowInfo, withTimer: Bool, isDebounced: Bool, generation: UInt64) async {
         let requestIdentifier = thumbnailRequestIdentifier(for: windowInfo)
         let processingStart = ProcessInfo.processInfo.systemUptime
+        // The hover may have ended (or moved on) between scheduling and now.
+        guard generation == Self.requestGeneration else {
+            Logger.perf("preview", "process dropped stale id=\(requestIdentifier)")
+            return
+        }
         Logger.perf("preview", "process start id=\(requestIdentifier) debounced=\(isDebounced)")
         let cacheKey = getCacheKey(for: windowInfo)
         
@@ -1160,6 +1180,11 @@ class WindowThumbnailView {
             "preview",
             "availability id=\(requestIdentifier) permission=\(previewAvailability.hasPermission) shared=\(previewAvailability.sharingDetected) elapsed_ms=\(Int((ProcessInfo.processInfo.systemUptime - processingStart) * 1000))"
         )
+        // previewAvailability suspends; the preview may have been dismissed meanwhile.
+        guard generation == Self.requestGeneration else {
+            Logger.perf("preview", "availability dropped stale id=\(requestIdentifier)")
+            return
+        }
         guard previewAvailability.hasPermission && !previewAvailability.sharingDetected else {
             Logger.debug("Preview unavailable; showing fallback icon")
             showAppIconFallback(for: windowInfo)
@@ -1201,6 +1226,13 @@ class WindowThumbnailView {
                     thumbnail = await createWindowThumbnail(for: windowInfo)
                 }
                 
+                // The capture ran off the main thread; drop the result if the
+                // request was superseded or dismissed in the meantime.
+                guard generation == Self.requestGeneration else {
+                    Logger.perf("preview", "capture dropped stale id=\(requestIdentifier)")
+                    return
+                }
+
                 if let thumbnail = thumbnail {
                     // Check if task was cancelled before updating UI
                     guard !Task.isCancelled else { return }
@@ -1410,6 +1442,8 @@ class WindowThumbnailView {
     }
     
     func hideThumbnail(removePanel: Bool = false) {
+        Self.requestGeneration &+= 1
+
         // Cancel timer immediately
         autoCloseTimer?.cancel()
         autoCloseTimer = nil
@@ -1440,6 +1474,7 @@ class WindowThumbnailView {
 
     @MainActor
     func cancelPendingThumbnailWork() {
+        Self.requestGeneration &+= 1
         autoCloseTimer?.cancel()
         autoCloseTimer = nil
         Self.thumbnailDebounceTimer?.cancel()
@@ -1469,11 +1504,14 @@ class WindowThumbnailView {
         timer.setEventHandler {
             // Fade out and keep shared window alive for reuse between hovers.
             if let sharedWindow = sharedThumbnailWindow {
+                let displayGenerationAtFade = displayGeneration
                 NSAnimationContext.runAnimationGroup({ context in
                     context.duration = 0.08
                     context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
                     sharedWindow.animator().alphaValue = 0.0
                 }) {
+                    // A preview shown during the fade owns the panel again.
+                    guard displayGeneration == displayGenerationAtFade else { return }
                     sharedWindow.orderOut(nil)
                 }
             }
@@ -1637,6 +1675,8 @@ class WindowThumbnailView {
 
     
     func cleanup() {
+        Self.requestGeneration &+= 1
+
         // Check if previews are enabled
         guard Self.previewsEnabled else {
             Logger.debug("Window previews are disabled")
@@ -2092,6 +2132,8 @@ class WindowThumbnailView {
             frame.origin.x = targetScreen.visibleFrame.maxX - frame.width - 20
         }
         
+        Self.displayGeneration &+= 1
+
         if !panel.isVisible {
             Self.lastPreviewShowTime = Date()
             panel.alphaValue = 1.0  // Ensure window is fully visible
@@ -2100,6 +2142,14 @@ class WindowThumbnailView {
             panel.makeKey()
             WindowThumbnailView.activePreviewWindows.insert(panel)
         } else {
+            if panel.alphaValue < 1.0 {
+                // Still visible but fading out: take it back at full opacity.
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = 0
+                    panel.animator().alphaValue = 1.0
+                }
+                panel.alphaValue = 1.0
+            }
             let deltaX = abs(panel.frame.origin.x - frame.origin.x)
             let deltaY = abs(panel.frame.origin.y - frame.origin.y)
             guard deltaX > Self.minMoveDelta || deltaY > Self.minMoveDelta else { return }

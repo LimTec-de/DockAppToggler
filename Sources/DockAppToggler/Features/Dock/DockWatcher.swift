@@ -64,7 +64,10 @@ class DockWatcher: NSObject, NSMenuDelegate {
     }
     
     // Cross-thread state for event tap callback filtering (reduces MainActor dispatch overhead)
-    nonisolated(unsafe) private var _lastMouseEventTimeUnsafe: TimeInterval = 0
+    /// Limits Dock hit-testing to 20 Hz without ever losing the position the
+    /// pointer comes to rest at (see `TrailingThrottle`). Only touched on the
+    /// main thread: the event tap's run-loop source lives on the main run loop.
+    nonisolated(unsafe) private var _moveThrottle = TrailingThrottle(interval: 0.05)
     nonisolated(unsafe) private var _lastChooserHoverTickUnsafe: TimeInterval = 0
     nonisolated(unsafe) private var _lastEventTimeUnsafe: TimeInterval = 0
     nonisolated(unsafe) private var _isChooserVisibleUnsafe: Bool = false
@@ -88,7 +91,6 @@ class DockWatcher: NSObject, NSMenuDelegate {
     private let touchpadClickDebounceInterval: TimeInterval = 0.15
     private var clickedApp: NSRunningApplication?
     private let dismissalMargin: CGFloat = 20.0
-    private var lastMouseMoveTime: TimeInterval = 0
     private var lastDockHitTestTime: TimeInterval = 0
     private var lastDockHitTestPoint: CGPoint = .zero
     private var lastDockHitTestResult: (app: NSRunningApplication, url: URL, iconCenter: CGPoint)?
@@ -99,7 +101,6 @@ class DockWatcher: NSObject, NSMenuDelegate {
     private var showingWindowChooserOnClick: Bool = false
     private var skipNextClickProcessing: Bool = false
     private let eventTimeoutInterval: TimeInterval = 15.0
-    private let mouseMoveThrottleInterval: TimeInterval = 0.08
     private let dockHitTestCacheInterval: TimeInterval = 0.08
     private let dockHitTestMinimumMovement: CGFloat = 6.0
     private let heartbeatMissesBeforeReinit: Int = 3
@@ -622,7 +623,6 @@ class DockWatcher: NSObject, NSMenuDelegate {
         isMouseOverDock = false
         showingWindowChooserOnClick = false
         lastClickTime = 0
-        lastMouseMoveTime = 0
         currentApp = nil
         lastWindowOrder = nil
         
@@ -724,10 +724,24 @@ class DockWatcher: NSObject, NSMenuDelegate {
                     }
 
                     // Dock-hit-test path: heavier work, throttle to 20 Hz.
-                    if now - watcher._lastMouseEventTimeUnsafe < 0.05 {
+                    // A dropped sample must still be evaluated once the
+                    // burst is over: the pointer may have stopped (no more
+                    // events) somewhere the last processed sample did not
+                    // see, and then nothing would ever close the chooser
+                    // and its preview.
+                    switch watcher._moveThrottle.submit(at: now) {
+                    case .process:
+                        break
+                    case .scheduleTrailing(let delay):
+                        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                            Task { @MainActor in
+                                watcher.evaluateTrailingMouseMove()
+                            }
+                        }
+                        return Unmanaged.passUnretained(event)
+                    case .trailingPending:
                         return Unmanaged.passUnretained(event)
                     }
-                    watcher._lastMouseEventTimeUnsafe = now
 
                     if !watcher._isChooserVisibleUnsafe,
                        !DockService.shared.isPointNearDockArea(location) {
@@ -974,7 +988,6 @@ class DockWatcher: NSObject, NSMenuDelegate {
             let sameApp = currentApp?.processIdentifier == app.processIdentifier
             Logger.perf("chooser", "reusing existing chooser sameApp=\(sameApp)")
             existingChooser.updateWindows(windows, for: app, at: point)
-            existingChooser.updatePosition(point)
             existingChooser.window?.makeKeyAndOrderFront(nil)
             _chooserFrameUnsafe = existingChooser.window?.frame ?? .zero
             currentApp = app
@@ -1039,13 +1052,24 @@ class DockWatcher: NSObject, NSMenuDelegate {
         startMenuWatchdog()
     }
     
-    @MainActor private func processMouseMovement(at point: CGPoint) {
-        // Throttle updates to reduce continuous accessibility hit-testing.
-        let currentTime = ProcessInfo.processInfo.systemUptime
-        if currentTime - lastMouseMoveTime < mouseMoveThrottleInterval {
+    /// Evaluates where the pointer came to rest after samples were dropped
+    /// by `_moveThrottle`. Uses the live pointer position, so samples that
+    /// took the chooser-hover shortcut in between are accounted for too.
+    @MainActor private func evaluateTrailingMouseMove() {
+        _moveThrottle.trailingFired(at: ProcessInfo.processInfo.systemUptime)
+        guard let location = CGEvent(source: nil)?.location else { return }
+        if !_isChooserVisibleUnsafe, !DockService.shared.isPointNearDockArea(location) {
             return
         }
-        lastMouseMoveTime = currentTime
+        processMouseMovement(at: location)
+    }
+
+    @MainActor private func processMouseMovement(at point: CGPoint) {
+        // Rate limiting happens in the event tap (`_moveThrottle`). A second
+        // throttle here used to drop every other sample (100 ms effective
+        // cadence) and, worse, the final sample of a movement and the
+        // re-evaluation after a click.
+        let currentTime = ProcessInfo.processInfo.systemUptime
         lastMenuInteractionTime = currentTime
 
         let mouseLocation = NSEvent.mouseLocation
@@ -1204,6 +1228,13 @@ class DockWatcher: NSObject, NSMenuDelegate {
     }
     
     @MainActor private func dismissChooserAndThumbnail() {
+        // Drop any in-flight chooser request first, also when no chooser is
+        // on screen yet: otherwise a window list that arrives after the
+        // pointer left the Dock opens a chooser nobody is hovering.
+        inflightChooserTask?.cancel()
+        inflightChooserTask = nil
+        chooserRequestSequence &+= 1
+
         guard windowChooser != nil else { return }
         Logger.perf(
             "chooser",
@@ -1212,11 +1243,6 @@ class DockWatcher: NSObject, NSMenuDelegate {
         
         cleanupTimer?.invalidate()
         cleanupTimer = nil
-
-        // Drop any in-flight chooser request so its eventual MainActor.run
-        // continuation cannot resurrect a chooser we just dismissed.
-        inflightChooserTask?.cancel()
-        inflightChooserTask = nil
 
         windowChooser?.chooserView?.thumbnailView?.hideThumbnail(removePanel: true)
         windowChooser?.chooserView?.thumbnailView?.cleanup()
