@@ -220,7 +220,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
         let separator = statusBar.statusItem(withLength: 0)
         separator.autosaveName = Self.alwaysHiddenSeparatorAutosaveName
         separator.behavior = NSStatusItem.Behavior()
-        separator.button?.image = makeTrayBoundarySeparatorImage(collapsed: isTrayLimitCollapsed)
+        separator.button?.image = makeAlwaysHiddenSeparatorImage()
         separator.button?.setAccessibilityIdentifier(Self.alwaysHiddenSeparatorAutosaveName)
         configureStatusButtonTooltip(separator.button, text: "Dauerhaft versteckte Tray-Icons")
         separator.isVisible = true
@@ -229,6 +229,28 @@ class StatusBarController: NSObject, NSMenuDelegate {
     }
 
     private func makeTrayBoundarySeparatorImage(collapsed: Bool) -> NSImage {
+        makeTrayMarkerImage { path in
+            if collapsed {
+                path.move(to: NSPoint(x: 5.5, y: 5.5))
+                path.line(to: NSPoint(x: 2.5, y: 9))
+                path.line(to: NSPoint(x: 5.5, y: 12.5))
+            } else {
+                path.move(to: NSPoint(x: 2.5, y: 5.5))
+                path.line(to: NSPoint(x: 5.5, y: 9))
+                path.line(to: NSPoint(x: 2.5, y: 12.5))
+            }
+        }
+    }
+
+    /// A plain vertical line: unlike the arrow it is a fixed border, not a toggle.
+    private func makeAlwaysHiddenSeparatorImage() -> NSImage {
+        makeTrayMarkerImage { path in
+            path.move(to: NSPoint(x: 4, y: 4.5))
+            path.line(to: NSPoint(x: 4, y: 13.5))
+        }
+    }
+
+    private func makeTrayMarkerImage(_ draw: (NSBezierPath) -> Void) -> NSImage {
         let image = NSImage(size: NSSize(width: Self.boundaryIconImageLength, height: 18))
         image.lockFocus()
         NSColor.black.withAlphaComponent(0.7).setStroke()
@@ -237,15 +259,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
         path.lineCapStyle = .round
         path.lineJoinStyle = .round
         path.lineWidth = 1.4
-        if collapsed {
-            path.move(to: NSPoint(x: 5.5, y: 5.5))
-            path.line(to: NSPoint(x: 2.5, y: 9))
-            path.line(to: NSPoint(x: 5.5, y: 12.5))
-        } else {
-            path.move(to: NSPoint(x: 2.5, y: 5.5))
-            path.line(to: NSPoint(x: 5.5, y: 9))
-            path.line(to: NSPoint(x: 2.5, y: 12.5))
-        }
+        draw(path)
         path.stroke()
 
         image.unlockFocus()
@@ -262,7 +276,6 @@ class StatusBarController: NSObject, NSMenuDelegate {
     private func updateTrayBoundarySeparatorAppearance() {
         trayBoundarySeparatorItem?.button?.image = makeTrayBoundarySeparatorImage(collapsed: isTrayLimitCollapsed)
         configureStatusButtonTooltip(trayBoundarySeparatorItem?.button, text: trayBoundarySeparatorToolTip)
-        alwaysHiddenSeparatorItem?.button?.image = makeTrayBoundarySeparatorImage(collapsed: isTrayLimitCollapsed)
         updateInternalTrayTooltipTargetsSoon()
     }
 
