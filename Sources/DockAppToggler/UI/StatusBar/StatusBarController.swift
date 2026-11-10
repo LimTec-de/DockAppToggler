@@ -554,13 +554,16 @@ class StatusBarController: NSObject, NSMenuDelegate {
 
     private func updateTrayIconLimiter() {
         if let nativeTrayController {
-            nativeTrayController.stop()
             trayLimitSeparatorItem?.length = 0
             trayLimitSeparatorItem?.isVisible = false
             trayBoundarySeparatorItem?.length = isTrayLimitEnabled ? Self.boundaryStatusItemLength : 0
             alwaysHiddenSeparatorItem?.length = isTrayLimitEnabled && isAlwaysHiddenTraySectionEnabled ? alwaysHiddenEditLength : 0
+            // Runs on every wake and display change: replace the restriction in
+            // place instead of releasing it, which would flash every hidden icon.
             if isTrayLimitEnabled {
                 nativeTrayController.set(collapsed: true, editing: false, alwaysHidden: isAlwaysHiddenTraySectionEnabled)
+            } else {
+                nativeTrayController.stop()
             }
             updateTrayBoundarySeparatorAppearance()
             return
@@ -820,9 +823,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
         UserDefaults.standard.set(false, forKey: "TrayIconAlwaysHiddenSectionEnabled")
         alwaysHiddenSeparatorItem?.length = 0
         if let nativeTrayController {
-            let collapsed = nativeTrayController.isCollapsed
-            nativeTrayController.stop()
-            nativeTrayController.set(collapsed: collapsed, editing: false, alwaysHidden: false)
+            nativeTrayController.set(collapsed: nativeTrayController.isCollapsed, editing: false, alwaysHidden: false)
             return
         }
 

@@ -48,7 +48,11 @@ Enable **Tray-Iconbegrenzung** in Settings. Icons left of the arrow hide when co
 
 macOS 27 visibility applies to whole apps. If an app has icons in several sections, its most visible section wins. System controls stay visible. When the requested icons exceed the space beside a built-in display's notch, a scrollable strip below the menu bar shows app symbols that trigger their original status-item action.
 
-This uses the private macOS 27 menu-bar visibility API, resolved at runtime. A failure is reported under **Problem mit Menüleisten-Icons…** in the app menu. Quitting releases the visibility restriction. Earlier macOS versions retain the separator-based implementation.
+Sections are remembered per app. Dragging an icon across the arrow moves it between visible and hidden; only **Dauerhaft versteckte Icons bearbeiten** moves icons into or out of the always-hidden section. A position alone is not taken as a choice, because macOS re-inserts every icon that was never dragged at the far left whenever its app starts: a restarted app keeps its section, and the icon of a new app starts out hidden, never always hidden.
+
+macOS can only show icons selectively for apps installed in `/Applications`. If DockAppToggler itself, or an app whose icon belongs in the bar, runs from elsewhere (a development build, for instance), hiding is suspended and all icons stay visible until that app quits.
+
+This uses the private macOS 27 menu-bar visibility API, resolved at runtime. A failure or suspension is reported under **Problem mit Menüleisten-Icons…** in the app menu. Quitting releases the visibility restriction. Earlier macOS versions retain the separator-based implementation.
 
 The opt-in live regression test is documented in [Tests/StatusBarTests/test_status_bar.py](Tests/StatusBarTests/test_status_bar.py).
 

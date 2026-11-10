@@ -52,3 +52,7 @@ pkill -f "${APP}/Contents/MacOS/${APP_NAME}" 2>/dev/null || true
 sleep 0.2
 open "$APP"
 echo "Launched $APP — if the tray icon needs Accessibility, grant it in System Settings."
+if [ "$(sw_vers -productVersion | cut -d. -f1)" -ge 27 ]; then
+    echo "Note: macOS 27 only shows menu-bar icons selectively for apps in /Applications. This build runs from"
+    echo "      .build, so the tray-icon limit suspends itself; install with ./build.sh to exercise it."
+fi
