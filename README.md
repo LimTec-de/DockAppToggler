@@ -44,7 +44,7 @@ Transform your macOS Dock into a powerful window management hub while maintainin
 
 ## Menu bar icons on macOS 27
 
-Enable **Tray-Iconbegrenzung** in Settings. Icons left of the arrow hide when collapsed; icons left of the always-hidden marker stay hidden when expanded. Use **Dauerhaft versteckte Icons bearbeiten** to reveal and rearrange all sections.
+Enable **Tray-Iconbegrenzung** in Settings. Icons left of the arrow hide when collapsed; icons left of the always-hidden marker stay hidden when expanded. Use **Dauerhaft versteckte Icons bearbeiten** to reveal and rearrange all sections. On macOS 27 the always-hidden marker, a vertical line, is only shown while the hidden icons are expanded.
 
 macOS 27 visibility applies to whole apps. If an app has icons in several sections, its most visible section wins. System controls stay visible. When the requested icons exceed the space beside a built-in display's notch, a scrollable strip below the menu bar shows app symbols that trigger their original status-item action.
 

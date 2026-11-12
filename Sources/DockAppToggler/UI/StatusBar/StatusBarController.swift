@@ -276,6 +276,15 @@ class StatusBarController: NSObject, NSMenuDelegate {
     private func updateTrayBoundarySeparatorAppearance() {
         trayBoundarySeparatorItem?.button?.image = makeTrayBoundarySeparatorImage(collapsed: isTrayLimitCollapsed)
         configureStatusButtonTooltip(trayBoundarySeparatorItem?.button, text: trayBoundarySeparatorToolTip)
+        if nativeTrayController != nil {
+            // The border only means something next to the icons it separates,
+            // so it appears with the hidden icons. Collapsed it keeps a
+            // zero-length slot, which preserves its place in the bar.
+            let isShown = isTrayLimitEnabled && !isTrayLimitCollapsed
+                && (isAlwaysHiddenTraySectionEnabled || isEditingAlwaysHiddenTraySection)
+            alwaysHiddenSeparatorItem?.length = isShown ? alwaysHiddenEditLength : 0
+            alwaysHiddenSeparatorItem?.button?.image = isShown ? makeAlwaysHiddenSeparatorImage() : nil
+        }
         updateInternalTrayTooltipTargetsSoon()
     }
 
@@ -570,7 +579,6 @@ class StatusBarController: NSObject, NSMenuDelegate {
             trayLimitSeparatorItem?.length = 0
             trayLimitSeparatorItem?.isVisible = false
             trayBoundarySeparatorItem?.length = isTrayLimitEnabled ? Self.boundaryStatusItemLength : 0
-            alwaysHiddenSeparatorItem?.length = isTrayLimitEnabled && isAlwaysHiddenTraySectionEnabled ? alwaysHiddenEditLength : 0
             // Runs on every wake and display change: replace the restriction in
             // place instead of releasing it, which would flash every hidden icon.
             if isTrayLimitEnabled {
