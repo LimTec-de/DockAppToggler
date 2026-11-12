@@ -37,8 +37,9 @@ final class NativeTrayController {
     private var state: State?
     /// An editing session whose arrangement has not been read back yet.
     private var arrangementEdited = false
-    /// Without a stored layout, the arrangement made with earlier versions is
-    /// adopted, including its always-hidden section, until icons are first hidden.
+    /// Without a stored layout, the icons' sides of the divider are adopted
+    /// as they are until icons are first hidden. The always-hidden marker is
+    /// not: it lands at a different spot after a restart as easily as icons do.
     private var adoptsArrangement: Bool
     private var assertion: MenuBarVisibility?
     private var appliedBundles: Set<String> = []
@@ -228,10 +229,10 @@ final class NativeTrayController {
         let rule: TrayMenuLayout.AlwaysHiddenRule
         let permanent = marker(alwaysHiddenIdentifier, in: bar)
         // An editing session and the first run take the bar as it is shown.
-        // Otherwise only the divider separates sections, and nothing enters
-        // the always-hidden one.
+        // Only the editing session also reads the always-hidden marker; at any
+        // other time nothing enters or leaves that section.
         let arranged = state.editing || arrangementEdited || adoptsArrangement
-        if let permanent, arranged, state.editing || arrangementEdited || state.alwaysHidden {
+        if let permanent, state.editing || arrangementEdited {
             rule = .arranged(permanent.frame)
         } else {
             rule = state.alwaysHidden || state.editing || arrangementEdited ? .kept : .disabled

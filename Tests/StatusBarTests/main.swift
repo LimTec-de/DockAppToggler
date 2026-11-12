@@ -131,8 +131,18 @@ let new = fixture("new"), outside = fixture("outside"), late = fixture("late")
         $0.contains(own) && $0.contains(visible) && $0.contains(hidden) && !$0.contains(permanentApp)
     }
     set(collapsed: true)
-    await expect("collapsing hides both hidden sections but neither divider nor visible icon", collapsed)
+    await expect("collapsing hides everything left of the divider but neither divider nor visible icon", collapsed)
     require(controller.isCollapsed && controller.errorMessage == nil, "Collapse was not reported")
+    set(collapsed: false)
+    await expect("without an editing session no icon is always hidden, wherever the marker sits") {
+        Set([own, visible, hidden, permanentApp]).isSubset(of: $0)
+    }
+    controller.stop()
+    set(collapsed: false, editing: true)
+    await expect("editing shows every icon") { Set([own, visible, hidden, permanentApp]).isSubset(of: $0) }
+    controller.stop()
+    set(collapsed: true)
+    await expect("collapsed after arranging the always-hidden section", collapsed)
     set(collapsed: false)
     await expect("expanding shows the hidden section only", expanded)
     for _ in 0..<10 {
