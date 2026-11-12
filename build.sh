@@ -67,26 +67,37 @@ mkdir -p "$FRAMEWORKS_DIR"
 print_status "Building Swift package..."
 swift package resolve
 
-# Build for Apple Silicon (arm64)
-print_status "Building for Apple Silicon (arm64)..."
-if ! swift build -c release -Xswiftc "-swift-version" -Xswiftc "6" --arch arm64; then
-    print_error "Swift build for arm64 failed"
-    exit 1
-fi
+# Builds one architecture and keeps its binary. Newer toolchains write every
+# architecture to the same products folder, so the next build overwrites it;
+# never pick binaries up from a fixed per-architecture path, which may be stale.
+SWIFT_BUILD=(swift build -c release -Xswiftc "-swift-version" -Xswiftc "6")
+build_arch() {
+    local arch="$1"
+    if ! "${SWIFT_BUILD[@]}" --arch "$arch"; then
+        print_error "Swift build for $arch failed"
+        exit 1
+    fi
+    PRODUCTS_DIR=$("${SWIFT_BUILD[@]}" --arch "$arch" --show-bin-path)
+    mkdir -p "$BUILD_DIR/universal/$arch"
+    cp "$PRODUCTS_DIR/$APP_NAME" "$BUILD_DIR/universal/$arch/$APP_NAME"
+    if ! lipo "$BUILD_DIR/universal/$arch/$APP_NAME" -verify_arch "$arch"; then
+        print_error "Build for $arch did not produce a $arch binary"
+        exit 1
+    fi
+}
 
-# Build for Intel (x86_64)
+print_status "Building for Apple Silicon (arm64)..."
+build_arch arm64
+
 print_status "Building for Intel (x86_64)..."
-if ! swift build -c release -Xswiftc "-swift-version" -Xswiftc "6" --arch x86_64; then
-    print_error "Swift build for x86_64 failed"
-    exit 1
-fi
+build_arch x86_64
 
 # Create universal binary
 print_status "Creating universal binary..."
 mkdir -p "$BUILD_DIR/universal/release"
 lipo -create \
-    "$BUILD_DIR/arm64-apple-macosx/release/$APP_NAME" \
-    "$BUILD_DIR/x86_64-apple-macosx/release/$APP_NAME" \
+    "$BUILD_DIR/universal/arm64/$APP_NAME" \
+    "$BUILD_DIR/universal/x86_64/$APP_NAME" \
     -output "$BUILD_DIR/universal/release/$APP_NAME"
 
 # Copy binary to app bundle
@@ -118,7 +129,10 @@ echo "APPL????" > "$CONTENTS_DIR/PkgInfo"
 
 # Copy Sparkle framework
 print_status "Copying Sparkle framework..."
-SPARKLE_PATH=$(find .build -name "Sparkle.framework" -type d | head -n 1)
+SPARKLE_PATH="$PRODUCTS_DIR/Sparkle.framework"
+if [ ! -d "$SPARKLE_PATH" ]; then
+    SPARKLE_PATH=$(find .build -name "Sparkle.framework" -type d | head -n 1)
+fi
 if [ -z "$SPARKLE_PATH" ]; then
     print_error "Sparkle framework not found"
     exit 1
@@ -184,6 +198,18 @@ if [ -d "$APP_BUNDLE_PATH" ]; then
     # Optional: Copy to Applications folder
     read -p "Do you want to install the app to /Applications? (y/N) " -n 1 -r
     echo
+    # `open` only activates an instance that is already running, so the old
+    # version would stay in memory and the new build would never start.
+    if pgrep -x "$APP_NAME" >/dev/null; then
+        print_status "Quitting the running $APP_NAME..."
+        BUNDLE_ID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$CONTENTS_DIR/Info.plist")
+        osascript -e "tell application id \"$BUNDLE_ID\" to quit" >/dev/null 2>&1 || true
+        for _ in $(seq 1 25); do
+            pgrep -x "$APP_NAME" >/dev/null || break
+            sleep 0.2
+        done
+        pkill -x "$APP_NAME" 2>/dev/null || true
+    fi
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         print_status "Installing to /Applications..."
         # Stage on the destination volume and replace the whole bundle. Copying
